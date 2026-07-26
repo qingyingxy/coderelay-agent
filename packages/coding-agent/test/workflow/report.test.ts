@@ -60,6 +60,7 @@ function createTerminalReportInput(status: "completed" | "failed" | "cancelled")
 		id: taskId,
 		workflowId,
 		kind: "agent",
+		accessMode: "writer",
 		title: "Direct request",
 		description: "Implement a CLI change",
 		status: status === "completed" ? "succeeded" : status === "failed" ? "failed" : "cancelled",

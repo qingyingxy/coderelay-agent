@@ -47,6 +47,7 @@ function task(stepId: string, status: Task["status"]): Task {
 		sourcePlanId: "plan-1",
 		sourcePlanStepId: stepId,
 		kind: "agent",
+		accessMode: "writer",
 		title: stepId,
 		description: stepId,
 		status,

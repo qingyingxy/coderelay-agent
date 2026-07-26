@@ -50,6 +50,7 @@ function createTask(overrides: Partial<Task> = {}): Task {
 		id: "task-1",
 		workflowId: "workflow-1",
 		kind: "agent",
+		accessMode: "writer",
 		title: "Root task",
 		description: "Execute the request",
 		status: "pending",
@@ -234,6 +235,7 @@ describe("task invariants", () => {
 				validateTask(
 					createTask({
 						kind: "control",
+						accessMode: "read_only",
 						assignment: {
 							executorKind: "main_agent",
 						},

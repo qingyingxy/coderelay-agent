@@ -32,6 +32,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "approve", description: "Approve the current Plan", argumentHint: "[comment]" },
 	{ name: "reject", description: "Reject the current Plan", argumentHint: "[reason]" },
 	{ name: "replan", description: "Create a revised Plan version", argumentHint: "[instructions]" },
+	{ name: "tasks", description: "Show the current Plan Task tree and dispatchable Tasks" },
+	{
+		name: "task",
+		description: "Inspect, retry, or cancel a Task",
+		argumentHint: "show <id> | retry <id> | cancel <id> [reason]",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

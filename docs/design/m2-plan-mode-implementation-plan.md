@@ -51,7 +51,7 @@
   └─ /replan  → 旧版本 superseded → 新 Draft → 再次只读规划
 ```
 
-R5 的 `executing` 只表示批准后的 Task Graph 已准备好。Task Ready 推导、调度和实际执行属于 R6，R5 不伪装这些能力已经完成。
+R5 的 `executing` 只表示批准后的 Task Graph 已准备好。Task Ready 推导和调度由现已完成的 R6 接续；真实 Subagent 与 Job Runtime 仍分别属于 R8、R9。
 
 ## 4. 状态与持久化
 
@@ -76,7 +76,7 @@ R5 的 `executing` 只表示批准后的 Task Graph 已准备好。Task Ready �
 - Workflow 与 Plan 相关测试：27 个文件、202 个用例通过。
 - Plan AgentSession 集成使用 Faux Provider，不调用真实模型。
 - `npm run demo:plan-workflow` 通过。
-- 演示确认批准前不创建计划中的文件，批准后只生成 Task，不越界执行 R6 Scheduler。
+- Plan 演示确认批准前不创建计划中的文件，批准后生成 Task；R6 调度另由 `npm run demo:task-scheduler` 独立演示。
 - `npm run check` 通过。
 
 演示说明见 [`M2 Plan Workflow 演示`](../demos/m2-plan-workflow.md)。

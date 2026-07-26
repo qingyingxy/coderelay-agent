@@ -62,6 +62,7 @@ function createTask(): Task {
 		id: "task-1",
 		workflowId: "workflow-1",
 		kind: "agent",
+		accessMode: "writer",
 		title: "Root task",
 		description: "Execute the request",
 		status: "pending",

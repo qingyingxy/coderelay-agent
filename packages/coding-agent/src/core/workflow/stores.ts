@@ -3,6 +3,7 @@ import { isPersistedWorkflowEventBatch } from "./event-log.ts";
 import type { AnyWorkflowEvent } from "./events.ts";
 import { validateWorkflowEventBatch } from "./events.ts";
 import { validateAttempt, validatePlan, validateTask, validateWorkflow } from "./invariants.ts";
+import { validateTaskGraph } from "./task-graph.ts";
 import type { DomainViolation } from "./transitions.ts";
 import { validateRevisionTransition } from "./transitions.ts";
 import type {
@@ -670,6 +671,9 @@ function validateRelationships(state: MutableStoreState): readonly DomainViolati
 				);
 			}
 		}
+		violations.push(
+			...validateTaskGraph([...state.tasks.values()].filter((task) => task.workflowId === workflow.id)),
+		);
 	}
 	for (const plan of state.plans.values()) {
 		if (!state.workflows.has(plan.workflowId)) {

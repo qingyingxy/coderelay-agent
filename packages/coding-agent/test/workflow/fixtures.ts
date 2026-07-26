@@ -48,6 +48,7 @@ export function createDirectStartBatch(
 		id: taskId,
 		workflowId,
 		kind: "agent",
+		accessMode: "writer",
 		title: "Root task",
 		description: "Execute the request",
 		status: "pending",

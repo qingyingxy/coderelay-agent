@@ -389,6 +389,12 @@ export function validateTask(task: Task): readonly DomainViolation[] {
 	if (task.kind === "control" && task.assignment) {
 		violations.push(violation("task.control_assignment", "Control task cannot have an executor assignment"));
 	}
+	if (task.accessMode !== "read_only" && task.accessMode !== "writer") {
+		violations.push(violation("task.invalid_access_mode", `Task access mode ${task.accessMode} is not supported`));
+	}
+	if (task.kind === "control" && task.accessMode !== "read_only") {
+		violations.push(violation("task.control_access_mode", "Control task must use read-only access"));
+	}
 	if (task.status === "blocked" && !task.blockedReason) {
 		violations.push(violation("task.blocked_reason_required", "Blocked task requires a reason"));
 	}

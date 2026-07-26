@@ -30,6 +30,7 @@
 		"check:model-catalog": "node scripts/publish-model-catalog.mjs --input .artifacts/model-catalog --dry-run",
 		"demo:direct-workflow": "tsx packages/coding-agent/examples/sdk/14-direct-workflow-demo.ts",
 		"demo:plan-workflow": "tsx packages/coding-agent/examples/sdk/15-plan-workflow-demo.ts",
+		"demo:task-scheduler": "tsx packages/coding-agent/examples/sdk/16-task-scheduler-demo.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run test:scripts && npm run test --workspaces --if-present",

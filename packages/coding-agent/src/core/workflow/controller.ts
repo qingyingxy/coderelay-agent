@@ -6,6 +6,7 @@ import { createWorkflowEventBatch } from "./events.ts";
 import { validatePlan } from "./invariants.ts";
 import { createModeDecision } from "./mode-decision.ts";
 import { selectExecutionMode } from "./mode-selector.ts";
+import { deriveTaskReadiness } from "./scheduler.ts";
 import type { WorkflowStore } from "./stores.ts";
 import { isAttemptTerminalStatus, isTaskTerminalStatus, isWorkflowTerminalStatus } from "./transitions.ts";
 import type {
@@ -22,6 +23,8 @@ import type {
 	PlanId,
 	ResourceUsage,
 	Task,
+	TaskAssignment,
+	TaskBlockedReason,
 	TaskId,
 	UserRequest,
 	VerificationId,
@@ -96,6 +99,28 @@ export interface PrepareMainAgentAttemptCommand extends WorkflowCommandBase {
 	readonly agentId?: string;
 }
 
+export interface PrepareTaskAttemptCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly attemptId: AttemptId;
+	readonly assignment: TaskAssignment;
+}
+
+export interface RefreshTaskReadinessCommand extends WorkflowCommandBase {}
+
+export interface RetryTaskCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+}
+
+export interface BlockTaskCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly reason: TaskBlockedReason;
+}
+
+export interface CancelTaskCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly reason: string;
+}
+
 interface RuntimeEventBase extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
@@ -132,6 +157,14 @@ export interface CompleteWorkflowCommand extends WorkflowCommandBase {
 	readonly unfinishedItems?: readonly string[];
 	readonly usage: ResourceUsage;
 	readonly durationMs: number;
+}
+
+export interface CompleteTaskCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly verificationId: VerificationId;
+	readonly summary: string;
+	readonly changedFiles: readonly string[];
+	readonly evidenceRefs?: readonly string[];
 }
 
 export interface FailWorkflowCommand extends WorkflowCommandBase {
@@ -334,6 +367,7 @@ export class WorkflowController {
 			id: command.rootTaskId,
 			workflowId: command.workflowId,
 			kind: "agent",
+			accessMode: "writer",
 			title: command.title?.trim() || "Direct request",
 			description: command.description?.trim() || command.request.text,
 			status: "pending",
@@ -436,6 +470,7 @@ export class WorkflowController {
 			id: command.rootTaskId,
 			workflowId: command.workflowId,
 			kind: "control",
+			accessMode: "read_only",
 			title: command.title?.trim() || "Plan workflow",
 			description: command.description?.trim() || command.request.text,
 			status: "pending",
@@ -576,7 +611,194 @@ export class WorkflowController {
 		return this.#commit(command, events);
 	}
 
+	refreshTaskReadiness(command: RefreshTaskReadinessCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.status !== "executing") {
+			fail("controller.workflow_not_executing", `Workflow ${workflow.id} is not executing`);
+		}
+		const tasks = this.#store.listTasks(workflow.id);
+		const readiness = deriveTaskReadiness(tasks);
+		if (readiness.readyTaskIds.length === 0 && readiness.blockedTasks.length === 0) {
+			return this.#result(workflow.id, undefined, false);
+		}
+		const occurredAt = this.#now();
+		const readyEvents: WorkflowEventDraft[] = readiness.readyTaskIds.map((taskId) => {
+			const task = this.#requireTask(taskId, workflow.id);
+			return {
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.ready",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: {
+					fromStatus: task.status,
+					toStatus: "ready",
+					facts: {
+						workflowExecuting: true,
+						dependenciesSucceeded: true,
+					},
+				},
+			};
+		});
+		const blockedEvents: WorkflowEventDraft[] = readiness.blockedTasks.map(({ taskId, dependencyIds }) => {
+			const task = this.#requireTask(taskId, workflow.id);
+			return {
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.blocked",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: {
+					fromStatus: task.status,
+					toStatus: "blocked",
+					facts: {
+						blockedReasonPresent: true,
+					},
+					reason: {
+						code: "dependency_failed",
+						message: `Dependencies did not succeed: ${dependencyIds.join(", ")}`,
+						since: occurredAt,
+						resumeStatus: "pending",
+					},
+				},
+			};
+		});
+		return this.#commit(command, [...readyEvents, ...blockedEvents]);
+	}
+
+	retryTask(command: RetryTaskCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.status !== "executing") {
+			fail("controller.workflow_not_executing", `Workflow ${workflow.id} is not executing`);
+		}
+		const task = this.#requireTask(command.taskId, workflow.id);
+		if (task.status === "ready") {
+			return this.#result(workflow.id, undefined, false);
+		}
+		if (task.status !== "blocked") {
+			fail("controller.task_not_retryable", `Task ${task.id} must be blocked before it can be retried`);
+		}
+		const dependenciesSucceeded = task.dependencyIds.every(
+			(dependencyId) => this.#store.getTask(dependencyId)?.status === "succeeded",
+		);
+		if (!dependenciesSucceeded) {
+			fail("controller.task_dependencies_incomplete", `Task ${task.id} still has incomplete dependencies`);
+		}
+		const event: WorkflowEventDraft = {
+			eventId: this.#eventId(),
+			entityId: task.id,
+			entityRevision: task.revision + 1,
+			eventType: "task.ready",
+			occurredAt: this.#now(),
+			actor: { kind: "user" },
+			payload: {
+				fromStatus: task.status,
+				toStatus: "ready",
+				facts: {
+					workflowExecuting: true,
+					dependenciesSucceeded: true,
+					blockResolved: true,
+				},
+			},
+		};
+		return this.#commit(command, [event]);
+	}
+
+	blockTask(command: BlockTaskCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.status !== "executing") {
+			fail("controller.workflow_not_executing", `Workflow ${workflow.id} is not executing`);
+		}
+		const task = this.#requireTask(command.taskId, workflow.id);
+		if (task.status === "blocked") {
+			return this.#result(workflow.id, undefined, false);
+		}
+		if (task.status !== "pending" && task.status !== "ready") {
+			fail("controller.task_not_blockable", `Task ${task.id} must be pending or ready before it can be blocked`);
+		}
+		const event: WorkflowEventDraft = {
+			eventId: this.#eventId(),
+			entityId: task.id,
+			entityRevision: task.revision + 1,
+			eventType: "task.blocked",
+			occurredAt: this.#now(),
+			actor: { kind: "controller" },
+			payload: {
+				fromStatus: task.status,
+				toStatus: "blocked",
+				facts: {
+					blockedReasonPresent: true,
+				},
+				reason: structuredClone(command.reason),
+			},
+		};
+		return this.#commit(command, [event]);
+	}
+
+	cancelTask(command: CancelTaskCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.status !== "executing") {
+			fail("controller.workflow_not_executing", `Workflow ${workflow.id} is not executing`);
+		}
+		const task = this.#requireTask(command.taskId, workflow.id);
+		if (isTaskTerminalStatus(task.status)) {
+			return this.#result(workflow.id, undefined, false);
+		}
+		if (task.status === "running" || task.status === "verifying") {
+			fail("controller.task_attempt_active", `Task ${task.id} must stop its active attempt before cancellation`);
+		}
+		const reason = command.reason.trim();
+		if (!reason) {
+			fail("controller.task_cancel_reason_required", "Task cancellation requires a reason");
+		}
+		const event: WorkflowEventDraft = {
+			eventId: this.#eventId(),
+			entityId: task.id,
+			entityRevision: task.revision + 1,
+			eventType: "task.cancelled",
+			occurredAt: this.#now(),
+			actor: { kind: "user" },
+			payload: {
+				fromStatus: task.status,
+				toStatus: "cancelled",
+				facts: {
+					activeAttemptStopped: true,
+				},
+				reason,
+			},
+		};
+		return this.#commit(command, [event]);
+	}
+
 	prepareMainAgentAttempt(command: PrepareMainAgentAttemptCommand): WorkflowCommandResult {
+		return this.prepareTaskAttempt({
+			...command,
+			assignment: {
+				executorKind: "main_agent",
+				agentId: command.agentId,
+			},
+		});
+	}
+
+	prepareTaskAttempt(command: PrepareTaskAttemptCommand): WorkflowCommandResult {
 		const duplicate = this.#duplicateResult(command);
 		if (duplicate) {
 			return duplicate;
@@ -588,6 +810,15 @@ export class WorkflowController {
 		const task = this.#requireTask(command.taskId, command.workflowId);
 		if (task.status !== "ready") {
 			fail("controller.task_not_ready", `Task ${task.id} must be ready before creating an attempt`);
+		}
+		if (task.kind === "control") {
+			fail("controller.control_task_not_executable", `Control Task ${task.id} cannot create an attempt`);
+		}
+		if (task.kind === "command" && command.assignment.executorKind !== "job") {
+			fail("controller.executor_mismatch", `Command Task ${task.id} requires a Job executor`);
+		}
+		if ((task.kind === "agent" || task.kind === "repair") && command.assignment.executorKind === "job") {
+			fail("controller.executor_mismatch", `Agent Task ${task.id} requires an Agent executor`);
 		}
 		if (this.#store.getAttempt(command.attemptId)) {
 			fail("controller.attempt_exists", `Attempt ${command.attemptId} already exists`);
@@ -604,8 +835,9 @@ export class WorkflowController {
 			taskId: task.id,
 			number: this.#store.listAttempts(task.id).length + 1,
 			status: "queued",
-			executorKind: "main_agent",
-			agentId: command.agentId,
+			executorKind: command.assignment.executorKind,
+			agentId: command.assignment.agentId,
+			jobId: command.assignment.jobId,
 			usage: zeroUsage(),
 		};
 		const attemptCreatedId = this.#eventId();
@@ -629,10 +861,7 @@ export class WorkflowController {
 				actor: { kind: "controller" },
 				causationId: attemptCreatedId,
 				payload: {
-					assignment: {
-						executorKind: "main_agent",
-						agentId: command.agentId,
-					},
+					assignment: structuredClone(command.assignment),
 				},
 			},
 			{
@@ -669,6 +898,79 @@ export class WorkflowController {
 			case "attempt_failed":
 				return this.#recordAttemptFailed(event);
 		}
+	}
+
+	completeTask(command: CompleteTaskCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		const verification = this.#store.getVerification(command.verificationId);
+		const verificationRevision = this.#store.getVerificationRevision(command.verificationId);
+		if (!verification || verificationRevision === undefined || verification.status !== "running") {
+			fail("controller.verification_not_running", `Verification ${command.verificationId} must be running`);
+		}
+		if (verification.workflowId !== workflow.id || verification.taskId !== task.id) {
+			fail(
+				"controller.verification_owner_mismatch",
+				`Verification ${verification.id} does not belong to task ${task.id}`,
+			);
+		}
+		const attempt = task.currentAttemptId ? this.#store.getAttempt(task.currentAttemptId) : undefined;
+		if (!attempt || attempt.status !== "succeeded") {
+			fail("controller.attempt_not_succeeded", `Task ${task.id} has no succeeded current attempt`);
+		}
+		if (task.status !== "verifying" || workflow.status !== "executing") {
+			fail("controller.task_not_ready_to_complete", `Task ${task.id} is not ready for completion`);
+		}
+		const occurredAt = this.#now();
+		const verificationPassedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: verificationPassedId,
+				entityId: verification.id,
+				entityRevision: verificationRevision + 1,
+				eventType: "verification.passed",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: {
+					result: {
+						...verification,
+						status: "passed",
+						summary: command.summary,
+						evidenceRefs: structuredClone(command.evidenceRefs ?? verification.evidenceRefs),
+						endedAt: occurredAt,
+					},
+				},
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.succeeded",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: verificationPassedId,
+				payload: {
+					fromStatus: task.status,
+					toStatus: "succeeded",
+					facts: {
+						attemptSucceeded: true,
+						taskResultPresent: true,
+						requiredVerificationPassed: true,
+					},
+					result: {
+						summary: command.summary,
+						changedFiles: structuredClone(command.changedFiles),
+						verificationIds: [verification.id],
+						completedAt: occurredAt,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
 	}
 
 	complete(command: CompleteWorkflowCommand): WorkflowCommandResult {
@@ -1011,6 +1313,7 @@ export class WorkflowController {
 				sourcePlanId: plan.id,
 				sourcePlanStepId: step.id,
 				kind: "agent",
+				accessMode: step.fileIntents.some(({ action }) => action !== "inspect") ? "writer" : "read_only",
 				title: step.title,
 				description: step.description,
 				status: "pending",
@@ -1597,6 +1900,10 @@ export class WorkflowController {
 	getRootTask(workflowId: WorkflowId): Task | undefined {
 		const workflow = this.#store.getWorkflow(workflowId);
 		return workflow?.rootTaskId ? this.#store.getTask(workflow.rootTaskId) : undefined;
+	}
+
+	getTask(taskId: TaskId): Task | undefined {
+		return this.#store.getTask(taskId);
 	}
 
 	listTasks(workflowId: WorkflowId): readonly Task[] {

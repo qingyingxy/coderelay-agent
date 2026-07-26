@@ -1424,14 +1424,19 @@ export class AgentSession {
 			commandName !== "/plan" &&
 			commandName !== "/approve" &&
 			commandName !== "/reject" &&
-			commandName !== "/replan"
+			commandName !== "/replan" &&
+			commandName !== "/tasks" &&
+			commandName !== "/task"
 		) {
 			return false;
 		}
 
 		let lines: readonly string[];
 		if (
-			(commandName === "/workflow" || commandName === "/workflow-cancel" || commandName === "/plan") &&
+			(commandName === "/workflow" ||
+				commandName === "/workflow-cancel" ||
+				commandName === "/plan" ||
+				commandName === "/tasks") &&
 			args.length > 0
 		) {
 			lines = [`Usage: ${commandName}`];
@@ -1477,6 +1482,37 @@ export class AgentSession {
 					...runtime.statusLines,
 					"Send the refinement details to run the read-only Planner for this version.",
 				];
+			}
+		} else if (commandName === "/tasks") {
+			const runtime = this._planWorkflowRuntime;
+			if (!runtime || runtime.workflow.status !== "executing") {
+				lines = ["No Plan Workflow is executing."];
+			} else {
+				runtime.refreshTaskReadiness();
+				const maxConcurrency = runtime.workflow.budget.maxConcurrentAgents ?? 4;
+				const dispatches = runtime.selectDispatches(maxConcurrency);
+				lines = [
+					`Tasks | ${runtime.workflow.status} | ${runtime.progress.succeededSteps}/${runtime.progress.totalSteps} steps`,
+					...runtime.taskTreeLines,
+					`Dispatchable: ${dispatches.length > 0 ? dispatches.map(({ taskId }) => taskId).join(", ") : "(none)"}`,
+				];
+			}
+		} else if (commandName === "/task") {
+			const runtime = this._planWorkflowRuntime;
+			const [action, taskId, ...detailParts] = args;
+			if (!runtime || runtime.workflow.status !== "executing") {
+				lines = ["No Plan Workflow is executing."];
+			} else if (!action || !taskId || !["show", "retry", "cancel"].includes(action)) {
+				lines = ["Usage: /task show <id> | /task retry <id> | /task cancel <id> [reason]"];
+			} else if (action === "show") {
+				lines = runtime.taskDetails(taskId);
+			} else if (action === "retry") {
+				runtime.retryTask(taskId);
+				lines = runtime.taskDetails(taskId);
+			} else {
+				runtime.cancelTask(taskId, detailParts.join(" ") || "Cancelled by user");
+				runtime.refreshTaskReadiness();
+				lines = runtime.taskDetails(taskId);
 			}
 		} else {
 			lines = this.getWorkflowReportLines() ?? ["No Workflow has been created in this session."];

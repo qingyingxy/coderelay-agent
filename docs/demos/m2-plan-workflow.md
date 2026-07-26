@@ -14,7 +14,7 @@
   → Workflow executing
 ```
 
-R5 只负责进入执行并生成 Task Graph；Task 调度与实际代码修改属于 R6。
+Plan 演示只负责进入执行并生成 Task Graph；Ready 推导和 Scheduler 由独立的 R6 演示覆盖。
 
 ## 运行
 
@@ -34,4 +34,4 @@ npm run demo:plan-workflow
 - `/approve` 保存用户审批意见和时间。
 - 每个 Plan Step 生成一个带 `sourcePlanId`、`sourcePlanStepId` 的 Task。
 - Task 依赖由 Plan Step 依赖转换，不使用 `[DONE:n]` 文本标记。
-- R6 Scheduler 尚未运行，因此批准后仍不会实际修改文件。
+- 本演示不启动 Scheduler，因此批准后仍不会实际修改文件；运行 `npm run demo:task-scheduler` 可验证 R6 调度。

@@ -189,4 +189,44 @@ describe("Plan Workflow AgentSession integration", () => {
 			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
 		expect(getMessageText(message)).toContain("plan | cancelled | Plan v1: rejected");
 	});
+
+	it("shows the Task tree and supports Task inspection and cancellation without provider calls", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(planContent("Task CLI")))]);
+
+		await harness.session.prompt("/plan");
+		await harness.session.prompt("Plan a Task CLI change");
+		await harness.session.prompt("/approve");
+		let replayed = replay(harness);
+		const planId = replayed.store.getWorkflow(replayed.workflowId)?.currentPlanId;
+		const firstTask = replayed.store
+			.listTasks(replayed.workflowId)
+			.find(({ sourcePlanId, sourcePlanStepId }) => sourcePlanId === planId && sourcePlanStepId === "step-1");
+		const secondTask = replayed.store
+			.listTasks(replayed.workflowId)
+			.find(({ sourcePlanId, sourcePlanStepId }) => sourcePlanId === planId && sourcePlanStepId === "step-2");
+		if (!firstTask || !secondTask) {
+			throw new Error("Expected materialized Plan Tasks");
+		}
+
+		await harness.session.prompt("/tasks");
+		await harness.session.prompt(`/task show ${firstTask.id}`);
+		await harness.session.prompt(`/task cancel ${firstTask.id} Superseded`);
+
+		const workflowMessages = harness
+			.eventsOfType("message_end")
+			.map(({ message }) => message)
+			.filter((message) => message.role === "custom" && message.customType === "workflow");
+		expect(workflowMessages.map(getMessageText).join("\n")).toContain("Dispatchable:");
+		expect(workflowMessages.map(getMessageText).join("\n")).toContain(`Task ${firstTask.id}`);
+		replayed = replay(harness);
+		expect(replayed.store.getTask(firstTask.id)?.status).toBe("cancelled");
+		expect(replayed.store.getTask(secondTask.id)).toMatchObject({
+			status: "blocked",
+			blockedReason: { code: "dependency_failed" },
+		});
+		expect(harness.faux.state.callCount).toBe(1);
+	});
 });

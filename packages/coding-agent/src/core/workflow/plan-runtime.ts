@@ -3,7 +3,9 @@ import type { SessionManager } from "../session-manager.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
 import { SessionWorkflowEventLog } from "./event-log.ts";
 import { derivePlanProgress } from "./plan-progress.ts";
+import { type TaskDispatch, TaskScheduler } from "./scheduler.ts";
 import { WorkflowStore } from "./stores.ts";
+import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type { Plan, PlanContent, PlanProgress, Task, UserRequest, Workflow } from "./types.ts";
 
@@ -106,6 +108,46 @@ export class PlanWorkflowRuntime {
 			`Goal: ${plan.goal || "(draft)"}`,
 			...plan.steps.map((step, index) => `${index + 1}. ${step.title}`),
 		];
+	}
+
+	get taskTreeLines(): readonly string[] {
+		return formatTaskTree(this.#workflowId, this.tasks);
+	}
+
+	selectDispatches(maxConcurrency: number): readonly TaskDispatch[] {
+		return new TaskScheduler({ maxConcurrency }).select(this.tasks);
+	}
+
+	taskDetails(taskId: string): readonly string[] {
+		const task = this.#controller.getTask(taskId);
+		if (!task || task.workflowId !== this.#workflowId) {
+			throw new Error(`Task ${taskId} does not exist in workflow ${this.#workflowId}`);
+		}
+		return formatTaskDetails(task, this.#controller.listAttempts(task.id));
+	}
+
+	refreshTaskReadiness(): void {
+		this.#controller.refreshTaskReadiness({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+		});
+	}
+
+	retryTask(taskId: string): void {
+		this.#controller.retryTask({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId,
+		});
+	}
+
+	cancelTask(taskId: string, reason: string): void {
+		this.#controller.cancelTask({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId,
+			reason,
+		});
 	}
 
 	submit(content: PlanContent): void {
