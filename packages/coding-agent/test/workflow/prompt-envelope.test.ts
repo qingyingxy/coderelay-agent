@@ -25,9 +25,21 @@ function createInput(): CreatePromptEnvelopeInput {
 		},
 		context: [
 			{
+				id: "profile",
+				source: "agent_profile",
+				content: "Execute only the assigned Worker Task",
+				required: true,
+			},
+			{
 				id: "request",
 				source: "user_request",
 				content: "Add a concise workflow status command",
+				required: true,
+			},
+			{
+				id: "task",
+				source: "task",
+				content: "Implement request: Make the requested CLI change",
 				required: true,
 			},
 		],
@@ -92,10 +104,10 @@ describe("PromptEnvelope", () => {
 	it("clones caller-owned context and schema data", () => {
 		const input = createInput();
 		const envelope = createPromptEnvelope(input);
-		(input.context as unknown as Array<{ content: string }>)[0]!.content = "Mutated";
+		(input.context as unknown as Array<{ content: string }>)[1]!.content = "Mutated";
 		(input.outputSchema.jsonSchema as Record<string, unknown>).type = "string";
 
-		expect(envelope.context[0]?.content).toBe("Add a concise workflow status command");
+		expect(envelope.context[1]?.content).toBe("Add a concise workflow status command");
 		expect(envelope.outputSchema.jsonSchema.type).toBe("object");
 	});
 

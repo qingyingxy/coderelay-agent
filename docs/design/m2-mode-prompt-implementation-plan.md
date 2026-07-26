@@ -52,7 +52,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.5：`DONE`
 - R4.6：`DONE`
 - R4.7：`DONE`
-- 下一项：R4.8
+- R4.8：`DONE`
+- 下一项：R4.9
 
 ## 6. R4.2 模式选择顺序
 
@@ -134,3 +135,27 @@ ModeSelector 把完整 `ModeAdvice` 作为 Agent 候选，但用户明确选择�
 - `outputSchema`：期望结构化输出的名称、版本和 JSON Schema。
 
 领域构造器校验必要字段、唯一 ID、版本、时间和输出 Schema，并复制调用方数据，避免创建后被外部修改。R4.7 不重新构建 Pi 的 System Prompt 或 Tool Schema；R4.8-R4.10 负责输入顺序、裁剪以及 AgentSession 适配。
+
+## 12. R4.8 Prompt 输入来源与顺序
+
+Envelope 使用以下规范顺序记录上下文来源：
+
+1. `agent_profile`
+2. `project_rule`
+3. `history`
+4. `user_request`
+5. `plan`
+6. `task`
+7. `handoff`
+8. `tool_schema`
+
+同一来源内保持调用方顺序，例如历史消息和多个项目规则不会被重排。创建 Envelope 时自动规范化顺序；恢复或读取已持久化 Envelope 时校验顺序，防止不同调用路径生成不同 Prompt。
+
+该顺序是结构化组装顺序，不把所有内容拼成一个字符串：
+
+- Agent Profile、强制约束和项目规则属于 System 层。
+- 历史位于当前用户需求之前。
+- 用户需求、Plan、当前 Task 和 Handoff 构成 Workflow 上下文。
+- Tool Schema 由 Pi AgentSession 的工具通道提供，Envelope 只记录来源与实际工具白名单。
+
+R4.8 不替代 Pi 当前的 System Prompt、Skills、Prompt Templates、项目上下文或 Tool Schema 组装。

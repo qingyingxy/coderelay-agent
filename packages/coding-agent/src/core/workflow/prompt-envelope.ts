@@ -8,9 +8,21 @@ export type PromptTaskContext = Pick<
 	"id" | "workflowId" | "title" | "description" | "status" | "dependencyIds" | "verificationRequirements"
 >;
 
+export const PROMPT_CONTEXT_SOURCE_ORDER = [
+	"agent_profile",
+	"project_rule",
+	"history",
+	"user_request",
+	"plan",
+	"task",
+	"handoff",
+	"tool_schema",
+] as const;
+export type PromptContextSource = (typeof PROMPT_CONTEXT_SOURCE_ORDER)[number];
+
 export interface PromptContextEntry {
 	readonly id: string;
-	readonly source: string;
+	readonly source: PromptContextSource;
 	readonly content: string;
 	readonly required: boolean;
 }
@@ -59,6 +71,20 @@ export class PromptEnvelopeError extends Error {
 	}
 }
 
+export function isPromptContextSource(value: unknown): value is PromptContextSource {
+	return typeof value === "string" && PROMPT_CONTEXT_SOURCE_ORDER.some((source) => source === value);
+}
+
+export function orderPromptContextEntries(entries: readonly PromptContextEntry[]): readonly PromptContextEntry[] {
+	return [...entries].sort((left, right) => {
+		const leftIndex = PROMPT_CONTEXT_SOURCE_ORDER.indexOf(left.source);
+		const rightIndex = PROMPT_CONTEXT_SOURCE_ORDER.indexOf(right.source);
+		return (
+			(leftIndex < 0 ? Number.MAX_SAFE_INTEGER : leftIndex) - (rightIndex < 0 ? Number.MAX_SAFE_INTEGER : rightIndex)
+		);
+	});
+}
+
 export function validatePromptEnvelope(envelope: PromptEnvelope): readonly PromptEnvelopeViolation[] {
 	const violations: PromptEnvelopeViolation[] = [];
 	const requireText = (value: string, code: string, message: string): void => {
@@ -99,10 +125,25 @@ export function validatePromptEnvelope(envelope: PromptEnvelope): readonly Promp
 		});
 	}
 	const contextIds = new Set<string>();
+	let previousContextSourceIndex = -1;
 	for (const entry of envelope.context) {
 		const id = entry.id.trim();
 		requireText(entry.id, "prompt_envelope.context_id_required", "Context entry id is required");
-		requireText(entry.source, "prompt_envelope.context_source_required", `Context entry ${id} requires a source`);
+		if (!isPromptContextSource(entry.source)) {
+			violations.push({
+				code: "prompt_envelope.invalid_context_source",
+				message: `Context entry ${id} has an unsupported source: ${entry.source}`,
+			});
+		} else {
+			const sourceIndex = PROMPT_CONTEXT_SOURCE_ORDER.indexOf(entry.source);
+			if (sourceIndex < previousContextSourceIndex) {
+				violations.push({
+					code: "prompt_envelope.context_order",
+					message: "PromptEnvelope context entries must use the canonical source order",
+				});
+			}
+			previousContextSourceIndex = sourceIndex;
+		}
 		requireText(entry.content, "prompt_envelope.context_content_required", `Context entry ${id} requires content`);
 		if (id && contextIds.has(id)) {
 			violations.push({
@@ -171,9 +212,11 @@ export function validatePromptEnvelope(envelope: PromptEnvelope): readonly Promp
 }
 
 export function createPromptEnvelope(input: CreatePromptEnvelopeInput): PromptEnvelope {
+	const clonedInput = structuredClone(input);
 	const envelope: PromptEnvelope = {
 		schemaVersion: PROMPT_ENVELOPE_SCHEMA_VERSION,
-		...structuredClone(input),
+		...clonedInput,
+		context: orderPromptContextEntries(clonedInput.context),
 	};
 	const violations = validatePromptEnvelope(envelope);
 	if (violations.length > 0) {
