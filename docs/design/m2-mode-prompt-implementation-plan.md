@@ -54,7 +54,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.7：`DONE`
 - R4.8：`DONE`
 - R4.9：`DONE`
-- 下一项：R4.10
+- R4.10：`DONE`
+- 下一项：R4.11
 
 ## 6. R4.2 模式选择顺序
 
@@ -182,3 +183,17 @@ R4.8 不替代 Pi 当前的 System Prompt、Skills、Prompt Templates、项目�
 5. Envelope 中的可选 Tool Schema 文本引用。
 
 同一来源内保持原顺序，因此历史总是从最旧条目开始裁剪。如果不可裁剪内容本身超过预算，返回明确错误，不静默删除安全约束、当前 Task 或必要 Handoff。
+
+## 14. R4.10 AgentSession 适配
+
+`PromptAgentSessionAdapter` 是 Prompt Pipeline 与 Pi `AgentSession` 之间的薄适配层，不创建第二套 Agent Loop、System Prompt、会话历史或 Tool Schema：
+
+- `agent_profile`、`project_rule`、`history` 和 `tool_schema` 由调用方预先配置的 AgentSession 管理，不重复拼入当前用户消息。
+- 当前 Task 使用 Envelope 的结构化 `task` 字段，只渲染一次；同源 `task` 上下文只保留追踪 ID。
+- `user_request`、`plan` 和 `handoff` 作为当前 Workflow 上下文传入。
+- 约束和输出 Schema 随当前 Task 传入，但实际权限不能依赖提示词，R7 仍需提供正式策略执行。
+- Envelope 工具集必须是 AgentSession 当前活动工具的子集；执行期间临时收紧，结束或失败后恢复，不能借 Prompt 扩大工具能力。
+- 调用 `AgentSession.prompt()` 时关闭 Prompt Template 展开并使用 `extension` 来源，避免再次解析 Workflow 命令或创建嵌套 Direct Workflow。
+- 同一个 AgentSession 同时只允许一个 Envelope 执行，忙碌时明确拒绝。
+
+独立 Planner、Reviewer 和 Subagent 的 AgentSession 创建与 Profile System Prompt 注入分别由 R5、R8 实现；R4.10 只固定可复用的执行接缝。
