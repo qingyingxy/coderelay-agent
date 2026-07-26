@@ -48,7 +48,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.1：`DONE`
 - R4.2：`DONE`
 - R4.3：`DONE`
-- 下一项：R4.4
+- R4.4：`DONE`
+- 下一项：R4.5
 
 ## 6. R4.2 模式选择顺序
 
@@ -73,3 +74,13 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - 有效的 `decidedAt` 时间。
 
 Direct Workflow 在创建 Workflow 和根 Task 的同一个 Event Batch 中持久化 `workflow.mode_decided`。Store 从该事件恢复完整决策，CLI 或 Agent 不能绕过 Controller 直接修改。
+
+## 8. R4.4 需求澄清门禁
+
+澄清门禁接收结构化的缺失信息候选，并返回三类结果：
+
+- `questions`：会改变实现且没有安全默认值，必须询问用户。
+- `assumptions`：存在安全默认值，记录采用的答案和原因后继续。
+- `ignoredCandidateIds`：不会实质改变实现的偏好，不打断用户。
+
+只要 `questions` 非空，`required` 就为 `true`，后续 Controller 才能进入 `clarifying`。门禁本身不调用 LLM、不修改 Workflow，也不把主观文本直接解释为状态事实；候选信息由后续 R4.5 的结构化建议或明确规则提供。
