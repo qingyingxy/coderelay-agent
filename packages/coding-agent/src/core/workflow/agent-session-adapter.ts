@@ -6,6 +6,7 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "../agent-sess
 import type { SessionManager } from "../session-manager.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
+import type { UpgradeDirectToPlanDecision } from "./direct-plan-upgrade.ts";
 import { SessionWorkflowEventLog } from "./event-log.ts";
 import {
 	buildBasicVerificationReport,
@@ -42,7 +43,7 @@ export interface WorkflowAgentSession {
 }
 
 export interface AgentSessionAdapterOptions {
-	readonly createId?: (kind: "command" | "attempt" | "verification") => string;
+	readonly createId?: (kind: "command" | "attempt" | "verification" | "plan") => string;
 	readonly now?: () => number;
 }
 
@@ -136,7 +137,7 @@ export class AgentSessionAdapter {
 	readonly #controller: WorkflowController;
 	readonly #workflowId: WorkflowId;
 	readonly #taskId: TaskId;
-	readonly #createId: (kind: "command" | "attempt" | "verification") => string;
+	readonly #createId: (kind: "command" | "attempt" | "verification" | "plan") => string;
 	readonly #now: () => number;
 	#unsubscribe?: () => void;
 	#activeAttemptId?: AttemptId;
@@ -148,6 +149,10 @@ export class AgentSessionAdapter {
 	#cancelling = false;
 	/** Memoized cancellation run so concurrent/repeated cancel calls share one flow. */
 	#cancelPromise?: Promise<void>;
+	/** True while a Direct run is stopping before the Workflow enters Planning. */
+	#upgradingToPlan = false;
+	/** Memoized upgrade run so concurrent/repeated requests share one flow. */
+	#planUpgradePromise?: Promise<void>;
 	/** In-flight mutation tool calls, keyed by toolCallId, awaiting their result. */
 	readonly #pendingMutations = new Map<string, string>();
 	/** Paths reported by successful edit/write tools across the whole workflow, in order. */
@@ -254,6 +259,9 @@ export class AgentSessionAdapter {
 	 * Repeated or concurrent calls share the same in-flight cancellation.
 	 */
 	async cancel(reason: string): Promise<void> {
+		if (this.#planUpgradePromise) {
+			await this.#planUpgradePromise;
+		}
 		this.#cancelPromise ??= this.#runCancellation(reason);
 		await this.#cancelPromise;
 	}
@@ -300,6 +308,55 @@ export class AgentSessionAdapter {
 		this.#pendingAgentEnd = undefined;
 	}
 
+	/**
+	 * Stop the current Direct run and atomically move its Workflow into Planning.
+	 *
+	 * The upgrade request is persisted before aborting the AgentSession. Abort-driven
+	 * settlement is suppressed, then the active Attempt is recorded as interrupted,
+	 * a draft Plan is created, and the Workflow enters Planning in one event batch.
+	 */
+	async upgradeToPlan(decision: UpgradeDirectToPlanDecision): Promise<void> {
+		if (this.#cancelPromise) {
+			await this.#cancelPromise;
+			return;
+		}
+		this.#planUpgradePromise ??= this.#runPlanUpgrade(decision);
+		await this.#planUpgradePromise;
+	}
+
+	async #runPlanUpgrade(decision: UpgradeDirectToPlanDecision): Promise<void> {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow || isWorkflowTerminalStatus(workflow.status) || workflow.status === "planning") {
+			return;
+		}
+		this.#upgradingToPlan = true;
+		try {
+			this.#controller.requestDirectPlanUpgrade({
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				decision,
+			});
+			await this.#session.abort();
+			await this.#session.waitForIdle();
+			const attemptUsage = this.#activeAttemptId ? this.#completedUsage() : zeroUsage();
+			this.#controller.finishDirectPlanUpgrade({
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				planId: this.#createId("plan"),
+				attemptUsage,
+				writeAdmissionClosed: true,
+				activeWriterStopped: true,
+			});
+			this.#workflowUsage = addResourceUsage(this.#workflowUsage, attemptUsage);
+			this.#activeAttemptId = undefined;
+			this.#pendingAgentEnd = undefined;
+		} catch (error) {
+			this.#upgradingToPlan = false;
+			throw error;
+		}
+	}
+
 	dispose(): void {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -335,7 +392,7 @@ export class AgentSessionAdapter {
 	};
 
 	#handleAgentStart(): void {
-		if (this.#cancelling) {
+		if (this.#cancelling || this.#upgradingToPlan) {
 			return;
 		}
 		this.#pendingAgentEnd = undefined;
@@ -407,7 +464,7 @@ export class AgentSessionAdapter {
 	#handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
 		// During cancellation the abort-driven run settlement is handled by the
 		// cancellation flow, not recorded as a normal success/failure.
-		if (this.#cancelling) {
+		if (this.#cancelling || this.#upgradingToPlan) {
 			this.#pendingAgentEnd = undefined;
 			return;
 		}
@@ -423,7 +480,7 @@ export class AgentSessionAdapter {
 	}
 
 	#handleAgentSettled(): void {
-		if (this.#cancelling) {
+		if (this.#cancelling || this.#upgradingToPlan) {
 			this.#pendingAgentEnd = undefined;
 			return;
 		}

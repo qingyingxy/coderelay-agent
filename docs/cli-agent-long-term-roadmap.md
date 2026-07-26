@@ -225,8 +225,8 @@ flowchart TB
 | R4.8 | `DONE` | 设计 Prompt 输入与顺序 | 用户需求、Plan、Task、Profile、Handoff、历史、项目规则、Tool Schema | R4.7 |
 | R4.9 | `DONE` | 设计裁剪和预算规则 | 不丢失安全约束、当前 Task 和必要 Handoff | R4.8 |
 | R4.10 | `DONE` | 对接 AgentSession | 不重复实现 Pi 已有 Prompt 和 Tool Schema 组装能力 | R3.8、R4.8 |
-| R4.11 | `IMPLEMENTING` | 设计 Direct 升级 Plan | 发现高复杂度或高风险时先停止写入，再请求批准 | R4.2、R5.2 |
-| R4.12 | `TODO` | 编写模式与 Prompt 测试 | 覆盖用户覆盖、自动判断、裁剪、Profile 和版本记录 | R4.1-R4.11 |
+| R4.11 | `DONE` | 设计 Direct 升级 Plan | 发现高复杂度或高风险时先停止写入并进入 Draft Plan；批准由 R5 接续 | R4.2、R5.2 |
+| R4.12 | `DONE` | 编写模式与 Prompt 测试 | 覆盖用户覆盖、自动判断、裁剪、Profile、版本记录和 Direct 升级 | R4.1-R4.11 |
 
 ### R5：正式 Plan Mode
 
@@ -467,12 +467,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R4.10 AgentSession 适配完成 | 复用现有 System Prompt、历史、Tool Schema 和 Agent Loop，Envelope 只注入 Workflow 上下文并在当前活动工具边界内临时收紧能力 |
 | 2026-07-26 | R4.11 前置协议草案完成 | 已定义升级判定和停止写入守卫；正式 Plan 尚未实现，R4.11 等待 R5.2 后继续 |
 | 2026-07-26 | R5.2 正式 Plan 状态机完成 | Plan 实体、结构校验、五状态转换、领域事件和 WorkflowStore 重放已实现；审批记录、版本命令和 CLI 仍按后续任务推进 |
+| 2026-07-26 | R4.11 Direct 升级 Plan 完成 | 升级请求先持久化，AgentSession 停止并等待 idle，Attempt 记为 interrupted，再原子创建 Draft Plan 并进入 Planning |
+| 2026-07-26 | R4.12 模式与 Prompt 回归完成 | 22 个 Workflow 测试文件、181 个用例覆盖模式优先级、Profile、Prompt 预算与适配、Plan 状态和 Direct 升级 |
 
 ## 12. 下一步
 
-M1 Direct Workflow MVP 已完成并验证。M2 当前继续 R4：
+M1 Direct Workflow MVP 和 R4 模式与 Prompt Pipeline 已完成并验证。M2 下一步进入正式 Plan Mode：
 
-1. 完成 R4.11：接入 Direct 升级 Plan。
-2. 完成 R4.12：补齐模式与 Prompt 回归测试。
+1. 完成 R5.1：复核现有 Plan Mode 示例，明确可复用边界。
+2. 完成 R5.3：实现 Planner 只读门禁。
+3. 完成 R5.4：实现 Plan 审批记录。
 
-R4 完成前不同时展开正式 Plan 状态机、Task Graph、Subagent 或 Job。
+R5 完成前不同时展开 Task Graph、Subagent 或 Job。

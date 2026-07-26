@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { type UpgradeDirectToPlanDecision, validateDirectPlanUpgradeReadiness } from "./direct-plan-upgrade.ts";
 import type { SessionWorkflowEventLog } from "./event-log.ts";
 import type { WorkflowEventDraft } from "./events.ts";
 import { createWorkflowEventBatch } from "./events.ts";
@@ -14,6 +15,8 @@ import type {
 	CorrelationId,
 	FailureRecord,
 	IsoDateTime,
+	Plan,
+	PlanId,
 	ResourceUsage,
 	Task,
 	TaskId,
@@ -109,6 +112,18 @@ export interface RequestWorkflowCancellationCommand extends WorkflowCommandBase 
 	readonly reason: string;
 }
 
+export interface RequestDirectPlanUpgradeCommand extends WorkflowCommandBase {
+	readonly decision: UpgradeDirectToPlanDecision;
+}
+
+export interface FinishDirectPlanUpgradeCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly planId: PlanId;
+	readonly attemptUsage?: ResourceUsage;
+	readonly writeAdmissionClosed: boolean;
+	readonly activeWriterStopped: boolean;
+}
+
 export interface FinishWorkflowCancellationCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly reason: string;
@@ -133,6 +148,7 @@ export interface WorkflowCommandResult {
 	readonly batchId?: string;
 	readonly workflow: Workflow;
 	readonly rootTask?: Task;
+	readonly currentPlan?: Plan;
 }
 
 export class WorkflowControllerError extends Error {
@@ -637,6 +653,207 @@ export class WorkflowController {
 		return this.#commit(command, events);
 	}
 
+	requestDirectPlanUpgrade(command: RequestDirectPlanUpgradeCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.directPlanUpgradeRequest) {
+			return this.#result(command.workflowId, undefined, false);
+		}
+		if (workflow.status !== "executing" || workflow.modeDecision?.mode !== "direct") {
+			fail(
+				"controller.direct_plan_upgrade_unavailable",
+				`Workflow ${workflow.id} cannot request a Direct Plan upgrade while ${workflow.status} in ${workflow.modeDecision?.mode ?? "unresolved"} mode`,
+			);
+		}
+		const request = {
+			reason: command.decision.advice.reason,
+			riskLevel: command.decision.advice.riskLevel,
+			triggers: structuredClone(command.decision.triggers),
+			requestedAt: command.decision.evaluatedAt,
+		};
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: this.#eventId(),
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 1,
+				eventType: "workflow.direct_plan_upgrade_requested",
+				occurredAt: this.#now(),
+				actor: { kind: "controller" },
+				payload: { request },
+			},
+		];
+		return this.#commit(command, events);
+	}
+
+	finishDirectPlanUpgrade(command: FinishDirectPlanUpgradeCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		if (workflow.status === "planning" && workflow.currentPlanId) {
+			return this.#result(command.workflowId, undefined, false);
+		}
+		if (
+			workflow.status !== "executing" ||
+			workflow.modeDecision?.mode !== "direct" ||
+			!workflow.directPlanUpgradeRequest
+		) {
+			fail(
+				"controller.direct_plan_upgrade_not_requested",
+				`Workflow ${workflow.id} has no active Direct Plan upgrade request`,
+			);
+		}
+		if (isTaskTerminalStatus(task.status)) {
+			fail("controller.task_terminal", `Task ${task.id} is already terminal`);
+		}
+		if (this.#store.getPlan(command.planId)) {
+			fail("controller.plan_exists", `Plan ${command.planId} already exists`);
+		}
+		if (this.#store.listPlans(workflow.id).length > 0) {
+			fail("controller.plan_already_created", `Workflow ${workflow.id} already has a Plan`);
+		}
+		if (command.attemptUsage) {
+			assertValidUsage(command.attemptUsage);
+		}
+		const readinessViolations = validateDirectPlanUpgradeReadiness({
+			upgradeRequestPersisted: true,
+			writeAdmissionClosed: command.writeAdmissionClosed,
+			activeWriterStopped: command.activeWriterStopped,
+			draftPlanCreated: true,
+		});
+		if (readinessViolations.length > 0) {
+			const [firstViolation] = readinessViolations;
+			fail(firstViolation.code, firstViolation.message);
+		}
+
+		const occurredAt = this.#now();
+		const events: WorkflowEventDraft[] = [];
+		let causationId: string | undefined;
+		const attempt = task.currentAttemptId ? this.#store.getAttempt(task.currentAttemptId) : undefined;
+		if (attempt && !isAttemptTerminalStatus(attempt.status)) {
+			causationId = this.#eventId();
+			events.push({
+				eventId: causationId,
+				entityId: attempt.id,
+				entityRevision: attempt.revision + 1,
+				eventType: "attempt.interrupted",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: {
+					fromStatus: attempt.status,
+					toStatus: "interrupted",
+					endedAt: occurredAt,
+					usage: structuredClone(command.attemptUsage ?? zeroUsage()),
+					reason: workflow.directPlanUpgradeRequest.reason,
+				},
+			});
+		}
+		if (task.status === "running" || task.status === "verifying") {
+			const taskReadyId = this.#eventId();
+			events.push({
+				eventId: taskReadyId,
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.ready",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId,
+				payload: {
+					fromStatus: task.status,
+					toStatus: "ready",
+					facts: {
+						workflowExecuting: true,
+						dependenciesSucceeded: true,
+						retryAllowed: true,
+					},
+				},
+			});
+			causationId = taskReadyId;
+		}
+		const plan: Plan = {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			id: command.planId,
+			workflowId: workflow.id,
+			version: 1,
+			status: "draft",
+			goal: "",
+			assumptions: [],
+			steps: [],
+			risks: [],
+			verificationRequirements: [],
+		};
+		const planCreatedId = this.#eventId();
+		events.push({
+			eventId: planCreatedId,
+			entityId: plan.id,
+			entityRevision: 0,
+			eventType: "plan.created",
+			occurredAt,
+			actor: { kind: "controller" },
+			causationId,
+			payload: { plan },
+		});
+		const planSelectedId = this.#eventId();
+		events.push({
+			eventId: planSelectedId,
+			entityId: workflow.id,
+			entityRevision: workflow.revision + 1,
+			eventType: "workflow.plan_selected",
+			occurredAt,
+			actor: { kind: "controller" },
+			causationId: planCreatedId,
+			payload: { planId: plan.id },
+		});
+		const modeDecidedId = this.#eventId();
+		events.push({
+			eventId: modeDecidedId,
+			entityId: workflow.id,
+			entityRevision: workflow.revision + 2,
+			eventType: "workflow.mode_decided",
+			occurredAt,
+			actor: { kind: "controller" },
+			causationId: planSelectedId,
+			payload: {
+				decision: createModeDecision({
+					selection: {
+						mode: "plan",
+						source: "forced_policy",
+					},
+					reason: workflow.directPlanUpgradeRequest.reason,
+					riskLevel: workflow.directPlanUpgradeRequest.riskLevel,
+					decidedAt: occurredAt,
+				}),
+			},
+		});
+		events.push({
+			eventId: this.#eventId(),
+			entityId: workflow.id,
+			entityRevision: workflow.revision + 3,
+			eventType: "workflow.status_changed",
+			occurredAt,
+			actor: { kind: "controller" },
+			causationId: modeDecidedId,
+			payload: {
+				fromStatus: workflow.status,
+				toStatus: "planning",
+				facts: {
+					directPlanUpgradeRequested: true,
+					writeOperationsStopped: command.activeWriterStopped,
+					draftPlanCreated: true,
+				},
+			},
+		});
+		return this.#commit(command, events);
+	}
+
 	requestCancellation(command: RequestWorkflowCancellationCommand): WorkflowCommandResult {
 		const duplicate = this.#duplicateResult(command);
 		if (duplicate) {
@@ -767,6 +984,10 @@ export class WorkflowController {
 
 	getWorkflow(workflowId: WorkflowId): Workflow | undefined {
 		return this.#store.getWorkflow(workflowId);
+	}
+
+	getPlan(planId: PlanId): Plan | undefined {
+		return this.#store.getPlan(planId);
 	}
 
 	getRootTask(workflowId: WorkflowId): Task | undefined {
@@ -1043,6 +1264,7 @@ export class WorkflowController {
 			applied,
 			workflow,
 			rootTask: workflow.rootTaskId ? this.#store.getTask(workflow.rootTaskId) : undefined,
+			currentPlan: workflow.currentPlanId ? this.#store.getPlan(workflow.currentPlanId) : undefined,
 		};
 		return batchId ? { ...result, batchId } : result;
 	}

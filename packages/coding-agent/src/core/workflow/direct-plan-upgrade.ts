@@ -1,6 +1,6 @@
 import { adviseExecutionMode, type ModeAdvice, type ModeAssessment } from "./mode-advisor.ts";
 import type { DomainViolation } from "./transitions.ts";
-import type { IsoDateTime } from "./types.ts";
+import type { DirectPlanUpgradeTrigger, IsoDateTime } from "./types.ts";
 
 export const DIRECT_PLAN_UPGRADE_SEQUENCE = [
 	"persist_upgrade_request",
@@ -12,8 +12,6 @@ export const DIRECT_PLAN_UPGRADE_SEQUENCE = [
 	"request_user_approval",
 ] as const;
 export type DirectPlanUpgradeStep = (typeof DIRECT_PLAN_UPGRADE_SEQUENCE)[number];
-
-export type DirectPlanUpgradeTrigger = "complexity" | "risk" | "confidence";
 
 interface DirectPlanUpgradeDecisionBase {
 	readonly advice: ModeAdvice;

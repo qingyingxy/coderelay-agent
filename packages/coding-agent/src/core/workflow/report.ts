@@ -1,6 +1,7 @@
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type {
 	Attempt,
+	ResolvedExecutionMode,
 	ResourceUsage,
 	Task,
 	VerificationKind,
@@ -41,7 +42,7 @@ export interface WorkflowFinalAttemptReport {
 
 export interface WorkflowFinalReport {
 	readonly workflowId: string;
-	readonly mode: "direct";
+	readonly mode: ResolvedExecutionMode;
 	readonly status: WorkflowTerminalStatus;
 	readonly statusLine: string;
 	readonly summary: string;
@@ -104,16 +105,17 @@ export function buildBasicVerificationReport(
 /** Format the single authoritative Workflow status line shown by the CLI. */
 export function formatWorkflowStatusLine(input: FormatWorkflowStatusLineInput): string {
 	const { workflow, rootTask } = input;
+	const mode = workflow.modeDecision?.mode ?? "direct";
 	if (isWorkflowTerminalStatus(workflow.status) && workflow.result) {
 		const fileCount = workflow.result.changedFiles.length;
-		return `direct | ${workflow.status} | 1 task | ${fileCount} ${fileCount === 1 ? "file" : "files"} | tests: not configured`;
+		return `${mode} | ${workflow.status} | 1 task | ${fileCount} ${fileCount === 1 ? "file" : "files"} | tests: not configured`;
 	}
 
 	const latestAttempt = input.attempts.reduce(
 		(latest, attempt) => (latest === undefined || attempt.number > latest.number ? attempt : latest),
 		undefined as Attempt | undefined,
 	);
-	return `direct | ${workflow.status} | task: ${rootTask.status} | attempt: ${latestAttempt?.number ?? 0}`;
+	return `${mode} | ${workflow.status} | task: ${rootTask.status} | attempt: ${latestAttempt?.number ?? 0}`;
 }
 
 /** Build the structured M1 terminal report consumed by the later CLI presentation layer. */
@@ -165,7 +167,7 @@ export function buildWorkflowFinalReport(input: BuildWorkflowFinalReportInput): 
 
 	return {
 		workflowId: workflow.id,
-		mode: "direct",
+		mode: workflow.modeDecision?.mode ?? "direct",
 		status: workflow.result.status,
 		statusLine,
 		summary: workflow.result.summary,

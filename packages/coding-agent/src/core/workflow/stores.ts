@@ -137,6 +137,25 @@ function applyWorkflowEvent(state: MutableStoreState, event: AnyWorkflowEvent): 
 			state.workflows.set(workflow.id, workflow);
 			return true;
 		}
+		case "workflow.direct_plan_upgrade_requested": {
+			const current = getWorkflow(state, event);
+			assertRevision(event, current.revision);
+			if (current.directPlanUpgradeRequest) {
+				fail(
+					"store.direct_plan_upgrade_exists",
+					`Workflow ${current.id} already has a Direct Plan upgrade request`,
+				);
+			}
+			const workflow: Workflow = {
+				...current,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+				directPlanUpgradeRequest: structuredClone(event.payload.request),
+			};
+			assertValidEntity("workflow", validateWorkflow(workflow));
+			state.workflows.set(workflow.id, workflow);
+			return true;
+		}
 		case "workflow.plan_selected": {
 			const current = getWorkflow(state, event);
 			assertRevision(event, current.revision);

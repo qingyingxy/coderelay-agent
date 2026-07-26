@@ -56,8 +56,9 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.9：`DONE`
 - R4.10：`DONE`
 - R5.2：`DONE`
-- R4.11：`IMPLEMENTING`
-- 下一项：R4.11
+- R4.11：`DONE`
+- R4.12：`DONE`
+- 下一项：R5.1
 
 ## 6. R4.2 模式选择顺序
 
@@ -200,7 +201,7 @@ R4.8 不替代 Pi 当前的 System Prompt、Skills、Prompt Templates、项目�
 
 独立 Planner、Reviewer 和 Subagent 的 AgentSession 创建与 Profile System Prompt 注入分别由 R5、R8 实现；R4.10 只固定可复用的执行接缝。
 
-## 15. R4.11 Direct 升级 Plan 前置草案
+## 15. R4.11 Direct 升级 Plan
 
 Direct 执行期间可以重新运行与初始自动模式相同的结构化评估。只要评估不再允许 Direct，就生成 `upgrade_to_plan` 决策；高复杂度、高风险和低置信度会作为明确触发原因记录。
 
@@ -216,7 +217,16 @@ Direct 执行期间可以重新运行与初始自动模式相同的结构化评�
 
 状态转换守卫要求“升级请求已记录、写操作已停止、Draft Plan 已创建”，不能从 Direct 任意跳到 Planning。升级不会把当前 Task 或 Attempt 伪装成成功。
 
-本节的前置协议草案已经完成。R5.2 现已提供正式 Plan 实体、状态事件和 Store，R4.11 可以继续接入 Controller、Attempt 中断和完整升级流程。
+R4.11 已完成步骤 1-5 的运行时接入：
+
+- `workflow.direct_plan_upgrade_requested` 先持久化升级原因、风险和触发条件。
+- `AgentSessionAdapter` 关闭本次 Direct 运行的继续处理并立即调用 `abort()`，等待 Session 回到 idle。
+- abort 期间产生的 `agent_end(aborted)` 和 `agent_settled` 不会被误记为失败。
+- 活动 Attempt 明确进入 `interrupted`，原 Task 回到 `ready`，不伪装为成功。
+- Controller 在一个 Event Batch 中创建 Draft Plan、选择当前 Plan、更新 ModeDecision 并完成 `executing → planning`。
+- 并发或重复升级共享同一次停止流程，Event Log 可以完整重放升级后的状态。
+
+当前单 Main Agent 通过立即 abort 实现写入边界关闭；正式 Writer Lease 仍属于 R7。Planner 只读生成完整 Plan 和请求用户批准分别由 R5.3、R5.4 接续，R4.11 不提前宣称这些能力完成。
 
 ## 16. R5.2 正式 Plan 状态机
 
@@ -230,3 +240,16 @@ R5.2 提供可持久化和重放的 Plan 领域基础：
 - WorkflowStore 保存 Plan、检查版本与替代关系、禁止终态内容修改，并支持 Event Log 重放和防御性读取。
 
 R5.2 不实现审批意见记录、重新规划命令、Plan 转 Task 或 CLI；这些仍分别属于 R5.4、R5.5、R5.6 和 R5.8。
+
+## 17. R4.12 模式与 Prompt 回归验证
+
+R4 的测试矩阵已覆盖：
+
+- 用户 Direct/Plan 覆盖、强制 Plan、Agent 建议和默认选择优先级。
+- ModeAdvisor 的复杂度、风险、置信度与非法输入。
+- Agent Profile 只读角色和权限上限。
+- PromptEnvelope 双版本、上下文顺序、预算裁剪和不可裁剪内容超限。
+- AgentSession 工具子集收紧、恢复、并发保护和 Prompt 渲染。
+- Direct 升级判定、请求先持久化、Attempt 中断、Draft Plan 重放和并发幂等。
+
+验证结果：Workflow 测试 22 个文件、181 个用例通过，`npm run check` 通过。

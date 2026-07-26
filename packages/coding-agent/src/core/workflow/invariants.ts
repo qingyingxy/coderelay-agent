@@ -254,6 +254,20 @@ export function validateWorkflow(workflow: Workflow): readonly DomainViolation[]
 	if (workflow.request.cwd.trim().length === 0) {
 		violations.push(violation("workflow.cwd_required", "Workflow cwd is required"));
 	}
+	if (workflow.directPlanUpgradeRequest) {
+		const request = workflow.directPlanUpgradeRequest;
+		if (
+			!request.reason.trim() ||
+			!["low", "medium", "high"].includes(request.riskLevel) ||
+			request.triggers.length === 0 ||
+			request.triggers.some((trigger) => !["complexity", "risk", "confidence"].includes(trigger)) ||
+			!Number.isFinite(Date.parse(request.requestedAt))
+		) {
+			violations.push(
+				violation("workflow.invalid_direct_plan_upgrade_request", "Direct Plan upgrade request is invalid"),
+			);
+		}
+	}
 
 	const requiresRootTask = [
 		"planning",

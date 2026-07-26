@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../../src/core/agent-session.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import {
+	decideDirectPlanUpgrade,
 	SessionWorkflowEventLog,
 	startDirectAgentSessionWorkflow,
 	type WorkflowAgentSession,
@@ -109,6 +110,22 @@ function abortedSettlement(): AgentSessionEvent[] {
 		{ type: "agent_end", messages: [fauxAssistantMessage("", { stopReason: "aborted" })], willRetry: false },
 		{ type: "agent_settled" },
 	];
+}
+
+function highRiskUpgradeDecision() {
+	const decision = decideDirectPlanUpgrade(
+		{
+			complexity: "high",
+			riskLevel: "high",
+			confidence: "low",
+			reason: "The change crosses security and storage boundaries",
+		},
+		"2026-07-26T00:00:00.000Z",
+	);
+	if (decision.action !== "upgrade_to_plan") {
+		throw new Error("Expected the assessment to require a Plan upgrade");
+	}
+	return decision;
 }
 
 let toolCallSeq = 0;
@@ -364,6 +381,79 @@ describe("AgentSessionAdapter", () => {
 
 		expect(session.abortCalls).toBe(0);
 		expect(replay(session).getWorkflow(WORKFLOW_ID)?.status).toBe("completed");
+
+		adapter.dispose();
+	});
+
+	it("upgrades an in-flight Direct run to Planning after stopping its writer", async () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+		session.abortEmits = abortedSettlement();
+
+		await adapter.upgradeToPlan(highRiskUpgradeDecision());
+
+		expect(session.abortCalls).toBe(1);
+		expect(session.waitForIdleCalls).toBe(1);
+		const store = replay(session);
+		const workflow = store.getWorkflow(WORKFLOW_ID);
+		const task = store.getTask(TASK_ID);
+		const attempt = task?.currentAttemptId ? store.getAttempt(task.currentAttemptId) : undefined;
+		expect(workflow).toMatchObject({
+			status: "planning",
+			modeDecision: {
+				mode: "plan",
+				source: "forced_policy",
+			},
+			directPlanUpgradeRequest: {
+				reason: "The change crosses security and storage boundaries",
+				riskLevel: "high",
+				triggers: ["complexity", "risk", "confidence"],
+			},
+		});
+		expect(attempt?.status).toBe("interrupted");
+		expect(task?.status).toBe("ready");
+		expect(workflow?.currentPlanId).toBeDefined();
+		expect(store.getPlan(workflow?.currentPlanId ?? "")).toMatchObject({
+			status: "draft",
+			version: 1,
+		});
+		expect(adapter.statusLine).toBe("plan | planning | task: ready | attempt: 1");
+
+		adapter.dispose();
+	});
+
+	it("persists the upgrade request before interruption and the Planning transition", async () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+		session.abortEmits = abortedSettlement();
+
+		await adapter.upgradeToPlan(highRiskUpgradeDecision());
+
+		const eventTypes = new SessionWorkflowEventLog(session.sessionManager)
+			.read()
+			.flatMap((batch) => batch.batch.events.map((event) => event.eventType));
+		const requestIndex = eventTypes.indexOf("workflow.direct_plan_upgrade_requested");
+		expect(requestIndex).toBeGreaterThanOrEqual(0);
+		expect(requestIndex).toBeLessThan(eventTypes.indexOf("attempt.interrupted"));
+		expect(eventTypes.indexOf("attempt.interrupted")).toBeLessThan(eventTypes.indexOf("plan.created"));
+		expect(eventTypes.indexOf("plan.created")).toBeLessThan(eventTypes.lastIndexOf("workflow.status_changed"));
+
+		adapter.dispose();
+	});
+
+	it("treats concurrent Plan upgrades as a single stop-and-transition flow", async () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+		session.abortEmits = abortedSettlement();
+		const decision = highRiskUpgradeDecision();
+
+		await Promise.all([adapter.upgradeToPlan(decision), adapter.upgradeToPlan(decision)]);
+
+		expect(session.abortCalls).toBe(1);
+		expect(replay(session).listPlans(WORKFLOW_ID)).toHaveLength(1);
 
 		adapter.dispose();
 	});

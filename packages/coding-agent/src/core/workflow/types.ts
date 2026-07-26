@@ -32,6 +32,14 @@ export function isResolvedExecutionMode(value: unknown): value is ResolvedExecut
 }
 export type ModeDecisionSource = "user" | "forced_policy" | "agent" | "default";
 export type RiskLevel = "low" | "medium" | "high";
+export type DirectPlanUpgradeTrigger = "complexity" | "risk" | "confidence";
+
+export interface DirectPlanUpgradeRequest {
+	readonly reason: string;
+	readonly riskLevel: RiskLevel;
+	readonly triggers: readonly DirectPlanUpgradeTrigger[];
+	readonly requestedAt: IsoDateTime;
+}
 
 export type WorkflowStatus =
 	| "received"
@@ -290,6 +298,7 @@ export interface Workflow extends EntityMetadata {
 	readonly status: WorkflowStatus;
 	readonly request: UserRequest;
 	readonly modeDecision?: ModeDecision;
+	readonly directPlanUpgradeRequest?: DirectPlanUpgradeRequest;
 	readonly currentPlanId?: PlanId;
 	readonly rootTaskId?: TaskId;
 	readonly budget: BudgetLimit;

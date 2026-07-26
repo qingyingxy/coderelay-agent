@@ -17,6 +17,7 @@ import type {
 	AttemptStatus,
 	CommandId,
 	CorrelationId,
+	DirectPlanUpgradeRequest,
 	EventBatchId,
 	EventId,
 	FailureRecord,
@@ -80,6 +81,9 @@ export interface WorkflowEventPayloadMap {
 	};
 	readonly "workflow.mode_decided": {
 		readonly decision: ModeDecision;
+	};
+	readonly "workflow.direct_plan_upgrade_requested": {
+		readonly request: DirectPlanUpgradeRequest;
 	};
 	readonly "workflow.plan_selected": {
 		readonly planId: PlanId;
@@ -254,6 +258,7 @@ export interface CreateWorkflowEventBatchInput {
 const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>> = {
 	"workflow.created": "workflow",
 	"workflow.mode_decided": "workflow",
+	"workflow.direct_plan_upgrade_requested": "workflow",
 	"workflow.plan_selected": "workflow",
 	"workflow.status_changed": "workflow",
 	"workflow.blocked": "workflow",
@@ -543,6 +548,16 @@ function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolatio
 			return event.payload.planId.trim().length > 0
 				? []
 				: [violation("event.plan_id_required", "Workflow Plan selection requires a Plan id")];
+		case "workflow.direct_plan_upgrade_requested": {
+			const { request } = event.payload;
+			return request.reason.trim().length > 0 &&
+				["low", "medium", "high"].includes(request.riskLevel) &&
+				request.triggers.length > 0 &&
+				request.triggers.every((trigger) => ["complexity", "risk", "confidence"].includes(trigger)) &&
+				Number.isFinite(Date.parse(request.requestedAt))
+				? []
+				: [violation("event.invalid_direct_plan_upgrade_request", "Direct Plan upgrade request is invalid")];
+		}
 		case "plan.approved":
 		case "plan.rejected":
 			return event.actor.kind === "user"
