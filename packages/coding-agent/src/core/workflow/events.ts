@@ -1,6 +1,16 @@
-import { validateAttempt, validateTask, validateWorkflow } from "./invariants.ts";
-import type { DomainViolation, TaskTransitionFacts, WorkflowTransitionFacts } from "./transitions.ts";
-import { validateAttemptTransition, validateTaskTransition, validateWorkflowTransition } from "./transitions.ts";
+import { validateAttempt, validatePlan, validateTask, validateWorkflow } from "./invariants.ts";
+import type {
+	DomainViolation,
+	PlanTransitionFacts,
+	TaskTransitionFacts,
+	WorkflowTransitionFacts,
+} from "./transitions.ts";
+import {
+	validateAttemptTransition,
+	validatePlanTransition,
+	validateTaskTransition,
+	validateWorkflowTransition,
+} from "./transitions.ts";
 import type {
 	Attempt,
 	AttemptId,
@@ -12,6 +22,10 @@ import type {
 	FailureRecord,
 	IsoDateTime,
 	ModeDecision,
+	Plan,
+	PlanContent,
+	PlanId,
+	PlanStatus,
 	ResourceUsage,
 	Task,
 	TaskAssignment,
@@ -54,12 +68,21 @@ export interface AttemptStatusChangedPayload {
 	readonly toStatus: AttemptStatus;
 }
 
+export interface PlanStatusChangedPayload {
+	readonly fromStatus: PlanStatus;
+	readonly toStatus: PlanStatus;
+	readonly facts: PlanTransitionFacts;
+}
+
 export interface WorkflowEventPayloadMap {
 	readonly "workflow.created": {
 		readonly workflow: Workflow;
 	};
 	readonly "workflow.mode_decided": {
 		readonly decision: ModeDecision;
+	};
+	readonly "workflow.plan_selected": {
+		readonly planId: PlanId;
 	};
 	readonly "workflow.status_changed": WorkflowStatusChangedPayload;
 	readonly "workflow.blocked": WorkflowStatusChangedPayload & {
@@ -77,6 +100,18 @@ export interface WorkflowEventPayloadMap {
 	};
 	readonly "workflow.cancelled": WorkflowStatusChangedPayload & {
 		readonly result: WorkflowResult;
+	};
+	readonly "plan.created": {
+		readonly plan: Plan;
+	};
+	readonly "plan.content_updated": {
+		readonly content: PlanContent;
+	};
+	readonly "plan.awaiting_approval": PlanStatusChangedPayload;
+	readonly "plan.approved": PlanStatusChangedPayload;
+	readonly "plan.rejected": PlanStatusChangedPayload;
+	readonly "plan.superseded": PlanStatusChangedPayload & {
+		readonly replacementPlanId: PlanId;
 	};
 	readonly "task.created": {
 		readonly task: Task;
@@ -219,6 +254,7 @@ export interface CreateWorkflowEventBatchInput {
 const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>> = {
 	"workflow.created": "workflow",
 	"workflow.mode_decided": "workflow",
+	"workflow.plan_selected": "workflow",
 	"workflow.status_changed": "workflow",
 	"workflow.blocked": "workflow",
 	"workflow.unblocked": "workflow",
@@ -226,6 +262,12 @@ const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>
 	"workflow.completed": "workflow",
 	"workflow.failed": "workflow",
 	"workflow.cancelled": "workflow",
+	"plan.created": "plan",
+	"plan.content_updated": "plan",
+	"plan.awaiting_approval": "plan",
+	"plan.approved": "plan",
+	"plan.rejected": "plan",
+	"plan.superseded": "plan",
 	"task.created": "task",
 	"task.dependency_added": "task",
 	"task.pending": "task",
@@ -273,6 +315,17 @@ function validateCreatedEntity(event: AnyWorkflowEvent): readonly DomainViolatio
 						violation(
 							"event.created_entity_mismatch",
 							"Created workflow id and revision must match the event envelope",
+						),
+					];
+		case "plan.created":
+			return event.payload.plan.id === event.entityId &&
+				event.payload.plan.workflowId === event.workflowId &&
+				event.payload.plan.revision === event.entityRevision
+				? validatePlan(event.payload.plan)
+				: [
+						violation(
+							"event.created_entity_mismatch",
+							"Created Plan id, workflow id, and revision must match the event envelope",
 						),
 					];
 		case "task.created":
@@ -354,6 +407,22 @@ function validateStatusChange(event: AnyWorkflowEvent): readonly DomainViolation
 			return event.payload.toStatus === "cancelled"
 				? validateWorkflowTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
 				: [violation("event.target_status_mismatch", "Workflow cancelled event must target cancelled")];
+		case "plan.awaiting_approval":
+			return event.payload.toStatus === "awaiting_approval"
+				? validatePlanTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
+				: [violation("event.target_status_mismatch", "Plan approval request must target awaiting_approval")];
+		case "plan.approved":
+			return event.payload.toStatus === "approved"
+				? validatePlanTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
+				: [violation("event.target_status_mismatch", "Plan approved event must target approved")];
+		case "plan.rejected":
+			return event.payload.toStatus === "rejected"
+				? validatePlanTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
+				: [violation("event.target_status_mismatch", "Plan rejected event must target rejected")];
+		case "plan.superseded":
+			return event.payload.toStatus === "superseded"
+				? validatePlanTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
+				: [violation("event.target_status_mismatch", "Plan superseded event must target superseded")];
 		case "task.ready":
 			return event.payload.toStatus === "ready"
 				? validateTaskTransition(event.payload.fromStatus, event.payload.toStatus, event.payload.facts)
@@ -470,6 +539,19 @@ function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolatio
 				? []
 				: [violation("event.invalid_mode_decision", "Mode decision payload is invalid")];
 		}
+		case "workflow.plan_selected":
+			return event.payload.planId.trim().length > 0
+				? []
+				: [violation("event.plan_id_required", "Workflow Plan selection requires a Plan id")];
+		case "plan.approved":
+		case "plan.rejected":
+			return event.actor.kind === "user"
+				? []
+				: [violation("event.user_actor_required", `${event.eventType} requires a user actor`)];
+		case "plan.superseded":
+			return event.payload.replacementPlanId.trim().length > 0 && event.payload.replacementPlanId !== event.entityId
+				? []
+				: [violation("event.replacement_plan_required", "Plan superseded event requires a replacement Plan")];
 		case "workflow.cancel_requested":
 		case "task.failed":
 		case "task.cancelled":
@@ -587,6 +669,7 @@ export function validateWorkflowEvent(event: AnyWorkflowEvent): readonly DomainV
 	}
 	if (
 		(event.eventType === "workflow.created" ||
+			event.eventType === "plan.created" ||
 			event.eventType === "task.created" ||
 			event.eventType === "attempt.created" ||
 			event.eventType === "verification.started") &&

@@ -2,13 +2,15 @@ import type { PersistedWorkflowEventBatch } from "./event-log.ts";
 import { isPersistedWorkflowEventBatch } from "./event-log.ts";
 import type { AnyWorkflowEvent } from "./events.ts";
 import { validateWorkflowEventBatch } from "./events.ts";
-import { validateAttempt, validateTask, validateWorkflow } from "./invariants.ts";
+import { validateAttempt, validatePlan, validateTask, validateWorkflow } from "./invariants.ts";
 import type { DomainViolation } from "./transitions.ts";
 import { validateRevisionTransition } from "./transitions.ts";
 import type {
 	Attempt,
 	AttemptId,
 	CommandId,
+	Plan,
+	PlanId,
 	Task,
 	TaskId,
 	VerificationId,
@@ -24,6 +26,7 @@ interface VerificationProjection {
 
 interface MutableStoreState {
 	readonly workflows: Map<WorkflowId, Workflow>;
+	readonly plans: Map<PlanId, Plan>;
 	readonly tasks: Map<TaskId, Task>;
 	readonly attempts: Map<AttemptId, Attempt>;
 	readonly verifications: Map<VerificationId, VerificationProjection>;
@@ -88,6 +91,17 @@ function getTask(state: MutableStoreState, event: AnyWorkflowEvent): Task {
 	return task;
 }
 
+function getPlan(state: MutableStoreState, event: AnyWorkflowEvent): Plan {
+	const plan = state.plans.get(event.entityId);
+	if (!plan) {
+		fail("store.plan_missing", `Plan ${event.entityId} does not exist`);
+	}
+	if (plan.workflowId !== event.workflowId) {
+		fail("store.plan_workflow_mismatch", `Plan ${event.entityId} belongs to another workflow`);
+	}
+	return plan;
+}
+
 function getAttempt(state: MutableStoreState, event: AnyWorkflowEvent): Attempt {
 	const attempt = state.attempts.get(event.entityId);
 	if (!attempt) {
@@ -118,6 +132,26 @@ function applyWorkflowEvent(state: MutableStoreState, event: AnyWorkflowEvent): 
 				revision: event.entityRevision,
 				updatedAt: event.occurredAt,
 				modeDecision: structuredClone(event.payload.decision),
+			};
+			assertValidEntity("workflow", validateWorkflow(workflow));
+			state.workflows.set(workflow.id, workflow);
+			return true;
+		}
+		case "workflow.plan_selected": {
+			const current = getWorkflow(state, event);
+			assertRevision(event, current.revision);
+			const plan = state.plans.get(event.payload.planId);
+			if (!plan || plan.workflowId !== current.id) {
+				fail("store.plan_missing", `Plan ${event.payload.planId} does not exist in workflow ${current.id}`);
+			}
+			if (plan.status !== "draft" && plan.status !== "awaiting_approval") {
+				fail("store.plan_not_selectable", `Plan ${plan.id} cannot be selected while ${plan.status}`);
+			}
+			const workflow: Workflow = {
+				...current,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+				currentPlanId: plan.id,
 			};
 			assertValidEntity("workflow", validateWorkflow(workflow));
 			state.workflows.set(workflow.id, workflow);
@@ -185,6 +219,96 @@ function applyWorkflowEvent(state: MutableStoreState, event: AnyWorkflowEvent): 
 			};
 			assertValidEntity("workflow", validateWorkflow(workflow));
 			state.workflows.set(workflow.id, workflow);
+			return true;
+		}
+		default:
+			return false;
+	}
+}
+
+function applyPlanEvent(state: MutableStoreState, event: AnyWorkflowEvent): boolean {
+	switch (event.eventType) {
+		case "plan.created": {
+			if (state.plans.has(event.entityId)) {
+				fail("store.plan_exists", `Plan ${event.entityId} already exists`);
+			}
+			getWorkflow(state, event);
+			const plan = structuredClone(event.payload.plan);
+			for (const existing of state.plans.values()) {
+				if (existing.workflowId === plan.workflowId && existing.version === plan.version) {
+					fail(
+						"store.plan_version_exists",
+						`Workflow ${plan.workflowId} already has Plan version ${plan.version}`,
+					);
+				}
+			}
+			if (plan.supersedesPlanId) {
+				const previous = state.plans.get(plan.supersedesPlanId);
+				if (!previous || previous.workflowId !== plan.workflowId || plan.version !== previous.version + 1) {
+					fail("store.invalid_plan_predecessor", `Plan ${plan.id} does not reference the preceding Plan version`);
+				}
+			} else if (plan.version !== 1) {
+				fail("store.invalid_plan_version", "The first Plan in a workflow must use version 1");
+			}
+			assertValidEntity("plan", validatePlan(plan));
+			state.plans.set(plan.id, plan);
+			return true;
+		}
+		case "plan.content_updated": {
+			const current = getPlan(state, event);
+			assertRevision(event, current.revision);
+			assertStatus(current.status, "draft", event);
+			const plan: Plan = {
+				...current,
+				...structuredClone(event.payload.content),
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+			};
+			assertValidEntity("plan", validatePlan(plan));
+			state.plans.set(plan.id, plan);
+			return true;
+		}
+		case "plan.awaiting_approval":
+		case "plan.approved":
+		case "plan.rejected":
+		case "plan.superseded": {
+			const current = getPlan(state, event);
+			assertRevision(event, current.revision);
+			assertStatus(current.status, event.payload.fromStatus, event);
+			const workflow = getWorkflow(state, event);
+			if (workflow.currentPlanId !== current.id) {
+				fail("store.plan_not_current", `Plan ${current.id} is not the current Plan for workflow ${workflow.id}`);
+			}
+			if (
+				event.eventType === "plan.awaiting_approval" &&
+				[...state.plans.values()].some(
+					(plan) => plan.workflowId === current.workflowId && plan.version > current.version,
+				)
+			) {
+				fail("store.plan_not_latest", `Plan ${current.id} is not the latest Plan version`);
+			}
+			if (event.eventType === "plan.superseded") {
+				const replacement = state.plans.get(event.payload.replacementPlanId);
+				if (
+					!replacement ||
+					replacement.workflowId !== current.workflowId ||
+					replacement.supersedesPlanId !== current.id ||
+					replacement.version !== current.version + 1
+				) {
+					fail(
+						"store.invalid_replacement_plan",
+						`Plan ${event.payload.replacementPlanId} is not a valid replacement for ${current.id}`,
+					);
+				}
+			}
+			const plan: Plan = {
+				...current,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+				status: event.payload.toStatus,
+			};
+			assertValidEntity("plan", validatePlan(plan));
+			state.plans.set(plan.id, plan);
 			return true;
 		}
 		default:
@@ -494,13 +618,14 @@ function applyVerificationEvent(state: MutableStoreState, event: AnyWorkflowEven
 function applyEvent(state: MutableStoreState, event: AnyWorkflowEvent): void {
 	if (
 		applyWorkflowEvent(state, event) ||
+		applyPlanEvent(state, event) ||
 		applyTaskEvent(state, event) ||
 		applyAttemptEvent(state, event) ||
 		applyVerificationEvent(state, event)
 	) {
 		return;
 	}
-	fail("store.unsupported_event", `Event ${event.eventType} is not supported by the M1 store`);
+	fail("store.unsupported_event", `Event ${event.eventType} is not supported by WorkflowStore`);
 }
 
 function validateRelationships(state: MutableStoreState): readonly DomainViolation[] {
@@ -512,6 +637,27 @@ function validateRelationships(state: MutableStoreState): readonly DomainViolati
 				violations.push(
 					violation("store.invalid_root_task", `Workflow ${workflow.id} does not reference a valid root task`),
 				);
+			}
+		}
+		if (workflow.currentPlanId) {
+			const plan = state.plans.get(workflow.currentPlanId);
+			if (!plan || plan.workflowId !== workflow.id || plan.status === "superseded") {
+				violations.push(
+					violation("store.invalid_current_plan", `Workflow ${workflow.id} does not reference a current Plan`),
+				);
+			}
+		}
+	}
+	for (const plan of state.plans.values()) {
+		if (!state.workflows.has(plan.workflowId)) {
+			violations.push(
+				violation("store.invalid_plan_workflow", `Plan ${plan.id} does not reference an existing workflow`),
+			);
+		}
+		if (plan.supersedesPlanId) {
+			const previous = state.plans.get(plan.supersedesPlanId);
+			if (!previous || previous.workflowId !== plan.workflowId || previous.version + 1 !== plan.version) {
+				violations.push(violation("store.invalid_plan_predecessor", `Plan ${plan.id} has an invalid predecessor`));
 			}
 		}
 	}
@@ -539,6 +685,7 @@ function validateRelationships(state: MutableStoreState): readonly DomainViolati
 function cloneState(state: MutableStoreState): MutableStoreState {
 	return {
 		workflows: new Map(state.workflows),
+		plans: new Map(state.plans),
 		tasks: new Map(state.tasks),
 		attempts: new Map(state.attempts),
 		verifications: new Map(state.verifications),
@@ -548,6 +695,7 @@ function cloneState(state: MutableStoreState): MutableStoreState {
 export class WorkflowStore {
 	#state: MutableStoreState = {
 		workflows: new Map(),
+		plans: new Map(),
 		tasks: new Map(),
 		attempts: new Map(),
 		verifications: new Map(),
@@ -622,6 +770,18 @@ export class WorkflowStore {
 	getWorkflow(workflowId: WorkflowId): Workflow | undefined {
 		const workflow = this.#state.workflows.get(workflowId);
 		return workflow ? structuredClone(workflow) : undefined;
+	}
+
+	getPlan(planId: PlanId): Plan | undefined {
+		const plan = this.#state.plans.get(planId);
+		return plan ? structuredClone(plan) : undefined;
+	}
+
+	listPlans(workflowId: WorkflowId): readonly Plan[] {
+		return [...this.#state.plans.values()]
+			.filter((plan) => plan.workflowId === workflowId)
+			.sort((left, right) => left.version - right.version)
+			.map((plan) => structuredClone(plan));
 	}
 
 	getTask(taskId: TaskId): Task | undefined {

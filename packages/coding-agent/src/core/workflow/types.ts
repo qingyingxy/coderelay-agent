@@ -80,6 +80,9 @@ export type VerificationStatus = "not_started" | "running" | "passed" | "failed"
 export type TaskKind = "agent" | "command" | "control" | "repair";
 export type ExecutorKind = "main_agent" | "subagent" | "job";
 
+export const PLAN_STATUSES = ["draft", "awaiting_approval", "approved", "rejected", "superseded"] as const;
+export type PlanStatus = (typeof PLAN_STATUSES)[number];
+
 export interface EntityMetadata {
 	readonly schemaVersion: number;
 	readonly revision: number;
@@ -175,6 +178,46 @@ export interface VerificationResult {
 	readonly skipReason?: string;
 	readonly startedAt?: IsoDateTime;
 	readonly endedAt?: IsoDateTime;
+}
+
+export const FILE_INTENT_ACTIONS = ["inspect", "create", "modify", "delete"] as const;
+export type FileIntentAction = (typeof FILE_INTENT_ACTIONS)[number];
+
+export interface FileIntent {
+	readonly path: string;
+	readonly action: FileIntentAction;
+	readonly reason: string;
+}
+
+export interface PlanRisk {
+	readonly level: RiskLevel;
+	readonly description: string;
+	readonly mitigation: string;
+}
+
+export interface PlanStep {
+	readonly id: PlanStepId;
+	readonly title: string;
+	readonly description: string;
+	readonly dependsOn: readonly PlanStepId[];
+	readonly fileIntents: readonly FileIntent[];
+	readonly verificationRequirementIds: readonly string[];
+}
+
+export interface PlanContent {
+	readonly goal: string;
+	readonly assumptions: readonly string[];
+	readonly steps: readonly PlanStep[];
+	readonly risks: readonly PlanRisk[];
+	readonly verificationRequirements: readonly VerificationRequirement[];
+}
+
+export interface Plan extends EntityMetadata, PlanContent {
+	readonly id: PlanId;
+	readonly workflowId: WorkflowId;
+	readonly version: number;
+	readonly supersedesPlanId?: PlanId;
+	readonly status: PlanStatus;
 }
 
 export interface TaskAssignment {

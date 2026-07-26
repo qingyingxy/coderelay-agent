@@ -74,6 +74,21 @@ describe("workflow transitions", () => {
 		]);
 	});
 
+	it("stops Direct writes and creates a draft before upgrading to Plan", () => {
+		expect(
+			validateWorkflowTransition("executing", "planning", {
+				directPlanUpgradeRequested: true,
+				writeOperationsStopped: true,
+				draftPlanCreated: true,
+			}),
+		).toEqual([]);
+		expect(codes(validateWorkflowTransition("executing", "planning"))).toEqual([
+			"workflow.direct_plan_upgrade_required",
+			"workflow.write_operations_active",
+			"workflow.draft_plan_required",
+		]);
+	});
+
 	it("resumes a blocked workflow only to its recorded state", () => {
 		expect(
 			validateWorkflowTransition("blocked", "executing", {

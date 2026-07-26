@@ -1,4 +1,4 @@
-import type { AttemptStatus, TaskStatus, WorkflowBlockedResumeStatus, WorkflowStatus } from "./types.ts";
+import type { AttemptStatus, PlanStatus, TaskStatus, WorkflowBlockedResumeStatus, WorkflowStatus } from "./types.ts";
 
 export interface DomainViolation {
 	readonly code: string;
@@ -23,6 +23,8 @@ export interface WorkflowTransitionFacts {
 	readonly blockedReasonPresent?: boolean;
 	readonly blockResolved?: boolean;
 	readonly blockedResumeStatus?: WorkflowBlockedResumeStatus;
+	readonly directPlanUpgradeRequested?: boolean;
+	readonly draftPlanCreated?: boolean;
 	readonly writeOperationsStopped?: boolean;
 	readonly cancellationRequested?: boolean;
 	readonly failureTerminalCondition?: boolean;
@@ -47,6 +49,13 @@ export interface TaskTransitionFacts {
 	readonly writerLeaseHeld?: boolean;
 	readonly controlTask?: boolean;
 	readonly taskNoLongerRequired?: boolean;
+}
+
+export interface PlanTransitionFacts {
+	readonly structureValid?: boolean;
+	readonly latestVersion?: boolean;
+	readonly readOnly?: boolean;
+	readonly replacementPlanCreated?: boolean;
 }
 
 const WORKFLOW_TRANSITIONS: Readonly<Record<WorkflowStatus, readonly WorkflowStatus[]>> = {
@@ -86,6 +95,14 @@ const ATTEMPT_TRANSITIONS: Readonly<Record<AttemptStatus, readonly AttemptStatus
 	interrupted: [],
 };
 
+const PLAN_TRANSITIONS: Readonly<Record<PlanStatus, readonly PlanStatus[]>> = {
+	draft: ["awaiting_approval", "superseded"],
+	awaiting_approval: ["approved", "rejected", "superseded"],
+	approved: [],
+	rejected: [],
+	superseded: [],
+};
+
 function violation(code: string, message: string): DomainViolation {
 	return { code, message };
 }
@@ -111,6 +128,10 @@ export function isTaskTerminalStatus(status: TaskStatus): boolean {
 
 export function isAttemptTerminalStatus(status: AttemptStatus): boolean {
 	return ATTEMPT_TRANSITIONS[status].length === 0;
+}
+
+export function isPlanTerminalStatus(status: PlanStatus): boolean {
+	return PLAN_TRANSITIONS[status].length === 0;
 }
 
 export function validateRevisionTransition(currentRevision: number, nextRevision: number): readonly DomainViolation[] {
@@ -206,9 +227,21 @@ export function validateWorkflowTransition(
 	if (from === "executing" && to === "planning") {
 		requireFact(
 			violations,
+			facts.directPlanUpgradeRequested,
+			"workflow.direct_plan_upgrade_required",
+			"A Direct Plan upgrade request must be persisted before entering planning",
+		);
+		requireFact(
+			violations,
 			facts.writeOperationsStopped,
 			"workflow.write_operations_active",
 			"Write operations must stop before entering planning",
+		);
+		requireFact(
+			violations,
+			facts.draftPlanCreated,
+			"workflow.draft_plan_required",
+			"A draft Plan must be created before entering planning",
 		);
 	}
 
@@ -314,6 +347,42 @@ export function validateWorkflowTransition(
 		);
 	}
 
+	return violations;
+}
+
+export function validatePlanTransition(
+	from: PlanStatus,
+	to: PlanStatus,
+	facts: PlanTransitionFacts = {},
+): readonly DomainViolation[] {
+	if (!PLAN_TRANSITIONS[from].includes(to)) {
+		return [violation("plan.invalid_transition", `Plan cannot transition from ${from} to ${to}`)];
+	}
+
+	const violations: DomainViolation[] = [];
+	if (from === "draft" && to === "awaiting_approval") {
+		requireFact(
+			violations,
+			facts.structureValid,
+			"plan.structure_invalid",
+			"Plan structure must be valid before requesting approval",
+		);
+		requireFact(
+			violations,
+			facts.latestVersion,
+			"plan.latest_version_required",
+			"Only the latest Plan version can request approval",
+		);
+		requireFact(violations, facts.readOnly, "plan.write_detected", "Planning must remain read-only");
+	}
+	if (to === "superseded") {
+		requireFact(
+			violations,
+			facts.replacementPlanCreated,
+			"plan.replacement_required",
+			"A replacement Plan must exist before superseding a Plan",
+		);
+	}
 	return violations;
 }
 

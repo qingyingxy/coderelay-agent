@@ -2,6 +2,7 @@ export * from "./agent-profile.ts";
 export * from "./agent-session-adapter.ts";
 export * from "./clarification-gate.ts";
 export * from "./controller.ts";
+export * from "./direct-plan-upgrade.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";
 export * from "./invariants.ts";

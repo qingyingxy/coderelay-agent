@@ -1,7 +1,17 @@
 import type { DomainViolation } from "./transitions.ts";
 import { isAttemptTerminalStatus, isWorkflowTerminalStatus } from "./transitions.ts";
-import type { Attempt, BudgetLimit, EntityMetadata, ResourceUsage, Task, Workflow } from "./types.ts";
-import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
+import type {
+	Attempt,
+	BudgetLimit,
+	EntityMetadata,
+	Plan,
+	PlanStep,
+	ResourceUsage,
+	Task,
+	VerificationRequirement,
+	Workflow,
+} from "./types.ts";
+import { FILE_INTENT_ACTIONS, PLAN_STATUSES, WORKFLOW_SCHEMA_VERSION } from "./types.ts";
 
 function violation(code: string, message: string): DomainViolation {
 	return { code, message };
@@ -65,6 +75,167 @@ function validateBudget(budget: BudgetLimit, entityName: string): DomainViolatio
 
 function hasDuplicates(values: readonly string[]): boolean {
 	return new Set(values).size !== values.length;
+}
+
+function validateVerificationRequirement(
+	requirement: VerificationRequirement,
+	entityName: string,
+): readonly DomainViolation[] {
+	const violations: DomainViolation[] = [];
+	if (!requirement.id.trim()) {
+		violations.push(violation(`${entityName}.verification_id_required`, "Verification requirement id is required"));
+	}
+	if (!requirement.description.trim()) {
+		violations.push(
+			violation(`${entityName}.verification_description_required`, "Verification description is required"),
+		);
+	}
+	if (requirement.command !== undefined && !requirement.command.trim()) {
+		violations.push(violation(`${entityName}.verification_command_required`, "Verification command cannot be empty"));
+	}
+	return violations;
+}
+
+function validatePlanStep(
+	step: PlanStep,
+	stepIds: ReadonlySet<string>,
+	verificationIds: ReadonlySet<string>,
+): readonly DomainViolation[] {
+	const violations: DomainViolation[] = [];
+	if (!step.id.trim()) {
+		violations.push(violation("plan.step_id_required", "Plan step id is required"));
+	}
+	if (!step.title.trim() || !step.description.trim()) {
+		violations.push(violation("plan.step_content_required", `Plan step ${step.id} requires a title and description`));
+	}
+	if (hasDuplicates(step.dependsOn)) {
+		violations.push(violation("plan.duplicate_step_dependency", `Plan step ${step.id} dependencies must be unique`));
+	}
+	if (step.dependsOn.includes(step.id)) {
+		violations.push(violation("plan.self_step_dependency", `Plan step ${step.id} cannot depend on itself`));
+	}
+	for (const dependencyId of step.dependsOn) {
+		if (!stepIds.has(dependencyId)) {
+			violations.push(
+				violation("plan.step_dependency_missing", `Plan step ${step.id} references missing step ${dependencyId}`),
+			);
+		}
+	}
+	if (hasDuplicates(step.verificationRequirementIds)) {
+		violations.push(
+			violation("plan.duplicate_step_verification", `Plan step ${step.id} verification ids must be unique`),
+		);
+	}
+	for (const verificationId of step.verificationRequirementIds) {
+		if (!verificationIds.has(verificationId)) {
+			violations.push(
+				violation(
+					"plan.step_verification_missing",
+					`Plan step ${step.id} references missing verification ${verificationId}`,
+				),
+			);
+		}
+	}
+	for (const intent of step.fileIntents) {
+		if (!intent.path.trim() || !intent.reason.trim()) {
+			violations.push(
+				violation("plan.file_intent_invalid", `Plan step ${step.id} file intents require a path and reason`),
+			);
+		}
+		if (!FILE_INTENT_ACTIONS.some((action) => action === intent.action)) {
+			violations.push(
+				violation("plan.file_intent_action_invalid", `Plan step ${step.id} has an invalid file intent action`),
+			);
+		}
+	}
+	return violations;
+}
+
+function hasPlanStepCycle(steps: readonly PlanStep[]): boolean {
+	const dependencies = new Map(steps.map((step) => [step.id, step.dependsOn]));
+	const visiting = new Set<string>();
+	const visited = new Set<string>();
+	const visit = (stepId: string): boolean => {
+		if (visiting.has(stepId)) {
+			return true;
+		}
+		if (visited.has(stepId)) {
+			return false;
+		}
+		visiting.add(stepId);
+		for (const dependencyId of dependencies.get(stepId) ?? []) {
+			if (dependencies.has(dependencyId) && visit(dependencyId)) {
+				return true;
+			}
+		}
+		visiting.delete(stepId);
+		visited.add(stepId);
+		return false;
+	};
+	return steps.some((step) => visit(step.id));
+}
+
+export function validatePlan(plan: Plan): readonly DomainViolation[] {
+	const violations = [...validateMetadata(plan, "plan")];
+	if (!plan.id.trim()) {
+		violations.push(violation("plan.id_required", "Plan id is required"));
+	}
+	if (!plan.workflowId.trim()) {
+		violations.push(violation("plan.workflow_id_required", "Plan workflow id is required"));
+	}
+	if (!Number.isInteger(plan.version) || plan.version < 1) {
+		violations.push(violation("plan.invalid_version", "Plan version must be a positive integer"));
+	}
+	if (plan.supersedesPlanId === plan.id) {
+		violations.push(violation("plan.self_supersedes", "Plan cannot supersede itself"));
+	}
+	if (!PLAN_STATUSES.some((status) => status === plan.status)) {
+		violations.push(violation("plan.invalid_status", `Plan status ${plan.status} is not supported`));
+	}
+	if (plan.assumptions.some((assumption) => !assumption.trim())) {
+		violations.push(violation("plan.invalid_assumption", "Plan assumptions cannot be empty"));
+	}
+
+	const stepIds = new Set(plan.steps.map(({ id }) => id));
+	if (stepIds.size !== plan.steps.length) {
+		violations.push(violation("plan.duplicate_step", "Plan step ids must be unique"));
+	}
+	const verificationIds = new Set(plan.verificationRequirements.map(({ id }) => id));
+	if (verificationIds.size !== plan.verificationRequirements.length) {
+		violations.push(violation("plan.duplicate_verification", "Plan verification ids must be unique"));
+	}
+	for (const requirement of plan.verificationRequirements) {
+		violations.push(...validateVerificationRequirement(requirement, "plan"));
+	}
+	for (const step of plan.steps) {
+		violations.push(...validatePlanStep(step, stepIds, verificationIds));
+	}
+	if (hasPlanStepCycle(plan.steps)) {
+		violations.push(violation("plan.step_cycle", "Plan step dependencies must be acyclic"));
+	}
+	for (const risk of plan.risks) {
+		if (!risk.description.trim() || !risk.mitigation.trim()) {
+			violations.push(violation("plan.risk_invalid", "Plan risks require a description and mitigation"));
+		}
+		if (!["low", "medium", "high"].includes(risk.level)) {
+			violations.push(violation("plan.risk_level_invalid", "Plan risk level is not supported"));
+		}
+	}
+
+	if (plan.status !== "draft") {
+		if (!plan.goal.trim()) {
+			violations.push(violation("plan.goal_required", `Plan ${plan.status} requires a goal`));
+		}
+		if (plan.steps.length === 0) {
+			violations.push(violation("plan.steps_required", `Plan ${plan.status} requires at least one step`));
+		}
+		if (plan.verificationRequirements.length === 0) {
+			violations.push(
+				violation("plan.verification_required", `Plan ${plan.status} requires verification requirements`),
+			);
+		}
+	}
+	return violations;
 }
 
 export function validateWorkflow(workflow: Workflow): readonly DomainViolation[] {

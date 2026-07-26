@@ -225,7 +225,7 @@ flowchart TB
 | R4.8 | `DONE` | 设计 Prompt 输入与顺序 | 用户需求、Plan、Task、Profile、Handoff、历史、项目规则、Tool Schema | R4.7 |
 | R4.9 | `DONE` | 设计裁剪和预算规则 | 不丢失安全约束、当前 Task 和必要 Handoff | R4.8 |
 | R4.10 | `DONE` | 对接 AgentSession | 不重复实现 Pi 已有 Prompt 和 Tool Schema 组装能力 | R3.8、R4.8 |
-| R4.11 | `TODO` | 设计 Direct 升级 Plan | 发现高复杂度或高风险时先停止写入，再请求批准 | R4.2、R5.2 |
+| R4.11 | `IMPLEMENTING` | 设计 Direct 升级 Plan | 发现高复杂度或高风险时先停止写入，再请求批准 | R4.2、R5.2 |
 | R4.12 | `TODO` | 编写模式与 Prompt 测试 | 覆盖用户覆盖、自动判断、裁剪、Profile 和版本记录 | R4.1-R4.11 |
 
 ### R5：正式 Plan Mode
@@ -233,7 +233,7 @@ flowchart TB
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
 | R5.1 | `TODO` | 复核现有 Plan Mode 示例 | 明确可复用命令、工具限制、Widget 和 Session Entry | R0.1 |
-| R5.2 | `TODO` | 实现 Plan 状态机 | Plan 可以创建、待批准、批准、拒绝和被新版本替代 | R1.3、R2.3 |
+| R5.2 | `DONE` | 实现 Plan 状态机 | Plan 可以创建、待批准、批准、拒绝和被新版本替代 | R1.3、R2.3 |
 | R5.3 | `TODO` | 实现 Planner 只读门禁 | Planner 禁用写工具，Bash 受只读策略限制 | R4.6 |
 | R5.4 | `TODO` | 实现 Plan 审批记录 | 保存批准、拒绝、修改内容和时间 | R2.7、R5.2 |
 | R5.5 | `TODO` | 实现 Plan 版本管理 | 修改或重新规划创建新版本，不覆盖旧版本 | R5.2、R5.4 |
@@ -465,12 +465,14 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R4.8 Prompt 输入顺序完成 | 按模型通道固定 Profile、项目规则、历史、当前 Workflow 上下文和 Tool Schema 的确定性顺序 |
 | 2026-07-26 | R4.9 Prompt 裁剪与预算完成 | 按优先级裁剪可选上下文，永久保留约束、当前 Task、用户需求和必要 Handoff，硬内容超预算时明确失败 |
 | 2026-07-26 | R4.10 AgentSession 适配完成 | 复用现有 System Prompt、历史、Tool Schema 和 Agent Loop，Envelope 只注入 Workflow 上下文并在当前活动工具边界内临时收紧能力 |
+| 2026-07-26 | R4.11 前置协议草案完成 | 已定义升级判定和停止写入守卫；正式 Plan 尚未实现，R4.11 等待 R5.2 后继续 |
+| 2026-07-26 | R5.2 正式 Plan 状态机完成 | Plan 实体、结构校验、五状态转换、领域事件和 WorkflowStore 重放已实现；审批记录、版本命令和 CLI 仍按后续任务推进 |
 
 ## 12. 下一步
 
 M1 Direct Workflow MVP 已完成并验证。M2 当前继续 R4：
 
-1. 完成 R4.11：设计 Direct 升级 Plan。
+1. 完成 R4.11：接入 Direct 升级 Plan。
 2. 完成 R4.12：补齐模式与 Prompt 回归测试。
 
 R4 完成前不同时展开正式 Plan 状态机、Task Graph、Subagent 或 Job。

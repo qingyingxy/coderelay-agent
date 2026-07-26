@@ -107,6 +107,7 @@ export function isPersistedWorkflowEventBatch(value: unknown): value is Persiste
 function isEntityCreationEvent(event: AnyWorkflowEvent): boolean {
 	return (
 		event.eventType === "workflow.created" ||
+		event.eventType === "plan.created" ||
 		event.eventType === "task.created" ||
 		event.eventType === "attempt.created" ||
 		event.eventType === "verification.started"

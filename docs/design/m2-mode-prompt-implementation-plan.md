@@ -55,6 +55,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.8：`DONE`
 - R4.9：`DONE`
 - R4.10：`DONE`
+- R5.2：`DONE`
+- R4.11：`IMPLEMENTING`
 - 下一项：R4.11
 
 ## 6. R4.2 模式选择顺序
@@ -197,3 +199,34 @@ R4.8 不替代 Pi 当前的 System Prompt、Skills、Prompt Templates、项目�
 - 同一个 AgentSession 同时只允许一个 Envelope 执行，忙碌时明确拒绝。
 
 独立 Planner、Reviewer 和 Subagent 的 AgentSession 创建与 Profile System Prompt 注入分别由 R5、R8 实现；R4.10 只固定可复用的执行接缝。
+
+## 15. R4.11 Direct 升级 Plan 前置草案
+
+Direct 执行期间可以重新运行与初始自动模式相同的结构化评估。只要评估不再允许 Direct，就生成 `upgrade_to_plan` 决策；高复杂度、高风险和低置信度会作为明确触发原因记录。
+
+升级顺序固定为：
+
+1. 持久化升级请求。
+2. 关闭新的写入准入。
+3. 停止当前 Writer。
+4. 创建 Draft Plan。
+5. `executing → planning`。
+6. Planner 只读生成完整 Plan。
+7. Plan 有效后进入 `awaiting_approval` 并请求用户批准。
+
+状态转换守卫要求“升级请求已记录、写操作已停止、Draft Plan 已创建”，不能从 Direct 任意跳到 Planning。升级不会把当前 Task 或 Attempt 伪装成成功。
+
+本节的前置协议草案已经完成。R5.2 现已提供正式 Plan 实体、状态事件和 Store，R4.11 可以继续接入 Controller、Attempt 中断和完整升级流程。
+
+## 16. R5.2 正式 Plan 状态机
+
+R5.2 提供可持久化和重放的 Plan 领域基础：
+
+- `Plan`、`PlanContent`、`PlanStep`、`FileIntent` 和 `PlanRisk` 领域类型。
+- `draft → awaiting_approval → approved/rejected`，以及 Draft 或待审批 Plan 进入 `superseded` 的状态机。
+- Draft 允许在规划过程中保持不完整；进入待审批前必须具备目标、步骤、无环依赖和验证要求。
+- `plan.created`、`plan.content_updated`、`plan.awaiting_approval`、`plan.approved`、`plan.rejected` 和 `plan.superseded` 事件。
+- `workflow.plan_selected` 建立 Workflow 与当前 Plan 的权威关联。
+- WorkflowStore 保存 Plan、检查版本与替代关系、禁止终态内容修改，并支持 Event Log 重放和防御性读取。
+
+R5.2 不实现审批意见记录、重新规划命令、Plan 转 Task 或 CLI；这些仍分别属于 R5.4、R5.5、R5.6 和 R5.8。
