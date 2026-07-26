@@ -53,7 +53,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.6：`DONE`
 - R4.7：`DONE`
 - R4.8：`DONE`
-- 下一项：R4.9
+- R4.9：`DONE`
+- 下一项：R4.10
 
 ## 6. R4.2 模式选择顺序
 
@@ -159,3 +160,25 @@ Envelope 使用以下规范顺序记录上下文来源：
 - Tool Schema 由 Pi AgentSession 的工具通道提供，Envelope 只记录来源与实际工具白名单。
 
 R4.8 不替代 Pi 当前的 System Prompt、Skills、Prompt Templates、项目上下文或 Tool Schema 组装。
+
+## 13. R4.9 Prompt 裁剪与预算
+
+裁剪器接收 `maxInputTokens`、预留 Token 和可注入的文本 Token 估算器。R4.9 不复制模型 tokenizer；R4.10 在最终消息构造阶段适配 Pi 已有的消息估算能力。
+
+不可裁剪内容：
+
+- 所有安全、权限、预算、Workflow 和输出约束。
+- 当前 Task 结构。
+- `agent_profile`、`user_request`、`task` 上下文。
+- 所有标记为 `required` 的上下文，包括必要 Handoff 和项目规则。
+- 输出 Schema 和实际工具白名单。
+
+可选上下文按以下顺序整块移除，直到满足预算：
+
+1. 最旧的历史。
+2. 非必要 Handoff。
+3. 可选 Plan 上下文。
+4. 非必要项目规则。
+5. Envelope 中的可选 Tool Schema 文本引用。
+
+同一来源内保持原顺序，因此历史总是从最旧条目开始裁剪。如果不可裁剪内容本身超过预算，返回明确错误，不静默删除安全约束、当前 Task 或必要 Handoff。
