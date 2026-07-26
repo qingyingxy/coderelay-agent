@@ -12,6 +12,23 @@ const WORKFLOW_ID = "workflow-1";
 const TASK_ID = "task-1";
 const ATTEMPT_ID = "attempt-1";
 const VERIFICATION_ID = "verification-1";
+const CANCEL_USAGE = {
+	inputTokens: 10,
+	outputTokens: 5,
+	cacheReadTokens: 2,
+	cacheWriteTokens: 1,
+	cost: 0.01,
+	turns: 1,
+	durationMs: 25,
+};
+const CANCEL_WORKFLOW_USAGE = {
+	...CANCEL_USAGE,
+	inputTokens: 30,
+	outputTokens: 15,
+	cost: 0.03,
+	turns: 2,
+	durationMs: 50,
+};
 
 function createHarness(session = SessionManager.inMemory()): {
 	readonly controller: WorkflowController;
@@ -356,8 +373,9 @@ describe("WorkflowController", () => {
 			workflowId: WORKFLOW_ID,
 			taskId: TASK_ID,
 			reason: "User cancelled",
-			usage: ZERO_USAGE,
-			durationMs: 5,
+			usage: CANCEL_WORKFLOW_USAGE,
+			attemptUsage: CANCEL_USAGE,
+			durationMs: CANCEL_WORKFLOW_USAGE.durationMs,
 			runtimeResourcesStopped: true,
 			writerLeaseReleased: true,
 		});
@@ -373,8 +391,12 @@ describe("WorkflowController", () => {
 			writerLeaseReleased: true,
 		});
 
-		expect(store.getAttempt(ATTEMPT_ID)?.status).toBe("cancelled");
+		expect(store.getAttempt(ATTEMPT_ID)).toMatchObject({
+			status: "cancelled",
+			usage: CANCEL_USAGE,
+		});
 		expect(store.getTask(TASK_ID)?.status).toBe("cancelled");
+		expect(store.getWorkflow(WORKFLOW_ID)?.result?.usage).toEqual(CANCEL_WORKFLOW_USAGE);
 		expect(repeatedFinish).toMatchObject({
 			applied: false,
 			workflow: {

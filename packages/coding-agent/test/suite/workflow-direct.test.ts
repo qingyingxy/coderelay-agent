@@ -26,7 +26,7 @@ describe("Direct Workflow AgentSession integration", () => {
 		}
 	});
 
-	it("records a successful faux-provider run as an Attempt awaiting verification", async () => {
+	it("completes a successful faux-provider run after basic verification", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.session.enableWorkflowTracking();
@@ -38,14 +38,27 @@ describe("Direct Workflow AgentSession integration", () => {
 		const workflow = store.getWorkflow(workflowId);
 		const task = workflow?.rootTaskId ? store.getTask(workflow.rootTaskId) : undefined;
 		const attempt = task?.currentAttemptId ? store.getAttempt(task.currentAttemptId) : undefined;
-		expect(workflow?.status).toBe("executing");
-		expect(task?.status).toBe("verifying");
+		expect(workflow?.status).toBe("completed");
+		expect(task?.status).toBe("succeeded");
 		expect(attempt).toMatchObject({
 			number: 1,
 			status: "succeeded",
 			usage: {
 				turns: 1,
 			},
+		});
+		const verificationId = task?.result?.verificationIds[0];
+		expect(verificationId).toBeDefined();
+		expect(verificationId ? store.getVerification(verificationId) : undefined).toMatchObject({
+			status: "passed",
+			evidenceRefs: ["review:not-configured", "test:not-configured", "build:not-configured"],
+		});
+		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
+			status: "completed",
+			task: {
+				status: "succeeded",
+			},
+			changedFiles: [],
 		});
 	});
 
@@ -87,7 +100,83 @@ describe("Direct Workflow AgentSession integration", () => {
 			number: 2,
 			status: "succeeded",
 		});
-		expect(task?.status).toBe("verifying");
-		expect(workflow?.status).toBe("executing");
+		expect(task?.status).toBe("succeeded");
+		expect(workflow?.status).toBe("completed");
+	});
+
+	it("reports the final AgentSession failure reason", async () => {
+		const harness = await createHarness({
+			settings: {
+				retry: {
+					enabled: false,
+				},
+			},
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: "invalid_api_key",
+			}),
+		]);
+
+		await harness.session.prompt("Implement a CLI change");
+
+		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
+			status: "failed",
+			failureReason: "invalid_api_key",
+			task: {
+				status: "failed",
+			},
+			attempts: [
+				{
+					status: "failed",
+					failure: {
+						message: "invalid_api_key",
+						retryable: false,
+					},
+				},
+			],
+		});
+	});
+
+	it("cancels an active AgentSession before persisting the terminal Workflow state", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage("x".repeat(20_000))]);
+
+		const sawMessageUpdate = new Promise<void>((resolve) => {
+			const unsubscribe = harness.session.subscribe((event) => {
+				if (event.type === "message_update") {
+					unsubscribe();
+					resolve();
+				}
+			});
+		});
+		const promptPromise = harness.session.prompt("Implement a CLI change");
+		await sawMessageUpdate;
+
+		expect(await harness.session.cancelWorkflow("User cancelled")).toBe(true);
+		await promptPromise;
+
+		const { store, workflowId } = replayWorkflow(harness);
+		const workflow = store.getWorkflow(workflowId);
+		const task = workflow?.rootTaskId ? store.getTask(workflow.rootTaskId) : undefined;
+		const attempt = task?.currentAttemptId ? store.getAttempt(task.currentAttemptId) : undefined;
+		expect(attempt?.status).toBe("cancelled");
+		expect(task?.status).toBe("cancelled");
+		expect(workflow).toMatchObject({
+			status: "cancelled",
+			result: {
+				reason: "User cancelled",
+			},
+		});
+		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
+			status: "cancelled",
+			failureReason: "User cancelled",
+		});
+		expect(await harness.session.cancelWorkflow()).toBe(false);
 	});
 });

@@ -14,7 +14,10 @@
 - R3.6 最小 WorkflowController：`DONE`
 - R3.7 接入 Direct 请求创建：`DONE`
 - R3.8 对接 Pi AgentSession：`DONE`
-- 下一项：R3.9 基础 Verification
+- R3.9 基础 Verification：`DONE`
+- R3.10 取消流程：`DONE`
+- R3.11 最终报告：`DONE`
+- 下一项：R3.12 最小 CLI 状态
 
 ## 1. 阶段目标
 

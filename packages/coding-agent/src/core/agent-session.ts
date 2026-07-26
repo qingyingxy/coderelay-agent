@@ -109,6 +109,7 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
+import type { WorkflowFinalReport } from "./workflow/report.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -316,6 +317,9 @@ export class AgentSession {
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 	private _workflowTrackingEnabled = false;
+	/** The workflow adapter for the in-flight Direct workflow, if any. */
+	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
+	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -1066,6 +1070,31 @@ export class AgentSession {
 		this._workflowTrackingEnabled = true;
 	}
 
+	/**
+	 * Cancel the in-flight Direct workflow, if any.
+	 *
+	 * Drives the two-phase cancellation flow (request → abort → finalize) and
+	 * resolves once the AgentSession is idle and the workflow is terminal.
+	 * Returns false when there is no active workflow to cancel.
+	 */
+	async cancelWorkflow(reason = "User cancelled the workflow"): Promise<boolean> {
+		const adapter = this._activeWorkflowAdapter;
+		if (!adapter) {
+			return false;
+		}
+		await adapter.cancel(reason);
+		const finalReport = adapter.finalReport;
+		if (finalReport) {
+			this._latestWorkflowReport = finalReport;
+		}
+		return true;
+	}
+
+	/** Return the latest terminal Direct Workflow report for this AgentSession. */
+	getLatestWorkflowReport(): WorkflowFinalReport | undefined {
+		return this._latestWorkflowReport ? structuredClone(this._latestWorkflowReport) : undefined;
+	}
+
 	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
 		return startDirectAgentSessionWorkflow(this, {
 			commandId: `command-${randomUUID()}`,
@@ -1280,6 +1309,7 @@ export class AgentSession {
 
 			if (directRequestText !== undefined) {
 				workflowAdapter = this._startDirectWorkflow(directRequestText);
+				this._activeWorkflowAdapter = workflowAdapter;
 			}
 		} catch (error) {
 			preflightResult?.(false);
@@ -1294,6 +1324,13 @@ export class AgentSession {
 		try {
 			await this._runAgentPrompt(messages);
 		} finally {
+			const finalReport = workflowAdapter?.finalReport;
+			if (finalReport) {
+				this._latestWorkflowReport = finalReport;
+			}
+			if (this._activeWorkflowAdapter === workflowAdapter) {
+				this._activeWorkflowAdapter = undefined;
+			}
 			workflowAdapter?.dispose();
 		}
 	}

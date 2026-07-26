@@ -18,6 +18,7 @@ import type {
 	UserRequest,
 	VerificationId,
 	VerificationRequirement,
+	VerificationResult,
 	Workflow,
 	WorkflowId,
 } from "./types.ts";
@@ -76,6 +77,8 @@ export type DirectRuntimeEvent =
 	| (RuntimeEventBase & {
 			readonly type: "attempt_failed";
 			readonly usage: ResourceUsage;
+			/** Aggregate Workflow usage through this Attempt. Defaults to `usage` for single-attempt callers. */
+			readonly workflowUsage?: ResourceUsage;
 			readonly willRetry: boolean;
 			readonly failure: Omit<FailureRecord, "retryable">;
 	  });
@@ -107,7 +110,10 @@ export interface RequestWorkflowCancellationCommand extends WorkflowCommandBase 
 export interface FinishWorkflowCancellationCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly reason: string;
+	/** Aggregate Workflow usage through cancellation. */
 	readonly usage: ResourceUsage;
+	/** Usage of the active Attempt only. Defaults to `usage` for single-attempt callers. */
+	readonly attemptUsage?: ResourceUsage;
 	readonly durationMs: number;
 	readonly runtimeResourcesStopped: boolean;
 	readonly writerLeaseReleased: boolean;
@@ -675,6 +681,9 @@ export class WorkflowController {
 			fail("controller.not_cancelling", `Workflow ${workflow.id} is not cancelling`);
 		}
 		assertValidUsage(command.usage);
+		if (command.attemptUsage) {
+			assertValidUsage(command.attemptUsage);
+		}
 		assertValidDuration(command.durationMs);
 
 		const occurredAt = this.#now();
@@ -694,7 +703,7 @@ export class WorkflowController {
 					fromStatus: attempt.status,
 					toStatus: "cancelled",
 					endedAt: occurredAt,
-					usage: structuredClone(attempt.usage),
+					usage: structuredClone(command.attemptUsage ?? command.usage),
 					reason: command.reason,
 				},
 			});
@@ -760,6 +769,14 @@ export class WorkflowController {
 	getRootTask(workflowId: WorkflowId): Task | undefined {
 		const workflow = this.#store.getWorkflow(workflowId);
 		return workflow?.rootTaskId ? this.#store.getTask(workflow.rootTaskId) : undefined;
+	}
+
+	listAttempts(taskId: TaskId): readonly Attempt[] {
+		return this.#store.listAttempts(taskId);
+	}
+
+	getVerification(verificationId: VerificationId): VerificationResult | undefined {
+		return this.#store.getVerification(verificationId);
 	}
 
 	#recordAttemptStarted(event: Extract<DirectRuntimeEvent, { type: "attempt_started" }>): WorkflowCommandResult {
@@ -889,6 +906,10 @@ export class WorkflowController {
 			);
 		}
 		assertValidUsage(event.usage);
+		if (event.workflowUsage) {
+			assertValidUsage(event.workflowUsage);
+		}
+		const workflowUsage = event.workflowUsage ?? event.usage;
 		const occurredAt = this.#now();
 		const attemptFailedId = this.#eventId();
 		const events: WorkflowEventDraft[] = [
@@ -979,8 +1000,8 @@ export class WorkflowController {
 							verificationIds: [],
 							risks: [],
 							unfinishedItems: [event.failure.message],
-							usage: structuredClone(event.usage),
-							durationMs: event.usage.durationMs,
+							usage: structuredClone(workflowUsage),
+							durationMs: workflowUsage.durationMs,
 							reason: event.failure.message,
 						},
 					},

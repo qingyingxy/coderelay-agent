@@ -7,8 +7,27 @@ import type { SessionManager } from "../session-manager.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
 import { SessionWorkflowEventLog } from "./event-log.ts";
+import { buildBasicVerificationReport, buildWorkflowFinalReport, type WorkflowFinalReport } from "./report.ts";
 import { WorkflowStore } from "./stores.ts";
-import type { AttemptId, ResourceUsage, TaskId, WorkflowId } from "./types.ts";
+import { isWorkflowTerminalStatus } from "./transitions.ts";
+import type { AttemptId, ResourceUsage, TaskId, VerificationId, WorkflowId } from "./types.ts";
+
+/** Built-in tools whose successful results contribute to the changed-file summary. */
+const MUTATION_TOOL_NAMES = new Set(["edit", "write"]);
+
+function mutatedPath(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null) {
+		return undefined;
+	}
+	const candidate = args as { path?: unknown; file_path?: unknown };
+	if (typeof candidate.path === "string" && candidate.path.length > 0) {
+		return candidate.path;
+	}
+	if (typeof candidate.file_path === "string" && candidate.file_path.length > 0) {
+		return candidate.file_path;
+	}
+	return undefined;
+}
 
 export interface WorkflowAgentSession {
 	readonly sessionManager: SessionManager;
@@ -46,6 +65,18 @@ function addUsage(target: ResourceUsage, usage: Usage): ResourceUsage {
 		cacheReadTokens: target.cacheReadTokens + usage.cacheRead,
 		cacheWriteTokens: target.cacheWriteTokens + usage.cacheWrite,
 		cost: target.cost + usage.cost.total,
+	};
+}
+
+function addResourceUsage(target: ResourceUsage, usage: ResourceUsage): ResourceUsage {
+	return {
+		inputTokens: target.inputTokens + usage.inputTokens,
+		outputTokens: target.outputTokens + usage.outputTokens,
+		cacheReadTokens: target.cacheReadTokens + usage.cacheReadTokens,
+		cacheWriteTokens: target.cacheWriteTokens + usage.cacheWriteTokens,
+		cost: target.cost + usage.cost,
+		turns: target.turns + usage.turns,
+		durationMs: target.durationMs + usage.durationMs,
 	};
 }
 
@@ -106,7 +137,16 @@ export class AgentSessionAdapter {
 	#activeAttemptId?: AttemptId;
 	#attemptStartedAt = 0;
 	#attemptUsage: ResourceUsage = zeroUsage();
+	#workflowUsage: ResourceUsage = zeroUsage();
 	#pendingAgentEnd?: PendingAgentEnd;
+	/** True once cancellation begins, so run settlement defers to the cancellation flow. */
+	#cancelling = false;
+	/** Memoized cancellation run so concurrent/repeated cancel calls share one flow. */
+	#cancelPromise?: Promise<void>;
+	/** In-flight mutation tool calls, keyed by toolCallId, awaiting their result. */
+	readonly #pendingMutations = new Map<string, string>();
+	/** Paths reported by successful edit/write tools across the whole workflow, in order. */
+	readonly #changedFiles: string[] = [];
 
 	constructor(
 		session: WorkflowAgentSession,
@@ -125,6 +165,24 @@ export class AgentSessionAdapter {
 
 	get controller(): WorkflowController {
 		return this.#controller;
+	}
+
+	get finalReport(): WorkflowFinalReport | undefined {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		const rootTask = this.#controller.getRootTask(this.#workflowId);
+		if (!workflow || !rootTask || !isWorkflowTerminalStatus(workflow.status) || !workflow.result) {
+			return undefined;
+		}
+		const verifications = workflow.result.verificationIds.flatMap((verificationId) => {
+			const verification = this.#controller.getVerification(verificationId);
+			return verification ? [verification] : [];
+		});
+		return buildWorkflowFinalReport({
+			workflow,
+			rootTask,
+			attempts: this.#controller.listAttempts(rootTask.id),
+			verifications,
+		});
 	}
 
 	start(): this {
@@ -150,6 +208,64 @@ export class AgentSessionAdapter {
 		await this.#session.waitForIdle();
 	}
 
+	/**
+	 * Cancel the Direct workflow in two phases (design §5.3).
+	 *
+	 * Phase 1 persists the cancel request (`executing → cancelling`). Phase 2 stops
+	 * the AgentSession and waits for it to return to idle. Only then does phase 3
+	 * finalize the terminal `cancelled` state (attempt → task → workflow). The run
+	 * settlement events that fire during `abort()` are suppressed while `#cancelling`
+	 * is set, so an aborted run is not double-recorded as a failure.
+	 *
+	 * Repeated or concurrent calls share the same in-flight cancellation.
+	 */
+	async cancel(reason: string): Promise<void> {
+		this.#cancelPromise ??= this.#runCancellation(reason);
+		await this.#cancelPromise;
+	}
+
+	async #runCancellation(reason: string): Promise<void> {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow || isWorkflowTerminalStatus(workflow.status)) {
+			return;
+		}
+		this.#cancelling = true;
+		// Phase 1: persist the cancel request. Idempotent if already cancelling.
+		this.#controller.requestCancellation({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			reason,
+		});
+		// Phase 2: stop the AgentSession and wait until it is idle.
+		await this.#session.abort();
+		await this.#session.waitForIdle();
+		// Phase 3: finalize the terminal cancelled state.
+		this.#finishCancellation(reason);
+	}
+
+	#finishCancellation(reason: string): void {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow || workflow.status !== "cancelling") {
+			return;
+		}
+		const attemptUsage = this.#activeAttemptId ? this.#completedUsage() : zeroUsage();
+		const workflowUsage = addResourceUsage(this.#workflowUsage, attemptUsage);
+		this.#controller.finishCancellation({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			reason,
+			usage: workflowUsage,
+			attemptUsage,
+			durationMs: workflowUsage.durationMs,
+			runtimeResourcesStopped: true,
+			writerLeaseReleased: true,
+		});
+		this.#workflowUsage = workflowUsage;
+		this.#activeAttemptId = undefined;
+		this.#pendingAgentEnd = undefined;
+	}
+
 	dispose(): void {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
@@ -169,6 +285,12 @@ export class AgentSessionAdapter {
 					turns: this.#attemptUsage.turns + 1,
 				};
 				return;
+			case "tool_execution_start":
+				this.#handleToolStart(event);
+				return;
+			case "tool_execution_end":
+				this.#handleToolEnd(event);
+				return;
 			case "agent_end":
 				this.#handleAgentEnd(event);
 				return;
@@ -179,6 +301,9 @@ export class AgentSessionAdapter {
 	};
 
 	#handleAgentStart(): void {
+		if (this.#cancelling) {
+			return;
+		}
 		this.#pendingAgentEnd = undefined;
 		const task = this.#controller.getRootTask(this.#workflowId);
 		if (!task) {
@@ -220,7 +345,38 @@ export class AgentSessionAdapter {
 		}
 	}
 
+	#handleToolStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): void {
+		if (!this.#activeAttemptId || !MUTATION_TOOL_NAMES.has(event.toolName)) {
+			return;
+		}
+		const path = mutatedPath(event.args);
+		if (path) {
+			this.#pendingMutations.set(event.toolCallId, path);
+		}
+	}
+
+	#handleToolEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): void {
+		const path = this.#pendingMutations.get(event.toolCallId);
+		if (path === undefined) {
+			return;
+		}
+		this.#pendingMutations.delete(event.toolCallId);
+		// Only successful edit/write results count; failed mutations are not claimed.
+		if (event.isError) {
+			return;
+		}
+		if (!this.#changedFiles.includes(path)) {
+			this.#changedFiles.push(path);
+		}
+	}
+
 	#handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
+		// During cancellation the abort-driven run settlement is handled by the
+		// cancellation flow, not recorded as a normal success/failure.
+		if (this.#cancelling) {
+			this.#pendingAgentEnd = undefined;
+			return;
+		}
 		if (!this.#activeAttemptId) {
 			throw new Error(`Workflow ${this.#workflowId} received agent_end without an active attempt`);
 		}
@@ -233,43 +389,83 @@ export class AgentSessionAdapter {
 	}
 
 	#handleAgentSettled(): void {
+		if (this.#cancelling) {
+			this.#pendingAgentEnd = undefined;
+			return;
+		}
 		if (!this.#activeAttemptId || !this.#pendingAgentEnd) {
 			return;
 		}
 		const { message } = this.#pendingAgentEnd;
 		this.#pendingAgentEnd = undefined;
 		if (message?.stopReason === "stop") {
+			const attemptId = this.#activeAttemptId;
 			const summary = contentText(message.content, "").trim() || "AgentSession completed";
+			const attemptUsage = this.#completedUsage();
+			const workflowUsage = addResourceUsage(this.#workflowUsage, attemptUsage);
+			const verificationId = this.#createId("verification");
 			this.#controller.handleRuntimeEvent({
 				type: "attempt_succeeded",
 				commandId: this.#createId("command"),
 				workflowId: this.#workflowId,
 				taskId: this.#taskId,
-				attemptId: this.#activeAttemptId,
-				verificationId: this.#createId("verification"),
-				usage: this.#completedUsage(),
+				attemptId,
+				verificationId,
+				usage: attemptUsage,
 				summary,
 			});
+			this.#workflowUsage = workflowUsage;
 			this.#activeAttemptId = undefined;
+			this.#completeVerification(verificationId, summary, workflowUsage);
 			return;
 		}
 		this.#recordAttemptFailure(message, false);
+	}
+
+	/**
+	 * Run M1 basic verification and drive the workflow to `completed`.
+	 *
+	 * Basic verification only confirms what M1 can honestly assert: the attempt
+	 * settled successfully with no active attempt remaining, and the successful
+	 * edit/write results form the changed-file set. Review/Test/Build are reported
+	 * as not configured and never fabricated. The controller invariants enforce the
+	 * remaining structural checks (attempt succeeded, task verifying, verification running).
+	 */
+	#completeVerification(verificationId: VerificationId, summary: string, usage: ResourceUsage): void {
+		const report = buildBasicVerificationReport({ changedFiles: this.#changedFiles });
+		this.#controller.complete({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			verificationId,
+			summary,
+			changedFiles: report.changedFiles,
+			evidenceRefs: report.evidenceRefs,
+			risks: [],
+			unfinishedItems: [],
+			usage,
+			durationMs: usage.durationMs,
+		});
 	}
 
 	#recordAttemptFailure(message: AssistantMessage | undefined, willRetry: boolean): void {
 		if (!this.#activeAttemptId) {
 			throw new Error(`Workflow ${this.#workflowId} has no active attempt to fail`);
 		}
+		const attemptUsage = this.#completedUsage();
+		const workflowUsage = addResourceUsage(this.#workflowUsage, attemptUsage);
 		this.#controller.handleRuntimeEvent({
 			type: "attempt_failed",
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 			taskId: this.#taskId,
 			attemptId: this.#activeAttemptId,
-			usage: this.#completedUsage(),
+			usage: attemptUsage,
+			workflowUsage,
 			willRetry,
 			failure: failureFrom(message),
 		});
+		this.#workflowUsage = workflowUsage;
 		this.#activeAttemptId = undefined;
 		this.#pendingAgentEnd = undefined;
 	}

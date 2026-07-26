@@ -199,9 +199,9 @@ flowchart TB
 | R3.6 | `DONE` | 实现最小 WorkflowController | 支持 Direct start、runtime event、complete、fail、cancel 和幂等命令 | R2.8、R2.9、R3.5 |
 | R3.7 | `DONE` | 接入 Direct 请求创建 | 每个普通顶层请求调用 Controller 生成 Workflow、根 Task 和 ModeDecision | R3.6 |
 | R3.8 | `DONE` | 对接 Pi AgentSession | 复用 prompt、subscribe、abort 和 SessionManager，正确处理 `willRetry` | R3.6、R3.7 |
-| R3.9 | `TODO` | 实现基础 Verification | 检查最终 Agent 结果和活动 Attempt，不虚构 Review/Test/Build | R1.6、R3.8 |
-| R3.10 | `TODO` | 实现基础取消 | Executing → Cancelling，等待 AgentSession idle 后再 Cancelled | R2.9、R3.6、R3.8 |
-| R3.11 | `TODO` | 生成基础最终报告 | 输出状态、Task、Attempt、修改文件、验证限制、失败原因和资源用量 | R3.9、R3.10 |
+| R3.9 | `DONE` | 实现基础 Verification | 检查最终 Agent 结果和活动 Attempt，不虚构 Review/Test/Build | R1.6、R3.8 |
+| R3.10 | `DONE` | 实现基础取消 | Executing → Cancelling，等待 AgentSession idle 后再 Cancelled | R2.9、R3.6、R3.8 |
+| R3.11 | `DONE` | 生成基础最终报告 | 输出状态、Task、Attempt、修改文件、验证限制、失败原因和资源用量 | R3.9、R3.10 |
 | R3.12 | `TODO` | 提供最小 CLI 状态 | `/workflow`、`/workflow-cancel` 和状态行可以展示权威状态 | R3.6、R3.11 |
 | R3.13 | `TODO` | 编写领域与持久化测试 | 覆盖类型约束、状态机、Store、Event 重放和幂等 | R3.2-R3.6 |
 | R3.14 | `TODO` | 编写 AgentSession 集成测试 | 使用 Fake Provider 覆盖成功、重试、失败、取消和修改文件汇总 | R3.7-R3.13 |
@@ -443,14 +443,17 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R3.6 最小 WorkflowController 完成 | Direct 命令、运行事件、完成、失败、两阶段取消和幂等处理已由 13 个聚焦测试覆盖 |
 | 2026-07-26 | R3.7 Direct 请求创建接入完成 | CLI 顶层 Prompt 在 Agent Loop 前创建 Workflow、根 Task 和 ModeDecision，SDK 默认行为不变，已由 5 个聚焦测试覆盖 |
 | 2026-07-26 | R3.8 AgentSession Adapter 完成 | AgentSession 生命周期已映射为 Task 与 Attempt 事件，自动重试保留独立 Attempt，并由 4 个适配器测试和 2 个 faux provider 集成测试覆盖 |
+| 2026-07-26 | R3.9 基础 Verification 完成 | 成功的 AgentSession 运行进入验证并完成 Workflow，只汇总成功 edit/write，Review/Test/Build 明确标记为未配置 |
+| 2026-07-26 | R3.10 基础取消完成 | 取消请求先持久化，等待 AgentSession idle 后再依次取消 Attempt、Task 和 Workflow，并覆盖并发调用与未启动边界 |
+| 2026-07-26 | R3.11 基础最终报告完成 | 成功、失败和取消终态均生成结构化报告，包含 Task、Attempt、修改文件、验证限制、失败原因和聚合资源用量 |
 
 ## 12. 下一步
 
 M0 已验证完成。下一步进入 M1 的 R3 Direct Workflow MVP：
 
 1. R3.1 已完成：源码和测试边界已经固定。
-2. R3.2-R3.8 已完成；接下来实现 R3.9：基础 Verification。
-3. 实现 R3.9-R3.10：基础验证和取消。
+2. R3.2-R3.11 已完成；接下来实现 R3.12：最小 CLI 状态。
+3. 实现 R3.12：`/workflow`、`/workflow-cancel` 和状态展示。
 4. 实现 R3.11-R3.12：最终报告和最小 CLI 状态。
 5. 完成 R3.13-R3.15：测试、检查和可重复演示。
 
