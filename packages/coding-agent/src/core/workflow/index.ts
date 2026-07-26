@@ -1,3 +1,4 @@
+export * from "./controller.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";
 export * from "./invariants.ts";

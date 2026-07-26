@@ -652,6 +652,10 @@ export class WorkflowStore {
 		return verification ? structuredClone(verification.result) : undefined;
 	}
 
+	getVerificationRevision(verificationId: VerificationId): number | undefined {
+		return this.#state.verifications.get(verificationId)?.revision;
+	}
+
 	getLastSequence(workflowId: WorkflowId): number {
 		return this.#lastSequences.get(workflowId) ?? 0;
 	}

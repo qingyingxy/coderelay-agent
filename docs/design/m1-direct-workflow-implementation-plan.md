@@ -11,7 +11,8 @@
 - R3.3 状态转换与不变量：`DONE`
 - R3.4 Workflow Event Batch：`DONE`
 - R3.5 Session Event Log 与 Store：`DONE`
-- 下一项：R3.6 最小 WorkflowController
+- R3.6 最小 WorkflowController：`DONE`
+- 下一项：R3.7 接入 Direct 请求创建
 
 ## 1. 阶段目标
 

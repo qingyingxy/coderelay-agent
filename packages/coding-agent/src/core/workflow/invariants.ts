@@ -213,7 +213,12 @@ export function validateAttempt(attempt: Attempt): readonly DomainViolation[] {
 	if (!Number.isInteger(attempt.number) || attempt.number < 1) {
 		violations.push(violation("attempt.invalid_number", "Attempt number must be a positive integer"));
 	}
-	if (attempt.status !== "queued" && !attempt.startedAt) {
+	if (
+		attempt.status !== "queued" &&
+		attempt.status !== "cancelled" &&
+		attempt.status !== "interrupted" &&
+		!attempt.startedAt
+	) {
 		violations.push(violation("attempt.start_required", `Attempt ${attempt.status} requires a start time`));
 	}
 	if (isAttemptTerminalStatus(attempt.status) && !attempt.endedAt) {
