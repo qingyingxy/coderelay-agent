@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
@@ -107,6 +108,9 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
+import { WorkflowController } from "./workflow/controller.ts";
+import { SessionWorkflowEventLog } from "./workflow/event-log.ts";
+import { WorkflowStore } from "./workflow/stores.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -313,6 +317,7 @@ export class AgentSession {
 	private _isAgentRunActive = false;
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
+	private _workflowTrackingEnabled = false;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -1058,6 +1063,25 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
+	/** Enable CLI Workflow creation for accepted top-level prompts. */
+	enableWorkflowTracking(): void {
+		this._workflowTrackingEnabled = true;
+	}
+
+	private _startDirectWorkflow(requestText: string): void {
+		const controller = new WorkflowController(new SessionWorkflowEventLog(this.sessionManager), new WorkflowStore());
+		controller.startDirect({
+			commandId: `command-${randomUUID()}`,
+			workflowId: `workflow-${randomUUID()}`,
+			rootTaskId: `task-${randomUUID()}`,
+			request: {
+				text: requestText,
+				cwd: this._cwd,
+				attachments: [],
+			},
+		});
+	}
+
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
 		this._isAgentRunActive = true;
 		try {
@@ -1115,6 +1139,7 @@ export class AgentSession {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
+		let directRequestText: string | undefined;
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -1146,6 +1171,9 @@ export class AgentSession {
 					currentText = inputResult.text;
 					currentImages = inputResult.images ?? currentImages;
 				}
+			}
+			if (this._workflowTrackingEnabled && (options?.source ?? "interactive") !== "extension") {
+				directRequestText = currentText;
 			}
 
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -1250,6 +1278,10 @@ export class AgentSession {
 				// Ensure we're using the base prompt (in case previous turn had modifications)
 				this._systemPromptOverride = undefined;
 				this.agent.state.systemPrompt = this._baseSystemPrompt;
+			}
+
+			if (directRequestText !== undefined) {
+				this._startDirectWorkflow(directRequestText);
 			}
 		} catch (error) {
 			preflightResult?.(false);

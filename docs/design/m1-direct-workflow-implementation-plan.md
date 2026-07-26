@@ -12,7 +12,8 @@
 - R3.4 Workflow Event Batch：`DONE`
 - R3.5 Session Event Log 与 Store：`DONE`
 - R3.6 最小 WorkflowController：`DONE`
-- 下一项：R3.7 接入 Direct 请求创建
+- R3.7 接入 Direct 请求创建：`DONE`
+- 下一项：R3.8 对接 Pi AgentSession
 
 ## 1. 阶段目标
 
@@ -70,6 +71,7 @@ packages/coding-agent/test/workflow/
 ├── stores.test.ts
 ├── event-log.test.ts
 ├── controller.test.ts
+├── direct-request.test.ts
 └── agent-session-adapter.test.ts
 
 packages/coding-agent/test/suite/
