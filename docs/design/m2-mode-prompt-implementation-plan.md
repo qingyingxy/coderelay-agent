@@ -50,7 +50,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.3：`DONE`
 - R4.4：`DONE`
 - R4.5：`DONE`
-- 下一项：R4.6
+- R4.6：`DONE`
+- 下一项：R4.7
 
 ## 6. R4.2 模式选择顺序
 
@@ -101,3 +102,19 @@ Core 根据评估生成 `suggestedMode`：
 - 其他情况保守建议 `plan`。
 
 ModeSelector 把完整 `ModeAdvice` 作为 Agent 候选，但用户明确选择和强制 Plan 安全策略仍拥有更高优先级。R4.5 不调用模型；ModeAdvisor Profile 和 Prompt 接入分别属于 R4.6、R4.8-R4.10。
+
+## 10. R4.6 Agent Profile
+
+工作流层定义五种固定角色，并映射到 Pi 已有 Agent 配置字段：
+
+| 角色 | 职责 | 默认工具与权限 |
+|---|---|---|
+| ModeAdvisor | 评估复杂度、风险、置信度和模式 | 不直接调用工具，只处理提供的上下文 |
+| Planner | 生成结构化 Plan | `read`、`grep`、`find`、`ls`，只读 |
+| Explorer | 调查代码并提供文件位置和架构发现 | `read`、`grep`、`find`、`ls`，只读 |
+| Worker | 执行分配的 Task 并验证修改 | 允许内置读写工具和 `bash`，默认禁止网络 |
+| Reviewer | 审查 Diff 和上下文并报告问题 | `read`、`grep`、`find`、`ls`，只读 |
+
+每个 Profile 包含名称、角色、描述、可选模型、System Prompt、工具白名单、权限上限和默认预算。Profile 校验禁止只读角色获得写入、命令或网络能力，并保证工具不会超过权限上限。
+
+这些定义不替换 Pi 的 Markdown Agent 加载格式。后续 Runtime 可以将 Profile 映射到 Pi 的 `name`、`description`、`model`、`tools` 和 Prompt；项目本地 Profile 仍必须经过 Project Trust。

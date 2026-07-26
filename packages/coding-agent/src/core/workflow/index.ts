@@ -1,3 +1,4 @@
+export * from "./agent-profile.ts";
 export * from "./agent-session-adapter.ts";
 export * from "./clarification-gate.ts";
 export * from "./controller.ts";
