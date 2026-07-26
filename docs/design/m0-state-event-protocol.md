@@ -9,7 +9,7 @@
 |---|---|---|
 | Workflow | `WorkflowController` | CLI、PlanService、TaskService、VerificationService |
 | Plan | `PlanService` 经 Controller 协调 | Planner、用户审批 |
-| Task | `TaskStore` 经 TaskService 修改 | Scheduler、Agent、Job、Verification |
+| Task | `WorkflowStore` 经 TaskService 修改；R6 可拆 `TaskStore` | Scheduler、Agent、Job、Verification |
 | Agent | 后续 `AgentRegistry` | Subagent Runtime |
 | Job | 后续 `JobRegistry` | Job Runtime |
 
@@ -139,31 +139,25 @@ stateDiagram-v2
 
 ```ts
 interface WorkflowStore {
-  get(workflowId: WorkflowId): Workflow | undefined;
-  apply(event: WorkflowEvent): void;
-}
-
-interface TaskStore {
-  get(taskId: TaskId): Task | undefined;
-  listByWorkflow(workflowId: WorkflowId): Task[];
-  apply(event: WorkflowEvent): void;
+  getWorkflow(workflowId: WorkflowId): Workflow | undefined;
+  getTask(taskId: TaskId): Task | undefined;
+  listTasks(workflowId: WorkflowId): Task[];
+  apply(batch: PersistedWorkflowEventBatch): boolean;
 }
 
 interface EventLog {
-  read(workflowId: WorkflowId, afterSequence?: number): WorkflowEvent[];
-  append(
-    workflowId: WorkflowId,
-    expectedLastSequence: number,
-    events: WorkflowEvent[],
-  ): void;
+  read(workflowId?: WorkflowId): PersistedWorkflowEventBatch[];
+  append(batch: WorkflowEventBatch): PersistedWorkflowEventBatch;
 }
 ```
 
 约束：
 
 - 外部模块不能获取可变内部引用。
-- `apply` 只接受已经持久化且通过版本检查的 Event。
+- `apply` 只接受 Event Log 返回的进程内持久化 Batch 凭证。
 - Store 检查实体 revision 和转换守卫。
+- Store 以 Batch 为原子单位应用；任一 Event 失败时不能留下部分状态。
+- Store 和 Event Log 返回防御性副本，外部修改不能改变已记录或投影的状态。
 - 创建实体也必须通过已经持久化的 `*.created` Event，不能绕过 Event Log。
 - Store 不调用 LLM、不显示 UI、不启动进程。
 - 当前状态必须能够由 Event Log 从空 Store 重放得到。
@@ -237,16 +231,18 @@ interface WorkflowEvent<TPayload = unknown> {
     kind: "user" | "controller" | "agent" | "job" | "system";
     id?: string;
   };
-  commandId?: string;
+  commandId: CommandId;
   correlationId: string;
   causationId?: EventId;
   payload: TPayload;
 }
 
 interface WorkflowEventBatch {
-  batchId: string;
+  schemaVersion: number;
+  batchId: EventBatchId;
   workflowId: WorkflowId;
-  commandId: string;
+  commandId: CommandId;
+  correlationId: CorrelationId;
   expectedLastSequence: number;
   events: WorkflowEvent[];
 }
@@ -254,10 +250,33 @@ interface WorkflowEventBatch {
 
 排序规则：
 
+- 空 Event Log 的 `expectedLastSequence` 为 `0`，第一个 Event 的 `sequence` 为 `1`。
 - `sequence` 在单个 Workflow 内严格递增。
 - `entityRevision` 在单个实体内严格递增。
 - 不承诺不同 Workflow 之间的全局顺序。
 - 同一个 `eventId` 只能出现一次。
+- 同一 Batch 的 Event 必须共享 `workflowId`、`commandId` 和 `correlationId`。
+- Batch 内的 `causationId` 只能指向更早的 Event；也可以指向历史 Batch 中的 Event。
+
+### 7.1 事件类型与 Payload
+
+实现使用 `eventType` 判别联合约束 Payload：
+
+```ts
+interface WorkflowEventPayloadMap {
+  "workflow.created": { workflow: Workflow };
+  "workflow.status_changed": {
+    fromStatus: WorkflowStatus;
+    toStatus: WorkflowStatus;
+    facts: WorkflowTransitionFacts;
+  };
+  "task.created": { task: Task };
+  "attempt.created": { attempt: Attempt };
+  // 其他事件使用各自的结构化 Payload
+}
+```
+
+创建事件时由 Batch 构造器统一写入 Schema、Workflow、命令、关联 ID 和 sequence。调用方不能单独计算 sequence。状态事件 Payload 保存转换事实，并复用相同状态守卫验证，避免 Controller 和重放逻辑采用不同规则。
 
 ## 8. 最小事件集合
 
@@ -286,6 +305,7 @@ interface WorkflowEventBatch {
 
 - `task.created`
 - `task.dependency_added`
+- `task.pending`
 - `task.ready`
 - `task.assigned`
 - `task.started`
@@ -297,6 +317,7 @@ interface WorkflowEventBatch {
 - `task.skipped`
 - `attempt.created`
 - `attempt.started`
+- `attempt.waiting`
 - `attempt.succeeded`
 - `attempt.failed`
 - `attempt.timed_out`
@@ -309,7 +330,7 @@ M0 只固定语义和命名。Agent、Job、预算、Writer Lease 和恢复的�
 
 ### 9.1 原型存储
 
-原型使用 Pi `appendEntry("workflow-event-batch", { events })` 将同一命令产生的 Event Batch 写入一个 Session Custom Entry：
+原型使用 Pi `appendCustomEntry("workflow-event-batch", batch)` 将同一命令产生的 Event Batch 写入一个 Session Custom Entry：
 
 - Custom Entry 不进入 LLM 上下文。
 - Workflow 与当前 Session、分支和 cwd 绑定。
@@ -317,6 +338,8 @@ M0 只固定语义和命名。Agent、Job、预算、Writer Lease 和恢复的�
 - 恢复时使用 `sessionManager.getBranch()` 读取当前叶节点路径，筛选 `customType === "workflow-event-batch"`，按 sequence 展开并重放；不能混入 `getEntries()` 返回的其他分支事件。
 - 发现 sequence 缺口、重复 revision 或未知 schemaVersion 时停止自动恢复。
 - Session 分支不会隐式共享可变 Workflow；分支行为必须显式定义为新 Workflow 或受控复制。
+
+Pi 在首次 Assistant 消息前可能暂不创建 Session 文件。此时 Custom Entry 已进入 SessionManager 的追加式内存树，但磁盘刷新仍遵循 Pi 原有 Session 生命周期；M1 不把这段窗口描述为崩溃安全，完整崩溃恢复和独立持久化策略属于 R10。
 
 ### 9.2 写入原则
 

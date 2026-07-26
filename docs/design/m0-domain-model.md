@@ -36,6 +36,9 @@ type JobId = string;
 type HandoffId = string;
 type VerificationId = string;
 type EventId = string;
+type EventBatchId = string;
+type CommandId = string;
+type CorrelationId = string;
 
 type IsoDateTime = string;
 type ExecutionMode = "auto" | "direct" | "plan";

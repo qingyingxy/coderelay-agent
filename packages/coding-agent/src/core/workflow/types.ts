@@ -10,6 +10,9 @@ export type JobId = string;
 export type HandoffId = string;
 export type VerificationId = string;
 export type EventId = string;
+export type EventBatchId = string;
+export type CommandId = string;
+export type CorrelationId = string;
 export type IsoDateTime = string;
 
 export type ExecutionMode = "auto" | "direct" | "plan";

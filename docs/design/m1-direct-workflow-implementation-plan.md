@@ -9,7 +9,9 @@
 - R3.1 源码与测试边界：`DONE`
 - R3.2 Direct 领域类型：`DONE`
 - R3.3 状态转换与不变量：`DONE`
-- 下一项：R3.4 Workflow Event Batch
+- R3.4 Workflow Event Batch：`DONE`
+- R3.5 Session Event Log 与 Store：`DONE`
+- 下一项：R3.6 最小 WorkflowController
 
 ## 1. 阶段目标
 
@@ -62,6 +64,8 @@ packages/coding-agent/src/modes/interactive/components/
 packages/coding-agent/test/workflow/
 ├── transitions.test.ts
 ├── invariants.test.ts
+├── events.test.ts
+├── fixtures.ts
 ├── stores.test.ts
 ├── event-log.test.ts
 ├── controller.test.ts
@@ -255,6 +259,10 @@ M1 实现 `SessionWorkflowEventLog`：
 - sequence 缺口、未知 schemaVersion 或 revision 冲突立即停止恢复。
 
 M1 只实现当前 Session 分支重放，不实现 Snapshot 和跨 Session Workflow。
+
+R3.5 的 `WorkflowStore` 暂时保存整个 Direct Workflow 聚合，并提供 Workflow、Task、Attempt 和 Verification 的只读查询。R6 引入 Task Graph 后，再根据规模决定是否拆出独立 `TaskStore`；M1 不提前维护两份可变状态。
+
+Pi 在首次 Assistant 消息前可能延迟创建 Session 文件。Event Batch 会先进入 SessionManager 当前分支，磁盘刷新沿用 Pi 原有生命周期；因此 M1 只验证 Session 重放，不宣称这一窗口已经具备崩溃安全。
 
 ## 9. CLI 行为
 

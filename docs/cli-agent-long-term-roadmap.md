@@ -133,7 +133,7 @@ flowchart TB
 3. 未批准的 Plan 不能进入写入阶段。
 4. Direct 模式也创建根 Task，统一执行和报告。
 5. Plan 管方案和审批，Task 管实际执行进度。
-6. TaskStore 是当前 Task 聚合状态的唯一读写入口，Event Log 保存持久历史事实。
+6. Store 是当前聚合状态的唯一读写入口，Event Log 保存持久历史事实；R6 可按 Task Graph 规模拆出 TaskStore。
 7. Agent 和 Job 只汇报事实，不直接决定工作流状态。
 8. Prompt 只能由 Prompt Pipeline 统一组装。
 9. 子 Agent 权限不能超过父 Agent。
@@ -194,8 +194,8 @@ flowchart TB
 | R3.1 | `DONE` | 固定源码与测试边界 | Core 放在 `src/core/workflow`，CLI 仅适配，测试放在 `test/workflow` | M0 |
 | R3.2 | `DONE` | 实现 Direct 领域类型 | 将 Workflow、Task、Attempt、Verification 和 Result 的最小子集实现为 TypeScript | R1.1-R1.7、R3.1 |
 | R3.3 | `DONE` | 实现状态转换与不变量 | 使用纯函数覆盖合法转换、守卫、revision 和终态规则 | R2.1-R2.4、R3.2 |
-| R3.4 | `TODO` | 实现 Workflow Event Batch | 定义事件创建、sequence、entityRevision、commandId 和 Schema 校验 | R2.6、R2.9、R3.2 |
-| R3.5 | `TODO` | 实现 Session Event Log 与 Store | 当前分支追加和重放 Event Batch，Store 只能应用已持久化事件 | R2.5、R2.7、R3.3、R3.4 |
+| R3.4 | `DONE` | 实现 Workflow Event Batch | 定义事件创建、sequence、entityRevision、commandId 和 Schema 校验 | R2.6、R2.9、R3.2 |
+| R3.5 | `DONE` | 实现 Session Event Log 与 Store | 当前分支追加和重放 Event Batch，Store 只能应用已持久化事件 | R2.5、R2.7、R3.3、R3.4 |
 | R3.6 | `TODO` | 实现最小 WorkflowController | 支持 Direct start、runtime event、complete、fail、cancel 和幂等命令 | R2.8、R2.9、R3.5 |
 | R3.7 | `TODO` | 创建 Direct 根 Task | 每个普通顶层请求生成 Workflow、根 Task 和 ModeDecision | R3.6 |
 | R3.8 | `TODO` | 对接 Pi AgentSession | 复用 prompt、subscribe、abort 和 SessionManager，正确处理 `willRetry` | R3.6、R3.7 |
@@ -438,13 +438,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | M0 设计验证通过 | 24 项 R0-R2 任务和 74 个设计验收场景已完成检查 |
 | 2026-07-26 | M1 Workflow 采用 Core-first | Extension 缺少完整 retry 生命周期，且权威状态需要成为 CLI 默认能力 |
 | 2026-07-26 | R3.3 状态规则实现完成 | Workflow、Task、Attempt 转换守卫和实体不变量已由 34 个聚焦测试覆盖 |
+| 2026-07-26 | R3.4 Workflow Event Batch 完成 | Direct 事件类型、Payload、信封构造和批次约束已由 17 个聚焦测试覆盖 |
+| 2026-07-26 | R3.5 Session Event Log 与 Store 完成 | 当前分支、重放、幂等、原子应用和防御性副本已由 20 个聚焦测试覆盖 |
 
 ## 12. 下一步
 
 M0 已验证完成。下一步进入 M1 的 R3 Direct Workflow MVP：
 
 1. R3.1 已完成：源码和测试边界已经固定。
-2. R3.2-R3.3 已完成；接下来实现 R3.4-R3.6：Event Batch、Store 和 Controller。
+2. R3.2-R3.5 已完成；接下来实现 R3.6：最小 WorkflowController。
 3. 实现 R3.7-R3.10：根 Task、AgentSession Adapter、基础验证和取消。
 4. 实现 R3.11-R3.12：最终报告和最小 CLI 状态。
 5. 完成 R3.13-R3.15：测试、检查和可重复演示。
