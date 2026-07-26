@@ -49,7 +49,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.2：`DONE`
 - R4.3：`DONE`
 - R4.4：`DONE`
-- 下一项：R4.5
+- R4.5：`DONE`
+- 下一项：R4.6
 
 ## 6. R4.2 模式选择顺序
 
@@ -83,4 +84,20 @@ Direct Workflow 在创建 Workflow 和根 Task 的同一个 Event Batch 中持�
 - `assumptions`：存在安全默认值，记录采用的答案和原因后继续。
 - `ignoredCandidateIds`：不会实质改变实现的偏好，不打断用户。
 
-只要 `questions` 非空，`required` 就为 `true`，后续 Controller 才能进入 `clarifying`。门禁本身不调用 LLM、不修改 Workflow，也不把主观文本直接解释为状态事实；候选信息由后续 R4.5 的结构化建议或明确规则提供。
+只要 `questions` 非空，`required` 就为 `true`，后续 Controller 才能进入 `clarifying`。门禁本身不调用 LLM、不修改 Workflow，也不把主观文本直接解释为状态事实；候选信息由后续 ModeAdvisor Prompt 或明确规则提供。
+
+## 9. R4.5 自动模式建议
+
+ModeAdvisor 后续通过 Prompt Pipeline 产生结构化评估，Core 只接受以下字段：
+
+- `complexity`：`low`、`medium`、`high`。
+- `riskLevel`：`low`、`medium`、`high`。
+- `confidence`：`low`、`medium`、`high`。
+- `reason`：非空判断依据。
+
+Core 根据评估生成 `suggestedMode`：
+
+- 风险为 `low`、复杂度不是 `high` 且置信度不是 `low` 时建议 `direct`。
+- 其他情况保守建议 `plan`。
+
+ModeSelector 把完整 `ModeAdvice` 作为 Agent 候选，但用户明确选择和强制 Plan 安全策略仍拥有更高优先级。R4.5 不调用模型；ModeAdvisor Profile 和 Prompt 接入分别属于 R4.6、R4.8-R4.10。

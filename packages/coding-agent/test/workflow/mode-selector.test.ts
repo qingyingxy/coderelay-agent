@@ -1,5 +1,22 @@
 import { describe, expect, it } from "vitest";
+import type { ModeAdvice } from "../../src/core/workflow/mode-advisor.ts";
 import { DEFAULT_RESOLVED_EXECUTION_MODE, selectExecutionMode } from "../../src/core/workflow/mode-selector.ts";
+
+const DIRECT_ADVICE: ModeAdvice = {
+	complexity: "low",
+	riskLevel: "low",
+	confidence: "high",
+	reason: "The task is localized",
+	suggestedMode: "direct",
+};
+
+const PLAN_ADVICE: ModeAdvice = {
+	complexity: "high",
+	riskLevel: "medium",
+	confidence: "high",
+	reason: "The task changes multiple architectural boundaries",
+	suggestedMode: "plan",
+};
 
 describe("execution mode selection", () => {
 	it("keeps an explicit Plan request as the strongest user choice", () => {
@@ -7,7 +24,7 @@ describe("execution mode selection", () => {
 			selectExecutionMode({
 				requestedMode: "plan",
 				forcePlan: true,
-				agentSuggestedMode: "direct",
+				agentAdvice: DIRECT_ADVICE,
 				defaultMode: "direct",
 			}),
 		).toEqual({ mode: "plan", source: "user" });
@@ -18,7 +35,7 @@ describe("execution mode selection", () => {
 			selectExecutionMode({
 				requestedMode: "direct",
 				forcePlan: true,
-				agentSuggestedMode: "direct",
+				agentAdvice: DIRECT_ADVICE,
 			}),
 		).toEqual({ mode: "plan", source: "forced_policy" });
 	});
@@ -27,7 +44,7 @@ describe("execution mode selection", () => {
 		expect(
 			selectExecutionMode({
 				requestedMode: "direct",
-				agentSuggestedMode: "plan",
+				agentAdvice: PLAN_ADVICE,
 				defaultMode: "plan",
 			}),
 		).toEqual({ mode: "direct", source: "user" });
@@ -36,7 +53,7 @@ describe("execution mode selection", () => {
 	it("uses an Agent suggestion before the default rule", () => {
 		expect(
 			selectExecutionMode({
-				agentSuggestedMode: "plan",
+				agentAdvice: PLAN_ADVICE,
 				defaultMode: "direct",
 			}),
 		).toEqual({ mode: "plan", source: "agent" });

@@ -1,3 +1,4 @@
+import type { ModeAdvice } from "./mode-advisor.ts";
 import type { ModeDecisionSource, ResolvedExecutionMode } from "./types.ts";
 
 export const DEFAULT_RESOLVED_EXECUTION_MODE: ResolvedExecutionMode = "direct";
@@ -5,7 +6,7 @@ export const DEFAULT_RESOLVED_EXECUTION_MODE: ResolvedExecutionMode = "direct";
 export interface ModeSelectionInput {
 	readonly requestedMode?: ResolvedExecutionMode;
 	readonly forcePlan?: boolean;
-	readonly agentSuggestedMode?: ResolvedExecutionMode;
+	readonly agentAdvice?: ModeAdvice;
 	readonly defaultMode?: ResolvedExecutionMode;
 }
 
@@ -24,8 +25,8 @@ export function selectExecutionMode(input: ModeSelectionInput): ModeSelection {
 	if (input.requestedMode === "direct") {
 		return { mode: "direct", source: "user" };
 	}
-	if (input.agentSuggestedMode) {
-		return { mode: input.agentSuggestedMode, source: "agent" };
+	if (input.agentAdvice) {
+		return { mode: input.agentAdvice.suggestedMode, source: "agent" };
 	}
 	return {
 		mode: input.defaultMode ?? DEFAULT_RESOLVED_EXECUTION_MODE,
