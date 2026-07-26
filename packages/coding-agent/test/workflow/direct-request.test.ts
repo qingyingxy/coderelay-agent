@@ -79,7 +79,7 @@ describe("Direct Workflow request integration", () => {
 			throw new Error("Expected a Direct Workflow");
 		}
 		const store = new WorkflowStore();
-		store.replay(batches);
+		store.replay(batches.slice(0, 1));
 		const workflow = store.getWorkflow(workflowId);
 		const task = workflow?.rootTaskId ? store.getTask(workflow.rootTaskId) : undefined;
 
@@ -117,8 +117,10 @@ describe("Direct Workflow request integration", () => {
 		await session.prompt("Second request");
 
 		const batches = new SessionWorkflowEventLog(sessionManager).read();
-		expect(batches).toHaveLength(2);
 		expect(new Set(batches.map(({ batch }) => batch.workflowId)).size).toBe(2);
+		expect(
+			batches.filter(({ batch }) => batch.events.some((event) => event.eventType === "workflow.created")),
+		).toHaveLength(2);
 
 		session.dispose();
 	});

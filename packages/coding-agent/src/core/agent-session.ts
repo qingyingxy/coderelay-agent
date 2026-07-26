@@ -108,9 +108,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
-import { WorkflowController } from "./workflow/controller.ts";
-import { SessionWorkflowEventLog } from "./workflow/event-log.ts";
-import { WorkflowStore } from "./workflow/stores.ts";
+import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -1068,9 +1066,8 @@ export class AgentSession {
 		this._workflowTrackingEnabled = true;
 	}
 
-	private _startDirectWorkflow(requestText: string): void {
-		const controller = new WorkflowController(new SessionWorkflowEventLog(this.sessionManager), new WorkflowStore());
-		controller.startDirect({
+	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
+		return startDirectAgentSessionWorkflow(this, {
 			commandId: `command-${randomUUID()}`,
 			workflowId: `workflow-${randomUUID()}`,
 			rootTaskId: `task-${randomUUID()}`,
@@ -1140,6 +1137,7 @@ export class AgentSession {
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 		let directRequestText: string | undefined;
+		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
 			// Handle extension commands first (execute immediately, even during streaming)
@@ -1281,7 +1279,7 @@ export class AgentSession {
 			}
 
 			if (directRequestText !== undefined) {
-				this._startDirectWorkflow(directRequestText);
+				workflowAdapter = this._startDirectWorkflow(directRequestText);
 			}
 		} catch (error) {
 			preflightResult?.(false);
@@ -1293,7 +1291,11 @@ export class AgentSession {
 		}
 
 		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
+		try {
+			await this._runAgentPrompt(messages);
+		} finally {
+			workflowAdapter?.dispose();
+		}
 	}
 
 	/**

@@ -13,7 +13,8 @@
 - R3.5 Session Event Log 与 Store：`DONE`
 - R3.6 最小 WorkflowController：`DONE`
 - R3.7 接入 Direct 请求创建：`DONE`
-- 下一项：R3.8 对接 Pi AgentSession
+- R3.8 对接 Pi AgentSession：`DONE`
+- 下一项：R3.9 基础 Verification
 
 ## 1. 阶段目标
 

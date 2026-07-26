@@ -1,3 +1,4 @@
+export * from "./agent-session-adapter.ts";
 export * from "./controller.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";
