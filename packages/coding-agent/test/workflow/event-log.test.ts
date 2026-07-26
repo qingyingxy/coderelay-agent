@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { AnyWorkflowEvent, DomainViolation, WorkflowEventBatch } from "../../src/core/workflow/index.ts";
 import {
+	isPersistedWorkflowEventBatch,
 	SessionWorkflowEventLog,
 	WORKFLOW_EVENT_BATCH_CUSTOM_TYPE,
 	WorkflowEventLogError,
@@ -111,6 +112,16 @@ describe("SessionWorkflowEventLog", () => {
 		expect(Object.isFrozen(persisted.batch.events)).toBe(true);
 	});
 
+	it("brands only Event Log results as persisted batches", () => {
+		const eventLog = new SessionWorkflowEventLog(SessionManager.inMemory());
+		const batch = createDirectStartBatch();
+		const persisted = eventLog.append(batch);
+
+		expect(isPersistedWorkflowEventBatch(persisted)).toBe(true);
+		expect(isPersistedWorkflowEventBatch({ ...persisted })).toBe(false);
+		expect(isPersistedWorkflowEventBatch(structuredClone(persisted.batch))).toBe(false);
+	});
+
 	it("uses only the selected branch when rebuilding history", () => {
 		const session = SessionManager.inMemory();
 		const rootId = session.appendCustomEntry("root");
@@ -192,6 +203,68 @@ describe("SessionWorkflowEventLog", () => {
 			eventLog.read();
 		} catch (error) {
 			expect(errorCodes(error)).toContain("event_log.entity_revision_conflict");
+		}
+	});
+
+	it.each([
+		{
+			name: "batch id",
+			code: "event_log.duplicate_batch",
+			change: (start: WorkflowEventBatch, ready: WorkflowEventBatch): WorkflowEventBatch => ({
+				...ready,
+				batchId: start.batchId,
+			}),
+		},
+		{
+			name: "event id",
+			code: "event_log.duplicate_event",
+			change: (start: WorkflowEventBatch, ready: WorkflowEventBatch): WorkflowEventBatch => ({
+				...ready,
+				events: ready.events.map((event, index) =>
+					index === 0 ? { ...event, eventId: start.events[0].eventId } : event,
+				),
+			}),
+		},
+		{
+			name: "command id",
+			code: "event_log.duplicate_command",
+			change: (start: WorkflowEventBatch, ready: WorkflowEventBatch): WorkflowEventBatch => ({
+				...ready,
+				commandId: start.commandId,
+				events: ready.events.map((event) => ({ ...event, commandId: start.commandId })),
+			}),
+		},
+	])("stops recovery for a duplicate $name across batches", ({ code, change }) => {
+		const session = SessionManager.inMemory();
+		const start = createDirectStartBatch();
+		const ready = change(start, createTaskReadyBatch());
+		session.appendCustomEntry(WORKFLOW_EVENT_BATCH_CUSTOM_TYPE, start);
+		session.appendCustomEntry(WORKFLOW_EVENT_BATCH_CUSTOM_TYPE, ready);
+		const eventLog = new SessionWorkflowEventLog(session);
+
+		expect(() => eventLog.read()).toThrow(WorkflowEventLogError);
+		try {
+			eventLog.read();
+		} catch (error) {
+			expect(errorCodes(error)).toContain(code);
+		}
+	});
+
+	it("stops recovery when an entity is updated before its creation event", () => {
+		const session = SessionManager.inMemory();
+		const ready = createTaskReadyBatch();
+		session.appendCustomEntry(WORKFLOW_EVENT_BATCH_CUSTOM_TYPE, {
+			...ready,
+			expectedLastSequence: 0,
+			events: ready.events.map((event) => ({ ...event, sequence: 1 })),
+		});
+		const eventLog = new SessionWorkflowEventLog(session);
+
+		expect(() => eventLog.read()).toThrow(WorkflowEventLogError);
+		try {
+			eventLog.read();
+		} catch (error) {
+			expect(errorCodes(error)).toContain("event_log.missing_entity_creation");
 		}
 	});
 

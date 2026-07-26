@@ -203,8 +203,8 @@ flowchart TB
 | R3.10 | `DONE` | 实现基础取消 | Executing → Cancelling，等待 AgentSession idle 后再 Cancelled | R2.9、R3.6、R3.8 |
 | R3.11 | `DONE` | 生成基础最终报告 | 输出状态、Task、Attempt、修改文件、验证限制、失败原因和资源用量 | R3.9、R3.10 |
 | R3.12 | `DONE` | 提供最小 CLI 状态 | `/workflow`、`/workflow-cancel` 和状态行可以展示权威状态 | R3.6、R3.11 |
-| R3.13 | `TODO` | 编写领域与持久化测试 | 覆盖类型约束、状态机、Store、Event 重放和幂等 | R3.2-R3.6 |
-| R3.14 | `TODO` | 编写 AgentSession 集成测试 | 使用 Fake Provider 覆盖成功、重试、失败、取消和修改文件汇总 | R3.7-R3.13 |
+| R3.13 | `DONE` | 编写领域与持久化测试 | 覆盖类型约束、状态机、Store、Event 重放和幂等 | R3.2-R3.6 |
+| R3.14 | `DONE` | 编写 AgentSession 集成测试 | 使用 Fake Provider 覆盖成功、重试、失败、取消和修改文件汇总 | R3.7-R3.13 |
 | R3.15 | `TODO` | 建立 Direct 演示场景 | 单文件低风险任务可重复演示完整闭环 | R3.14 |
 
 ### R4：模式选择、Prompt Pipeline 与 Agent Profile
@@ -447,15 +447,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R3.10 基础取消完成 | 取消请求先持久化，等待 AgentSession idle 后再依次取消 Attempt、Task 和 Workflow，并覆盖并发调用与未启动边界 |
 | 2026-07-26 | R3.11 基础最终报告完成 | 成功、失败和取消终态均生成结构化报告，包含 Task、Attempt、修改文件、验证限制、失败原因和聚合资源用量 |
 | 2026-07-26 | R3.12 最小 CLI 状态完成 | `/workflow` 查看当前或最近 Workflow，`/workflow-cancel` 走两阶段取消，Footer 展示 Store 派生的权威状态行 |
+| 2026-07-26 | R3.13 领域与持久化测试完成 | 补齐核心联合类型、重复完成命令、持久化品牌与损坏历史检测，状态机、Store、重放和幂等验收覆盖完整 |
+| 2026-07-26 | R3.14 AgentSession 集成测试完成 | Faux Provider 覆盖成功、自动重试、失败、取消、真实 write/edit 修改汇总，以及连续请求创建独立 Workflow |
 
 ## 12. 下一步
 
 M0 已验证完成。下一步进入 M1 的 R3 Direct Workflow MVP：
 
 1. R3.1 已完成：源码和测试边界已经固定。
-2. R3.2-R3.12 已完成；接下来补齐 R3.13-R3.15。
-3. 实现 R3.13：补全领域与持久化测试。
-4. 实现 R3.14：补全 AgentSession 集成测试。
-5. 实现 R3.15：建立可重复 Direct 演示场景。
+2. R3.2-R3.14 已完成；接下来完成 R3.15。
+3. 实现 R3.15：建立可重复 Direct 演示场景。
 
 开始 R3 前不同时展开自动模式、正式 Plan、Subagent 或 Job。

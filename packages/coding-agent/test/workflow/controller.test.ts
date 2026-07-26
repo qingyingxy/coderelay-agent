@@ -336,6 +336,45 @@ describe("WorkflowController", () => {
 		});
 	});
 
+	it("treats a repeated completion command as the original persisted result", () => {
+		const { controller, eventLog, store } = createHarness();
+		startAttempt(controller);
+		finishAttempt(controller);
+		const command = {
+			commandId: "complete-command",
+			workflowId: WORKFLOW_ID,
+			taskId: TASK_ID,
+			verificationId: VERIFICATION_ID,
+			summary: "Change implemented",
+			changedFiles: ["src/example.ts"],
+			usage: ZERO_USAGE,
+			durationMs: 10,
+		} as const;
+
+		const first = controller.complete(command);
+		const batchCount = eventLog.read().length;
+		const duplicate = controller.complete({
+			...command,
+			summary: "A retried command must not replace the original result",
+			changedFiles: ["src/other.ts"],
+		});
+
+		expect(first.applied).toBe(true);
+		expect(duplicate).toMatchObject({
+			applied: false,
+			batchId: first.batchId,
+			workflow: {
+				status: "completed",
+				result: {
+					summary: "Change implemented",
+					changedFiles: ["src/example.ts"],
+				},
+			},
+		});
+		expect(eventLog.read()).toHaveLength(batchCount);
+		expect(store.getWorkflow(WORKFLOW_ID)?.revision).toBe(first.workflow.revision);
+	});
+
 	it("cancels in two phases and treats repeated cancellation as a no-op", () => {
 		const { controller, eventLog, store } = createHarness();
 		startDirect(controller);

@@ -1,4 +1,6 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionWorkflowEventLog, WorkflowStore } from "../../src/core/workflow/index.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -61,6 +63,64 @@ describe("Direct Workflow AgentSession integration", () => {
 			},
 			changedFiles: [],
 		});
+	});
+
+	it("reports files changed by successful built-in write and edit tools", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("write", {
+					path: "src/demo.ts",
+					content: "export const value = 1;\n",
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("edit", {
+					path: "src/demo.ts",
+					edits: [{ oldText: "value = 1", newText: "value = 2" }],
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Implemented"),
+		]);
+
+		await harness.session.prompt("Create and update a TypeScript file");
+
+		expect(readFileSync(join(harness.tempDir, "src/demo.ts"), "utf8")).toBe("export const value = 2;\n");
+		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
+			status: "completed",
+			statusLine: "direct | completed | 1 task | 1 file | tests: not configured",
+			changedFiles: ["src/demo.ts"],
+		});
+	});
+
+	it("creates a new Workflow after the previous request reaches a terminal state", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage("First complete"), fauxAssistantMessage("Second complete")]);
+
+		await harness.session.prompt("First request");
+		const firstReport = harness.session.getLatestWorkflowReport();
+		await harness.session.prompt("Second request");
+		const secondReport = harness.session.getLatestWorkflowReport();
+
+		const batches = new SessionWorkflowEventLog(harness.sessionManager).read();
+		const workflowIds = [...new Set(batches.map(({ batch }) => batch.workflowId))];
+		const store = new WorkflowStore();
+		store.replay(batches);
+
+		expect(firstReport?.status).toBe("completed");
+		expect(secondReport?.status).toBe("completed");
+		expect(secondReport?.workflowId).not.toBe(firstReport?.workflowId);
+		expect(workflowIds).toEqual([firstReport?.workflowId, secondReport?.workflowId]);
+		expect(workflowIds.map((workflowId) => store.getWorkflow(workflowId)?.status)).toEqual([
+			"completed",
+			"completed",
+		]);
 	});
 
 	it("shows the latest Workflow without calling the provider or creating another Workflow", async () => {
