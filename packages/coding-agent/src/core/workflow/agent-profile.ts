@@ -11,6 +11,8 @@ export interface AgentPermissionCeiling {
 	/** Empty means the Profile adds no path restriction; parent and Workflow policies still apply. */
 	readonly allowedPaths: readonly string[];
 	readonly deniedPaths: readonly string[];
+	/** Effective permission intersection uses this when constrained path scopes do not overlap. */
+	readonly denyAllPaths?: boolean;
 }
 
 export interface AgentProfile {

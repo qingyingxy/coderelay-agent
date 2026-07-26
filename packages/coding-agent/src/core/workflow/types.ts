@@ -254,6 +254,7 @@ export interface TaskAssignment {
 	readonly agentProfile?: string;
 	readonly agentId?: AgentId;
 	readonly jobId?: JobId;
+	readonly agentDepth?: number;
 }
 
 export interface TaskResult {
@@ -262,6 +263,17 @@ export interface TaskResult {
 	readonly verificationIds: readonly VerificationId[];
 	readonly handoffId?: HandoffId;
 	readonly completedAt: IsoDateTime;
+}
+
+export interface FileModificationRecord {
+	readonly path: string;
+	readonly operation: "edit" | "write";
+	readonly workflowId: WorkflowId;
+	readonly taskId: TaskId;
+	readonly attemptId: AttemptId;
+	readonly agentId: AgentId;
+	readonly toolCallId: string;
+	readonly recordedAt: IsoDateTime;
 }
 
 export interface Task extends EntityMetadata {
@@ -282,6 +294,7 @@ export interface Task extends EntityMetadata {
 	readonly attemptIds: readonly AttemptId[];
 	readonly currentAttemptId?: AttemptId;
 	readonly verificationRequirements: readonly VerificationRequirement[];
+	readonly modifications: readonly FileModificationRecord[];
 	readonly blockedReason?: TaskBlockedReason;
 	readonly result?: TaskResult;
 }

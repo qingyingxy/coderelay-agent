@@ -59,6 +59,7 @@ function createTask(overrides: Partial<Task> = {}): Task {
 		usage: ZERO_USAGE,
 		attemptIds: [],
 		verificationRequirements: [],
+		modifications: [],
 		...overrides,
 	};
 }

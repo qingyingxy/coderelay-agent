@@ -21,6 +21,7 @@ import type {
 	EventBatchId,
 	EventId,
 	FailureRecord,
+	FileModificationRecord,
 	IsoDateTime,
 	ModeDecision,
 	Plan,
@@ -133,6 +134,9 @@ export interface WorkflowEventPayloadMap {
 	readonly "task.ready": TaskStatusChangedPayload;
 	readonly "task.assigned": {
 		readonly assignment: TaskAssignment;
+	};
+	readonly "task.modification_recorded": {
+		readonly modification: FileModificationRecord;
 	};
 	readonly "task.started": TaskStatusChangedPayload & {
 		readonly attemptId: AttemptId;
@@ -284,6 +288,7 @@ const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>
 	"task.pending": "task",
 	"task.ready": "task",
 	"task.assigned": "task",
+	"task.modification_recorded": "task",
 	"task.started": "task",
 	"task.verification_started": "task",
 	"task.blocked": "task",
@@ -602,6 +607,19 @@ function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolatio
 			return event.payload.dependencyId.trim().length > 0
 				? []
 				: [violation("event.dependency_id_required", "Task dependency event requires a dependency id")];
+		case "task.modification_recorded": {
+			const { modification } = event.payload;
+			return modification.path.trim().length > 0 &&
+				["edit", "write"].includes(modification.operation) &&
+				modification.workflowId === event.workflowId &&
+				modification.taskId === event.entityId &&
+				modification.attemptId.trim().length > 0 &&
+				modification.agentId.trim().length > 0 &&
+				modification.toolCallId.trim().length > 0 &&
+				Number.isFinite(Date.parse(modification.recordedAt))
+				? []
+				: [violation("event.invalid_modification", "Task modification record is invalid")];
+		}
 		case "task.started":
 			return event.payload.attemptId.trim().length > 0
 				? []

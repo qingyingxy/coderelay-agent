@@ -6,6 +6,7 @@
 
 - Added Core-backed Plan Mode with a read-only Planner, persisted approval and revision history, Plan-to-Task conversion, Task-derived progress, `/plan` lifecycle commands, and a deterministic Faux Provider demo.
 - Added persisted Task Graph readiness, constrained scheduling, executor interfaces, Task Tree commands, and a deterministic Scheduler demo.
+- Added effective permission and budget enforcement, cross-process Writer Leases, file modification ownership, runtime resource cancellation, and CLI guardrail status.
 
 ## [0.82.1] - 2026-07-25
 

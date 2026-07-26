@@ -32,6 +32,9 @@ export interface TaskExecutor {
 
 export interface TaskSchedulerOptions {
 	readonly maxConcurrency: number;
+	readonly maxConcurrentAgents?: number;
+	readonly maxConcurrentJobs?: number;
+	readonly writerAvailable?: boolean;
 }
 
 export class TaskExecutorRegistry {
@@ -125,12 +128,29 @@ export function deriveTaskReadiness(tasks: readonly Task[]): TaskReadiness {
 
 export class TaskScheduler {
 	readonly #maxConcurrency: number;
+	readonly #maxConcurrentAgents: number;
+	readonly #maxConcurrentJobs: number;
+	readonly #writerAvailable: boolean;
 
 	constructor(options: TaskSchedulerOptions) {
 		if (!Number.isInteger(options.maxConcurrency) || options.maxConcurrency < 1) {
 			throw new TaskSchedulerError("scheduler.invalid_concurrency", "Scheduler concurrency must be positive");
 		}
 		this.#maxConcurrency = options.maxConcurrency;
+		this.#maxConcurrentAgents = options.maxConcurrentAgents ?? options.maxConcurrency;
+		this.#maxConcurrentJobs = options.maxConcurrentJobs ?? options.maxConcurrency;
+		this.#writerAvailable = options.writerAvailable ?? true;
+		if (
+			!Number.isInteger(this.#maxConcurrentAgents) ||
+			this.#maxConcurrentAgents < 0 ||
+			!Number.isInteger(this.#maxConcurrentJobs) ||
+			this.#maxConcurrentJobs < 0
+		) {
+			throw new TaskSchedulerError(
+				"scheduler.invalid_executor_concurrency",
+				"Executor concurrency limits must be non-negative integers",
+			);
+		}
 	}
 
 	select(tasks: readonly Task[]): readonly TaskDispatch[] {
@@ -146,25 +166,56 @@ export class TaskScheduler {
 		if (ready.length === 0) {
 			return [];
 		}
+		const activeAgentCount = active.filter(
+			({ assignment }) => assignment?.executorKind === "main_agent" || assignment?.executorKind === "subagent",
+		).length;
+		const activeJobCount = active.filter(({ assignment }) => assignment?.executorKind === "job").length;
+		let availableAgentSlots = Math.max(0, this.#maxConcurrentAgents - activeAgentCount);
+		let availableJobSlots = Math.max(0, this.#maxConcurrentJobs - activeJobCount);
+		const takeWithinExecutorLimits = (candidates: readonly Task[], limit: number): readonly Task[] => {
+			const selected: Task[] = [];
+			for (const task of candidates) {
+				if (selected.length >= limit) {
+					break;
+				}
+				const kind = executorKind(task);
+				if (kind === "job") {
+					if (availableJobSlots === 0) {
+						continue;
+					}
+					availableJobSlots--;
+				} else {
+					if (availableAgentSlots === 0) {
+						continue;
+					}
+					availableAgentSlots--;
+				}
+				selected.push(task);
+			}
+			return selected;
+		};
 		if (active.length > 0) {
-			return ready
-				.filter(({ accessMode }) => accessMode === "read_only")
-				.slice(0, availableSlots)
-				.map((task) => ({
-					workflowId: task.workflowId,
-					taskId: task.id,
-					executorKind: executorKind(task),
-					accessMode: task.accessMode,
-				}));
+			return takeWithinExecutorLimits(
+				ready.filter(({ accessMode }) => accessMode === "read_only"),
+				availableSlots,
+			).map((task) => ({
+				workflowId: task.workflowId,
+				taskId: task.id,
+				executorKind: executorKind(task),
+				accessMode: task.accessMode,
+			}));
 		}
 		const first = ready[0];
 		if (!first) {
 			return [];
 		}
-		const selected =
-			first.accessMode === "writer"
-				? [first]
-				: ready.filter(({ accessMode }) => accessMode === "read_only").slice(0, availableSlots);
+		if (first.accessMode === "writer" && !this.#writerAvailable) {
+			return [];
+		}
+		const selected = takeWithinExecutorLimits(
+			first.accessMode === "writer" ? [first] : ready.filter(({ accessMode }) => accessMode === "read_only"),
+			first.accessMode === "writer" ? 1 : availableSlots,
+		);
 		return selected.map((task) => ({
 			workflowId: task.workflowId,
 			taskId: task.id,

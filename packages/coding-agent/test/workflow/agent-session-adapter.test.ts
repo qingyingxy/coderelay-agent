@@ -10,6 +10,7 @@ import {
 	startDirectAgentSessionWorkflow,
 	type WorkflowAgentSession,
 	WorkflowStore,
+	WriterLeaseRegistry,
 } from "../../src/core/workflow/index.ts";
 
 const WORKFLOW_ID = "workflow-1";
@@ -80,6 +81,7 @@ function start(session: FakeAgentSession) {
 		{
 			createId: (kind) => `${kind}-${++nextId}`,
 			now: () => 100,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
 		},
 	);
 }
@@ -146,6 +148,9 @@ describe("AgentSessionAdapter", () => {
 		const runningTask = adapter.controller.getRootTask(WORKFLOW_ID);
 		expect(runningTask?.status).toBe("running");
 		expect(adapter.statusLine).toBe("direct | executing | task: running | attempt: 1");
+		expect(adapter.statusLines).toEqual(
+			expect.arrayContaining(["Budget: within limits", expect.stringMatching(/^Writer Lease: held \| /)]),
+		);
 
 		emitRun(session, fauxAssistantMessage("Implemented"), false);
 
@@ -202,6 +207,29 @@ describe("AgentSessionAdapter", () => {
 
 		const store = replay(session);
 		expect(store.getWorkflow(WORKFLOW_ID)?.result?.changedFiles).toEqual(["src/a.ts", "src/b.ts"]);
+		expect(store.getTask(TASK_ID)?.modifications).toEqual([
+			expect.objectContaining({
+				path: "src/a.ts",
+				operation: "edit",
+				workflowId: WORKFLOW_ID,
+				taskId: TASK_ID,
+				agentId: "main-agent",
+			}),
+			expect.objectContaining({
+				path: "src/b.ts",
+				operation: "write",
+				workflowId: WORKFLOW_ID,
+				taskId: TASK_ID,
+				agentId: "main-agent",
+			}),
+			expect.objectContaining({
+				path: "src/a.ts",
+				operation: "edit",
+				workflowId: WORKFLOW_ID,
+				taskId: TASK_ID,
+				agentId: "main-agent",
+			}),
+		]);
 
 		adapter.dispose();
 	});

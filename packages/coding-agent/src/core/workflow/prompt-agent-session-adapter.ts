@@ -1,6 +1,13 @@
 import type { PromptOptions } from "../agent-session.ts";
+import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import type { PromptContextSource, PromptEnvelope } from "./prompt-envelope.ts";
 import { validatePromptEnvelope } from "./prompt-envelope.ts";
+import {
+	FULL_PERMISSION_SET,
+	filterToolsByPermissions,
+	type PermissionSet,
+	resolveEffectivePermissions,
+} from "./runtime-policy.ts";
 
 export interface PromptAgentSession {
 	readonly isIdle: boolean;
@@ -19,6 +26,12 @@ export interface RenderedPromptEnvelope {
 export interface PromptEnvelopeExecutionResult extends RenderedPromptEnvelope {
 	readonly promptVersion: string;
 	readonly toolNames: readonly string[];
+}
+
+export interface PromptEnvelopeExecutionOptions {
+	readonly parentPermission?: PermissionSet;
+	readonly workflowPermission?: PermissionSet;
+	readonly taskPermission?: PermissionSet;
 }
 
 export class PromptAgentSessionAdapterError extends Error {
@@ -89,6 +102,7 @@ export function renderPromptEnvelope(envelope: PromptEnvelope): RenderedPromptEn
 export async function executePromptEnvelope(
 	session: PromptAgentSession,
 	envelope: PromptEnvelope,
+	options: PromptEnvelopeExecutionOptions = {},
 ): Promise<PromptEnvelopeExecutionResult> {
 	const rendered = renderPromptEnvelope(envelope);
 	if (!session.isIdle || ACTIVE_PROMPT_SESSIONS.has(session)) {
@@ -102,6 +116,22 @@ export async function executePromptEnvelope(
 	const previousToolNames = session.getActiveToolNames();
 	let toolsChanged = false;
 	try {
+		const profile = BUILTIN_AGENT_PROFILES[envelope.role];
+		const effectivePermission = resolveEffectivePermissions({
+			parent: options.parentPermission ?? FULL_PERMISSION_SET,
+			profile: profile.permissionCeiling,
+			workflow: options.workflowPermission ?? FULL_PERMISSION_SET,
+			task: options.taskPermission ?? FULL_PERMISSION_SET,
+		});
+		const permittedToolNames = filterToolsByPermissions(envelope.toolNames, effectivePermission);
+		const deniedToolNames = envelope.toolNames.filter((toolName) => !permittedToolNames.includes(toolName));
+		if (deniedToolNames.length > 0) {
+			throw new PromptAgentSessionAdapterError(
+				"prompt_agent_session.permission_denied",
+				`PromptEnvelope requested tools denied by effective permissions: ${deniedToolNames.join(", ")}`,
+				deniedToolNames,
+			);
+		}
 		const unavailableToolNames = envelope.toolNames.filter((toolName) => !previousToolNames.includes(toolName));
 		if (unavailableToolNames.length > 0) {
 			throw new PromptAgentSessionAdapterError(

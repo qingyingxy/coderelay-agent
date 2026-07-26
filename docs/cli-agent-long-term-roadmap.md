@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M2 已完成
+> 状态：M3 实现中（R7 已完成）
 > 最后更新：2026-07-26
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -31,6 +31,10 @@ M2 实施计划：
 - [`M2 模式选择与 Prompt Pipeline 实施计划`](./design/m2-mode-prompt-implementation-plan.md)
 - [`M2 正式 Plan Mode 实施记录`](./design/m2-plan-mode-implementation-plan.md)
 - [`M2 Task Graph 与 Scheduler 实施记录`](./design/m2-task-scheduler-implementation-plan.md)
+
+M3 实施计划：
+
+- [`M3 运行保障能力实施记录`](./design/m3-runtime-guardrails-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -263,17 +267,17 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R7.1 | `TODO` | 定义权限模型 | 有效权限为父权限、Profile、Workflow 和项目策略的交集 | R4.6 |
-| R7.2 | `TODO` | 强制只读角色 | Planner、Explorer、Reviewer 在运行时不能写入 | R7.1 |
-| R7.3 | `TODO` | 实现 Writer Lease | 同一工作区同时只有一个 Writer | R7.1 |
-| R7.4 | `TODO` | 管理 Lease 生命周期 | 支持获取、续约、释放、过期和异常回收 | R7.3 |
-| R7.5 | `TODO` | 记录修改归属 | 文件修改关联 Workflow、Task、Agent 和 Attempt | R7.3、R6.3 |
-| R7.6 | `TODO` | 定义 Budget | 包含 Token、费用、轮次、时间、并发、Agent 数、深度和重试 | R1.1、R1.2 |
-| R7.7 | `TODO` | 实现预算继承 | 子 Task 和 Agent 不能超过父级可用预算 | R7.6 |
-| R7.8 | `TODO` | 实现软硬限制 | 软限制警告，硬限制停止继续调度 | R7.6 |
-| R7.9 | `TODO` | 实现级联取消 | Workflow → Task → Agent/Job，最后释放 Lease | R2.9、R7.4 |
-| R7.10 | `TODO` | 限制并发、深度和重试 | 达到上限时拒绝新执行并记录原因 | R7.6、R7.8 |
-| R7.11 | `TODO` | 编写保障能力测试 | 覆盖越权、双 Writer、预算耗尽、重复取消和级联清理 | R7.1-R7.10 |
+| R7.1 | `DONE` | 定义权限模型 | 有效权限为父权限、Profile、Workflow 和项目策略的交集 | R4.6 |
+| R7.2 | `DONE` | 强制只读角色 | Planner、Explorer、Reviewer 在运行时不能写入 | R7.1 |
+| R7.3 | `DONE` | 实现 Writer Lease | 同一工作区同时只有一个 Writer | R7.1 |
+| R7.4 | `DONE` | 管理 Lease 生命周期 | 支持获取、续约、释放、过期和异常回收 | R7.3 |
+| R7.5 | `DONE` | 记录修改归属 | 文件修改关联 Workflow、Task、Agent 和 Attempt | R7.3、R6.3 |
+| R7.6 | `DONE` | 定义 Budget | 包含 Token、费用、轮次、时间、并发、Agent 数、深度和重试 | R1.1、R1.2 |
+| R7.7 | `DONE` | 实现预算继承 | 子 Task 和 Agent 不能超过父级可用预算 | R7.6 |
+| R7.8 | `DONE` | 实现软硬限制 | 软限制警告，硬限制停止继续调度 | R7.6 |
+| R7.9 | `DONE` | 实现级联取消 | Workflow → Task → Agent/Job，最后释放 Lease | R2.9、R7.4 |
+| R7.10 | `DONE` | 限制并发、深度和重试 | 达到上限时拒绝新执行并记录原因 | R7.6、R7.8 |
+| R7.11 | `DONE` | 编写保障能力测试 | 覆盖越权、双 Writer、预算耗尽、重复取消和级联清理 | R7.1-R7.10 |
 
 ### R8：Subagent 与结构化 Handoff
 
@@ -347,7 +351,7 @@ flowchart TB
 | M0：设计基线 | `DONE` | R0-R2 的设计与协议 | 能完整解释模型、状态机、事件和数据流 |
 | M1：Direct MVP | `DONE` | R3 | 单 Agent Direct 请求可以执行、取消、验证和报告 |
 | M2：Plan 与 Task | `DONE` | R4-R6 | 自动模式、Plan 审批、Task Graph 和调度可演示 |
-| M3：受控 Runtime | `TODO` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
+| M3：受控 Runtime | `IMPLEMENTING` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
 | M4：交付与恢复 | `TODO` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
 | M5：作品版本 | `TODO` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 
@@ -475,13 +479,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R5 Plan 回归与演示完成 | 27 个测试文件、202 个用例通过；`npm run demo:plan-workflow` 验证批准前零写入、批准后生成 Task Graph |
 | 2026-07-26 | R6 Task Graph 与 Scheduler 完成 | DAG 校验、Ready/Blocked 推导、独立 Attempt、受约束调度、Executor 接缝和 Task CLI 已接入 Core；30 个文件、213 个 Workflow 用例通过 |
 | 2026-07-26 | M2 Plan 与 Task 完成 | R4-R6 全部完成；自动模式、正式 Plan、Task Graph 和确定性 Scheduler 均有测试与离线演示 |
+| 2026-07-26 | R7 运行保障能力完成 | 权限交集、只读角色、跨进程 Writer Lease、修改归属、预算限制和级联取消已接入 Core、CLI；34 个文件、224 个 Workflow 用例和离线演示通过 |
 
 ## 12. 下一步
 
-M0-M2 已完成并验证。下一步进入 M3 的运行保障能力：
+M0-M2 和 R7 已完成并验证。下一步继续 M3：
 
-1. 完成 R7.1-R7.2：权限模型与只读角色强制。
-2. 完成 R7.3-R7.5：Writer Lease、生命周期和修改归属。
-3. 完成 R7.6-R7.10：预算继承、限制和级联取消。
-
-R7 完成前不展开正式 Subagent 或 Job Runtime。
+1. 完成 R8.1-R8.4：复核 Subagent 示例，定义 AgentRegistry、API 和独立 AgentSession。
+2. 完成 R8.5-R8.9：接入权限、预算、事件、Handoff 和 Scheduler。
+3. 完成 R8.10-R8.11：提供 Agent CLI、回归测试和离线演示。
+4. R8 验收后再进入 R9 Background Job Runtime。

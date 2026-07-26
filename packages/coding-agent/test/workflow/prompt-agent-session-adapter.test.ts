@@ -168,6 +168,24 @@ describe("PromptEnvelope AgentSession adapter", () => {
 		expect(session.promptCalls).toHaveLength(0);
 	});
 
+	it("enforces the effective read-only Profile at the AgentSession boundary", async () => {
+		const session = new TestPromptAgentSession();
+		const envelope: PromptEnvelope = {
+			...createEnvelope(["write"]),
+			role: "reviewer",
+			profileName: "reviewer",
+		};
+
+		await expect(executePromptEnvelope(session, envelope)).rejects.toEqual(
+			expect.objectContaining({
+				code: "prompt_agent_session.permission_denied",
+				unavailableToolNames: ["write"],
+			}),
+		);
+		expect(session.activeToolNames).toEqual(["read", "edit", "write"]);
+		expect(session.promptCalls).toHaveLength(0);
+	});
+
 	it("restores the previous tool set when prompting fails", async () => {
 		const session = new TestPromptAgentSession();
 		session.failPrompt = true;

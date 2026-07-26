@@ -1089,15 +1089,20 @@ export class AgentSession {
 	 */
 	async cancelWorkflow(reason = "User cancelled the workflow"): Promise<boolean> {
 		const adapter = this._activeWorkflowAdapter;
-		if (!adapter || adapter.finalReport) {
-			return false;
+		if (adapter && !adapter.finalReport) {
+			await adapter.cancel(reason);
+			const finalReport = adapter.finalReport;
+			if (finalReport) {
+				this._latestWorkflowReport = finalReport;
+			}
+			return true;
 		}
-		await adapter.cancel(reason);
-		const finalReport = adapter.finalReport;
-		if (finalReport) {
-			this._latestWorkflowReport = finalReport;
+		const planRuntime = this._planWorkflowRuntime;
+		if (planRuntime && !planRuntime.isTerminal) {
+			await planRuntime.cancel(reason);
+			return true;
 		}
-		return true;
+		return false;
 	}
 
 	/** Return the latest terminal Direct Workflow report for this AgentSession. */
@@ -1489,10 +1494,12 @@ export class AgentSession {
 				lines = ["No Plan Workflow is executing."];
 			} else {
 				runtime.refreshTaskReadiness();
-				const maxConcurrency = runtime.workflow.budget.maxConcurrentAgents ?? 4;
+				const maxConcurrency = Math.max(1, runtime.workflow.budget.maxConcurrentAgents ?? 4);
 				const dispatches = runtime.selectDispatches(maxConcurrency);
 				lines = [
 					`Tasks | ${runtime.workflow.status} | ${runtime.progress.succeededSteps}/${runtime.progress.totalSteps} steps`,
+					runtime.budgetStatusLine,
+					runtime.writerLeaseStatusLine,
 					...runtime.taskTreeLines,
 					`Dispatchable: ${dispatches.length > 0 ? dispatches.map(({ taskId }) => taskId).join(", ") : "(none)"}`,
 				];

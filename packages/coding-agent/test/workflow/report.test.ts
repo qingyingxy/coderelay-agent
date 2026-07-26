@@ -70,6 +70,7 @@ function createTerminalReportInput(status: "completed" | "failed" | "cancelled")
 		attemptIds: ["attempt-1"],
 		currentAttemptId: "attempt-1",
 		verificationRequirements: [],
+		modifications: [],
 	};
 	const attempt: Attempt = {
 		schemaVersion: 1,

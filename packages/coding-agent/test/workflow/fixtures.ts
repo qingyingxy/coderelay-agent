@@ -64,6 +64,7 @@ export function createDirectStartBatch(
 				required: true,
 			},
 		],
+		modifications: [],
 	};
 	const events: readonly WorkflowEventDraft[] = [
 		{

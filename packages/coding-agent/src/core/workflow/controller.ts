@@ -1,4 +1,5 @@
 import { randomUUID } from "crypto";
+import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import { type UpgradeDirectToPlanDecision, validateDirectPlanUpgradeReadiness } from "./direct-plan-upgrade.ts";
 import type { SessionWorkflowEventLog } from "./event-log.ts";
 import type { WorkflowEventDraft } from "./events.ts";
@@ -6,6 +7,7 @@ import { createWorkflowEventBatch } from "./events.ts";
 import { validatePlan } from "./invariants.ts";
 import { createModeDecision } from "./mode-decision.ts";
 import { selectExecutionMode } from "./mode-selector.ts";
+import { assertBudgetAvailable, inheritBudgetLimits } from "./runtime-policy.ts";
 import { deriveTaskReadiness } from "./scheduler.ts";
 import type { WorkflowStore } from "./stores.ts";
 import { isAttemptTerminalStatus, isTaskTerminalStatus, isWorkflowTerminalStatus } from "./transitions.ts";
@@ -16,6 +18,7 @@ import type {
 	CommandId,
 	CorrelationId,
 	FailureRecord,
+	FileModificationRecord,
 	IsoDateTime,
 	Plan,
 	PlanContent,
@@ -97,12 +100,14 @@ export interface PrepareMainAgentAttemptCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
 	readonly agentId?: string;
+	readonly writerLeaseId?: string;
 }
 
 export interface PrepareTaskAttemptCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
 	readonly assignment: TaskAssignment;
+	readonly writerLeaseId?: string;
 }
 
 export interface RefreshTaskReadinessCommand extends WorkflowCommandBase {}
@@ -119,6 +124,11 @@ export interface BlockTaskCommand extends WorkflowCommandBase {
 export interface CancelTaskCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly reason: string;
+}
+
+export interface RecordTaskModificationCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly modification: Omit<FileModificationRecord, "workflowId" | "taskId" | "recordedAt">;
 }
 
 interface RuntimeEventBase extends WorkflowCommandBase {
@@ -261,6 +271,18 @@ function assertValidDuration(durationMs: number): void {
 	}
 }
 
+function addUsage(left: ResourceUsage, right: ResourceUsage): ResourceUsage {
+	return {
+		inputTokens: left.inputTokens + right.inputTokens,
+		outputTokens: left.outputTokens + right.outputTokens,
+		cacheReadTokens: left.cacheReadTokens + right.cacheReadTokens,
+		cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
+		cost: left.cost + right.cost,
+		turns: left.turns + right.turns,
+		durationMs: left.durationMs + right.durationMs,
+	};
+}
+
 function fail(code: string, message: string): never {
 	throw new WorkflowControllerError(code, message);
 }
@@ -372,10 +394,11 @@ export class WorkflowController {
 			description: command.description?.trim() || command.request.text,
 			status: "pending",
 			dependencyIds: [],
-			budget,
+			budget: inheritBudgetLimits(budget, BUILTIN_AGENT_PROFILES.worker.defaultBudget),
 			usage: zeroUsage(),
 			attemptIds: [],
 			verificationRequirements: requirements,
+			modifications: [],
 		};
 		const workflowCreatedId = this.#eventId();
 		const modeDecidedId = this.#eventId();
@@ -475,10 +498,11 @@ export class WorkflowController {
 			description: command.description?.trim() || command.request.text,
 			status: "pending",
 			dependencyIds: [],
-			budget,
+			budget: inheritBudgetLimits(budget, BUILTIN_AGENT_PROFILES.planner.defaultBudget),
 			usage: zeroUsage(),
 			attemptIds: [],
 			verificationRequirements: [],
+			modifications: [],
 		};
 		const plan: Plan = {
 			schemaVersion: WORKFLOW_SCHEMA_VERSION,
@@ -788,6 +812,38 @@ export class WorkflowController {
 		return this.#commit(command, [event]);
 	}
 
+	recordTaskModification(command: RecordTaskModificationCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		const attempt = this.#requireAttempt(command.modification.attemptId, task.id, command.workflowId);
+		if (task.status !== "running" || attempt.status !== "running") {
+			fail("controller.modification_not_running", "Modifications require a running Task and Attempt");
+		}
+		if (task.accessMode !== "writer") {
+			fail("controller.modification_read_only", `Read-only Task ${task.id} cannot record modifications`);
+		}
+		const occurredAt = this.#now();
+		const modification: FileModificationRecord = {
+			...structuredClone(command.modification),
+			workflowId: command.workflowId,
+			taskId: task.id,
+			recordedAt: occurredAt,
+		};
+		const event: WorkflowEventDraft = {
+			eventId: this.#eventId(),
+			entityId: task.id,
+			entityRevision: task.revision + 1,
+			eventType: "task.modification_recorded",
+			occurredAt,
+			actor: { kind: "agent", id: modification.agentId },
+			payload: { modification },
+		};
+		return this.#commit(command, [event]);
+	}
+
 	prepareMainAgentAttempt(command: PrepareMainAgentAttemptCommand): WorkflowCommandResult {
 		return this.prepareTaskAttempt({
 			...command,
@@ -814,15 +870,48 @@ export class WorkflowController {
 		if (task.kind === "control") {
 			fail("controller.control_task_not_executable", `Control Task ${task.id} cannot create an attempt`);
 		}
+		if (task.accessMode === "writer" && !command.writerLeaseId?.trim()) {
+			fail("controller.writer_lease_required", `Writer Task ${task.id} requires an active Writer Lease`);
+		}
 		if (task.kind === "command" && command.assignment.executorKind !== "job") {
 			fail("controller.executor_mismatch", `Command Task ${task.id} requires a Job executor`);
 		}
 		if ((task.kind === "agent" || task.kind === "repair") && command.assignment.executorKind === "job") {
 			fail("controller.executor_mismatch", `Agent Task ${task.id} requires an Agent executor`);
 		}
+		if (
+			command.assignment.agentDepth !== undefined &&
+			(!Number.isInteger(command.assignment.agentDepth) || command.assignment.agentDepth < 0)
+		) {
+			fail("controller.invalid_agent_depth", "Agent depth must be a non-negative integer");
+		}
 		if (this.#store.getAttempt(command.attemptId)) {
 			fail("controller.attempt_exists", `Attempt ${command.attemptId} already exists`);
 		}
+		const attempts = this.#store.listAttempts(task.id);
+		const taskUsage = attempts.reduce((usage, attempt) => addUsage(usage, attempt.usage), task.usage);
+		assertBudgetAvailable(task.budget, taskUsage, {
+			retries: attempts.length,
+		});
+		const workflowTasks = this.#store.listTasks(workflow.id);
+		const activeAssignments = workflowTasks
+			.filter(({ status }) => status === "running" || status === "verifying")
+			.map(({ assignment }) => assignment)
+			.filter((assignment): assignment is TaskAssignment => assignment !== undefined);
+		const requestedAgent =
+			command.assignment.executorKind === "main_agent" || command.assignment.executorKind === "subagent";
+		const requestedJob = command.assignment.executorKind === "job";
+		const workflowUsage = workflowTasks
+			.flatMap(({ id }) => this.#store.listAttempts(id))
+			.reduce((usage, attempt) => addUsage(usage, attempt.usage), workflow.usage);
+		assertBudgetAvailable(workflow.budget, workflowUsage, {
+			activeAgents:
+				activeAssignments.filter(({ executorKind }) => executorKind === "main_agent" || executorKind === "subagent")
+					.length + (requestedAgent ? 1 : 0),
+			activeJobs:
+				activeAssignments.filter(({ executorKind }) => executorKind === "job").length + (requestedJob ? 1 : 0),
+			agentDepth: command.assignment.agentDepth ?? 0,
+		});
 
 		const occurredAt = this.#now();
 		const attempt: Attempt = {
@@ -877,6 +966,8 @@ export class WorkflowController {
 					toStatus: "running",
 					facts: {
 						attemptCreated: true,
+						writerLeaseRequired: task.accessMode === "writer",
+						writerLeaseHeld: task.accessMode === "writer" ? Boolean(command.writerLeaseId) : undefined,
 					},
 					attemptId: attempt.id,
 				},
@@ -1324,12 +1415,13 @@ export class WorkflowController {
 					}
 					return dependencyTaskId;
 				}),
-				budget: structuredClone(workflow.budget),
+				budget: inheritBudgetLimits(workflow.budget, BUILTIN_AGENT_PROFILES.worker.defaultBudget),
 				usage: zeroUsage(),
 				attemptIds: [],
 				verificationRequirements: plan.verificationRequirements
 					.filter((requirement) => step.verificationRequirementIds.includes(requirement.id))
 					.map((requirement) => structuredClone(requirement)),
+				modifications: [],
 			};
 			causationId = this.#eventId();
 			events.push({
@@ -1800,7 +1892,7 @@ export class WorkflowController {
 			return duplicate;
 		}
 		const workflow = this.#requireWorkflow(command.workflowId);
-		const task = this.#requireTask(command.taskId, command.workflowId);
+		this.#requireTask(command.taskId, command.workflowId);
 		if (workflow.status === "cancelled") {
 			return this.#result(command.workflowId, undefined, false);
 		}
@@ -1816,26 +1908,34 @@ export class WorkflowController {
 		const occurredAt = this.#now();
 		const events: WorkflowEventDraft[] = [];
 		let causationId: string | undefined;
-		const attempt = task.currentAttemptId ? this.#store.getAttempt(task.currentAttemptId) : undefined;
-		if (attempt && !isAttemptTerminalStatus(attempt.status)) {
-			causationId = this.#eventId();
-			events.push({
-				eventId: causationId,
-				entityId: attempt.id,
-				entityRevision: attempt.revision + 1,
-				eventType: "attempt.cancelled",
-				occurredAt,
-				actor: { kind: "controller" },
-				payload: {
-					fromStatus: attempt.status,
-					toStatus: "cancelled",
-					endedAt: occurredAt,
-					usage: structuredClone(command.attemptUsage ?? command.usage),
-					reason: command.reason,
-				},
-			});
-		}
-		if (!isTaskTerminalStatus(task.status)) {
+		const tasks = this.#store.listTasks(workflow.id);
+		for (const task of tasks) {
+			const attempt = task.currentAttemptId ? this.#store.getAttempt(task.currentAttemptId) : undefined;
+			if (attempt && !isAttemptTerminalStatus(attempt.status)) {
+				const attemptCancelledId = this.#eventId();
+				events.push({
+					eventId: attemptCancelledId,
+					entityId: attempt.id,
+					entityRevision: attempt.revision + 1,
+					eventType: "attempt.cancelled",
+					occurredAt,
+					actor: { kind: "controller" },
+					causationId,
+					payload: {
+						fromStatus: attempt.status,
+						toStatus: "cancelled",
+						endedAt: occurredAt,
+						usage: structuredClone(
+							task.id === command.taskId ? (command.attemptUsage ?? command.usage) : attempt.usage,
+						),
+						reason: command.reason,
+					},
+				});
+				causationId = attemptCancelledId;
+			}
+			if (isTaskTerminalStatus(task.status)) {
+				continue;
+			}
 			const taskCancelledId = this.#eventId();
 			events.push({
 				eventId: taskCancelledId,
@@ -1856,6 +1956,10 @@ export class WorkflowController {
 			});
 			causationId = taskCancelledId;
 		}
+		const completedTasks = tasks.filter(({ status }) => status === "succeeded");
+		const failedTasks = tasks.filter(({ status }) => status === "failed");
+		const changedFiles = [...new Set(completedTasks.flatMap(({ result }) => result?.changedFiles ?? []))];
+		const verificationIds = [...new Set(completedTasks.flatMap(({ result }) => result?.verificationIds ?? []))];
 		events.push({
 			eventId: this.#eventId(),
 			entityId: workflow.id,
@@ -1874,10 +1978,10 @@ export class WorkflowController {
 				result: {
 					status: "cancelled",
 					summary: command.reason,
-					completedTaskIds: task.status === "succeeded" ? [task.id] : [],
-					failedTaskIds: [],
-					changedFiles: task.result?.changedFiles ?? [],
-					verificationIds: task.result?.verificationIds ?? [],
+					completedTaskIds: completedTasks.map(({ id }) => id),
+					failedTaskIds: failedTasks.map(({ id }) => id),
+					changedFiles,
+					verificationIds,
 					risks: [],
 					unfinishedItems: [command.reason],
 					usage: structuredClone(command.usage),

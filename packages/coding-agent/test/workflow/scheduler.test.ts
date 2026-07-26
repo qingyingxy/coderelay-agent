@@ -35,6 +35,7 @@ function task(
 		usage: ZERO_USAGE,
 		attemptIds: [],
 		verificationRequirements: [],
+		modifications: [],
 	};
 }
 

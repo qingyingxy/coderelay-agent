@@ -70,6 +70,7 @@ function startAttempt(controller: WorkflowController): void {
 		workflowId: WORKFLOW_ID,
 		taskId: TASK_ID,
 		attemptId: ATTEMPT_ID,
+		writerLeaseId: "writer-lease",
 	});
 	controller.handleRuntimeEvent({
 		type: "attempt_started",
@@ -391,6 +392,7 @@ describe("WorkflowController", () => {
 			workflowId: WORKFLOW_ID,
 			taskId: TASK_ID,
 			attemptId: ATTEMPT_ID,
+			writerLeaseId: "writer-lease",
 		});
 
 		controller.requestCancellation({

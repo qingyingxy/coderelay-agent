@@ -52,6 +52,7 @@ function task(
 		},
 		attemptIds: [],
 		verificationRequirements: [],
+		modifications: [],
 	};
 }
 

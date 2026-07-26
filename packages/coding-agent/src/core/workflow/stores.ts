@@ -385,6 +385,27 @@ function applyTaskEvent(state: MutableStoreState, event: AnyWorkflowEvent): bool
 			state.tasks.set(task.id, task);
 			return true;
 		}
+		case "task.modification_recorded": {
+			const current = getTask(state, event);
+			assertRevision(event, current.revision);
+			const modification = structuredClone(event.payload.modification);
+			if (
+				modification.workflowId !== current.workflowId ||
+				modification.taskId !== current.id ||
+				!current.attemptIds.includes(modification.attemptId)
+			) {
+				fail("store.modification_owner_mismatch", "File modification does not belong to the target Task");
+			}
+			const task: Task = {
+				...current,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+				modifications: [...current.modifications, modification],
+			};
+			assertValidEntity("task", validateTask(task));
+			state.tasks.set(task.id, task);
+			return true;
+		}
 		case "task.pending":
 		case "task.ready": {
 			const current = getTask(state, event);

@@ -14,9 +14,12 @@ import {
 	formatWorkflowStatusLine,
 	type WorkflowFinalReport,
 } from "./report.ts";
+import { evaluateBudget, formatBudgetEvaluation, sumResourceUsage } from "./runtime-policy.ts";
+import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from "./runtime-registry.ts";
 import { WorkflowStore } from "./stores.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type { AttemptId, ResourceUsage, TaskId, VerificationId, WorkflowId } from "./types.ts";
+import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "./writer-lease.ts";
 
 /** Built-in tools whose successful results contribute to the changed-file summary. */
 const MUTATION_TOOL_NAMES = new Set(["edit", "write"]);
@@ -45,10 +48,18 @@ export interface WorkflowAgentSession {
 export interface AgentSessionAdapterOptions {
 	readonly createId?: (kind: "command" | "attempt" | "verification" | "plan") => string;
 	readonly now?: () => number;
+	readonly writerLeaseRegistry?: WriterLeaseRegistry;
+	readonly runtimeRegistry?: WorkflowRuntimeRegistry;
+	readonly writerLeaseTtlMs?: number;
 }
 
 interface PendingAgentEnd {
 	readonly message?: AssistantMessage;
+}
+
+interface PendingMutation {
+	readonly path: string;
+	readonly operation: "edit" | "write";
 }
 
 function zeroUsage(): ResourceUsage {
@@ -139,7 +150,12 @@ export class AgentSessionAdapter {
 	readonly #taskId: TaskId;
 	readonly #createId: (kind: "command" | "attempt" | "verification" | "plan") => string;
 	readonly #now: () => number;
+	readonly #writerLeaseRegistry: WriterLeaseRegistry;
+	readonly #runtimeRegistry: WorkflowRuntimeRegistry;
+	readonly #writerLeaseTtlMs: number;
 	#unsubscribe?: () => void;
+	#unregisterRuntime?: () => void;
+	#writerLeaseId?: string;
 	#activeAttemptId?: AttemptId;
 	#attemptStartedAt = 0;
 	#attemptUsage: ResourceUsage = zeroUsage();
@@ -154,7 +170,7 @@ export class AgentSessionAdapter {
 	/** Memoized upgrade run so concurrent/repeated requests share one flow. */
 	#planUpgradePromise?: Promise<void>;
 	/** In-flight mutation tool calls, keyed by toolCallId, awaiting their result. */
-	readonly #pendingMutations = new Map<string, string>();
+	readonly #pendingMutations = new Map<string, PendingMutation>();
 	/** Paths reported by successful edit/write tools across the whole workflow, in order. */
 	readonly #changedFiles: string[] = [];
 
@@ -171,6 +187,9 @@ export class AgentSessionAdapter {
 		this.#taskId = taskId;
 		this.#createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
 		this.#now = options.now ?? Date.now;
+		this.#writerLeaseRegistry = options.writerLeaseRegistry ?? DEFAULT_WRITER_LEASE_REGISTRY;
+		this.#runtimeRegistry = options.runtimeRegistry ?? DEFAULT_WORKFLOW_RUNTIME_REGISTRY;
+		this.#writerLeaseTtlMs = options.writerLeaseTtlMs ?? 3_600_000;
 	}
 
 	get controller(): WorkflowController {
@@ -221,7 +240,19 @@ export class AgentSessionAdapter {
 		if (!workflow || !rootTask || !statusLine) {
 			return undefined;
 		}
-		return [statusLine, `Workflow ID: ${workflow.id}`, `Task: ${rootTask.status} | ${rootTask.title}`];
+		const attempts = this.#controller.listAttempts(rootTask.id);
+		const budgetLine = formatBudgetEvaluation(
+			evaluateBudget(workflow.budget, sumResourceUsage(attempts.map(({ usage }) => usage)), {
+				activeAgents: rootTask.status === "running" || rootTask.status === "verifying" ? 1 : 0,
+			}),
+		);
+		return [
+			statusLine,
+			`Workflow ID: ${workflow.id}`,
+			`Task: ${rootTask.status} | ${rootTask.title}`,
+			budgetLine,
+			`Writer Lease: ${this.#writerLeaseId ? `held | ${this.#writerLeaseId}` : "not held"}`,
+		];
 	}
 
 	start(): this {
@@ -230,12 +261,34 @@ export class AgentSessionAdapter {
 		}
 		this.#unsubscribe = this.#session.subscribe(this.#handleEvent);
 		try {
+			const workflow = this.#controller.getWorkflow(this.#workflowId);
+			const task = this.#controller.getRootTask(this.#workflowId);
+			if (workflow && task?.accessMode === "writer") {
+				const lease = this.#writerLeaseRegistry.acquire({
+					workspace: workflow.request.cwd,
+					workflowId: this.#workflowId,
+					taskId: this.#taskId,
+					ttlMs: this.#writerLeaseTtlMs,
+				});
+				this.#writerLeaseId = lease.id;
+			}
+			this.#unregisterRuntime = this.#runtimeRegistry.register({
+				id: `agent-session:${this.#workflowId}`,
+				kind: "agent",
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				stop: async () => {
+					await this.#session.abort();
+					await this.#session.waitForIdle();
+				},
+			});
 			this.#controller.markTaskReady({
 				commandId: this.#createId("command"),
 				workflowId: this.#workflowId,
 				taskId: this.#taskId,
 			});
 		} catch (error) {
+			this.#releaseWriterLease();
 			this.dispose();
 			throw error;
 		}
@@ -279,8 +332,12 @@ export class AgentSessionAdapter {
 			reason,
 		});
 		// Phase 2: stop the AgentSession and wait until it is idle.
-		await this.#session.abort();
-		await this.#session.waitForIdle();
+		const cancellation = await this.#runtimeRegistry.cancelWorkflow(this.#workflowId, reason);
+		if (cancellation.failures.length > 0) {
+			throw new Error(`Failed to stop Workflow resources: ${cancellation.failures.map(({ id }) => id).join(", ")}`);
+		}
+		this.#unregisterRuntime = undefined;
+		this.#releaseWriterLease();
 		// Phase 3: finalize the terminal cancelled state.
 		this.#finishCancellation(reason);
 	}
@@ -338,6 +395,9 @@ export class AgentSessionAdapter {
 			});
 			await this.#session.abort();
 			await this.#session.waitForIdle();
+			this.#unregisterRuntime?.();
+			this.#unregisterRuntime = undefined;
+			this.#releaseWriterLease();
 			const attemptUsage = this.#activeAttemptId ? this.#completedUsage() : zeroUsage();
 			this.#controller.finishDirectPlanUpgrade({
 				commandId: this.#createId("command"),
@@ -360,9 +420,18 @@ export class AgentSessionAdapter {
 	dispose(): void {
 		this.#unsubscribe?.();
 		this.#unsubscribe = undefined;
+		this.#unregisterRuntime?.();
+		this.#unregisterRuntime = undefined;
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (workflow && isWorkflowTerminalStatus(workflow.status)) {
+			this.#releaseWriterLease();
+		}
 	}
 
 	readonly #handleEvent = (event: AgentSessionEvent): void => {
+		if (this.#writerLeaseId) {
+			this.#writerLeaseRegistry.renew(this.#writerLeaseId, this.#writerLeaseTtlMs);
+		}
 		switch (event.type) {
 			case "agent_start":
 				this.#handleAgentStart();
@@ -414,6 +483,7 @@ export class AgentSessionAdapter {
 			taskId: this.#taskId,
 			attemptId,
 			agentId: "main-agent",
+			writerLeaseId: this.#writerLeaseId,
 		});
 		this.#controller.handleRuntimeEvent({
 			type: "attempt_started",
@@ -442,13 +512,16 @@ export class AgentSessionAdapter {
 		}
 		const path = mutatedPath(event.args);
 		if (path) {
-			this.#pendingMutations.set(event.toolCallId, path);
+			this.#pendingMutations.set(event.toolCallId, {
+				path,
+				operation: event.toolName === "write" ? "write" : "edit",
+			});
 		}
 	}
 
 	#handleToolEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): void {
-		const path = this.#pendingMutations.get(event.toolCallId);
-		if (path === undefined) {
+		const mutation = this.#pendingMutations.get(event.toolCallId);
+		if (mutation === undefined) {
 			return;
 		}
 		this.#pendingMutations.delete(event.toolCallId);
@@ -456,8 +529,23 @@ export class AgentSessionAdapter {
 		if (event.isError) {
 			return;
 		}
-		if (!this.#changedFiles.includes(path)) {
-			this.#changedFiles.push(path);
+		if (!this.#activeAttemptId) {
+			throw new Error(`Workflow ${this.#workflowId} recorded a modification without an active Attempt`);
+		}
+		this.#controller.recordTaskModification({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			modification: {
+				path: mutation.path,
+				operation: mutation.operation,
+				attemptId: this.#activeAttemptId,
+				agentId: "main-agent",
+				toolCallId: event.toolCallId,
+			},
+		});
+		if (!this.#changedFiles.includes(mutation.path)) {
+			this.#changedFiles.push(mutation.path);
 		}
 	}
 
@@ -508,6 +596,9 @@ export class AgentSessionAdapter {
 			this.#workflowUsage = workflowUsage;
 			this.#activeAttemptId = undefined;
 			this.#completeVerification(verificationId, summary, workflowUsage);
+			this.#unregisterRuntime?.();
+			this.#unregisterRuntime = undefined;
+			this.#releaseWriterLease();
 			return;
 		}
 		this.#recordAttemptFailure(message, false);
@@ -559,6 +650,11 @@ export class AgentSessionAdapter {
 		this.#workflowUsage = workflowUsage;
 		this.#activeAttemptId = undefined;
 		this.#pendingAgentEnd = undefined;
+		if (!willRetry) {
+			this.#unregisterRuntime?.();
+			this.#unregisterRuntime = undefined;
+			this.#releaseWriterLease();
+		}
 	}
 
 	#completedUsage(): ResourceUsage {
@@ -566,6 +662,13 @@ export class AgentSessionAdapter {
 			...this.#attemptUsage,
 			durationMs: Math.max(0, this.#now() - this.#attemptStartedAt),
 		};
+	}
+
+	#releaseWriterLease(): void {
+		if (this.#writerLeaseId) {
+			this.#writerLeaseRegistry.release(this.#writerLeaseId);
+			this.#writerLeaseId = undefined;
+		}
 	}
 }
 

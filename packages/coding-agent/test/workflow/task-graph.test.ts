@@ -22,6 +22,7 @@ function task(id: string, options: { parentTaskId?: string; dependencyIds?: read
 		usage: ZERO_USAGE,
 		attemptIds: [],
 		verificationRequirements: [],
+		modifications: [],
 	};
 }
 

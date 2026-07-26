@@ -383,11 +383,33 @@ export function validateTask(task: Task): readonly DomainViolation[] {
 	if (hasDuplicates(task.attemptIds)) {
 		violations.push(violation("task.duplicate_attempt", "Task attempt ids must be unique"));
 	}
+	for (const modification of task.modifications) {
+		if (
+			!modification.path.trim() ||
+			!modification.toolCallId.trim() ||
+			!modification.agentId.trim() ||
+			modification.workflowId !== task.workflowId ||
+			modification.taskId !== task.id ||
+			!task.attemptIds.includes(modification.attemptId) ||
+			!["edit", "write"].includes(modification.operation) ||
+			!Number.isFinite(Date.parse(modification.recordedAt))
+		) {
+			violations.push(
+				violation("task.invalid_modification", `Task ${task.id} contains an invalid modification record`),
+			);
+		}
+	}
 	if (task.currentAttemptId && !task.attemptIds.includes(task.currentAttemptId)) {
 		violations.push(violation("task.current_attempt_missing", "Current attempt must appear in attempt ids"));
 	}
 	if (task.kind === "control" && task.assignment) {
 		violations.push(violation("task.control_assignment", "Control task cannot have an executor assignment"));
+	}
+	if (
+		task.assignment?.agentDepth !== undefined &&
+		(!Number.isInteger(task.assignment.agentDepth) || task.assignment.agentDepth < 0)
+	) {
+		violations.push(violation("task.invalid_agent_depth", "Task assignment Agent depth must be non-negative"));
 	}
 	if (task.accessMode !== "read_only" && task.accessMode !== "writer") {
 		violations.push(violation("task.invalid_access_mode", `Task access mode ${task.accessMode} is not supported`));

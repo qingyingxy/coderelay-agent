@@ -56,6 +56,7 @@ function task(stepId: string, status: Task["status"]): Task {
 		usage: ZERO_USAGE,
 		attemptIds: [],
 		verificationRequirements: [],
+		modifications: [],
 	};
 }
 

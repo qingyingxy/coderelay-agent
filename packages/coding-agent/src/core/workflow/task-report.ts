@@ -43,12 +43,18 @@ export function formatTaskDetails(task: Task, attempts: readonly Attempt[]): rea
 		`Dependencies: ${task.dependencyIds.length > 0 ? task.dependencyIds.join(", ") : "(none)"}`,
 		`Executor: ${task.assignment?.executorKind ?? "(unassigned)"}`,
 		`Attempts: ${attempts.length}`,
+		`Modifications: ${task.modifications.length}`,
 	];
 	if (task.blockedReason) {
 		lines.push(`Blocked: ${task.blockedReason.code} | ${task.blockedReason.message}`);
 	}
 	for (const attempt of attempts) {
 		lines.push(`  #${attempt.number} ${attempt.id} | ${attempt.status} | ${attempt.executorKind}`);
+	}
+	for (const modification of task.modifications) {
+		lines.push(
+			`  ${modification.operation} ${modification.path} | ${modification.agentId} | ${modification.attemptId}`,
+		);
 	}
 	return lines;
 }
