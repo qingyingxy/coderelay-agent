@@ -325,6 +325,10 @@ function applyPlanEvent(state: MutableStoreState, event: AnyWorkflowEvent): bool
 				revision: event.entityRevision,
 				updatedAt: event.occurredAt,
 				status: event.payload.toStatus,
+				decisionHistory:
+					event.eventType === "plan.awaiting_approval"
+						? current.decisionHistory
+						: [...current.decisionHistory, structuredClone(event.payload.decision)],
 			};
 			assertValidEntity("plan", validatePlan(plan));
 			state.plans.set(plan.id, plan);
@@ -789,6 +793,10 @@ export class WorkflowStore {
 	getWorkflow(workflowId: WorkflowId): Workflow | undefined {
 		const workflow = this.#state.workflows.get(workflowId);
 		return workflow ? structuredClone(workflow) : undefined;
+	}
+
+	listWorkflows(): readonly Workflow[] {
+		return [...this.#state.workflows.values()].map((workflow) => structuredClone(workflow));
 	}
 
 	getPlan(planId: PlanId): Plan | undefined {

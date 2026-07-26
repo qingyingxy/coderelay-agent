@@ -29,6 +29,7 @@ M1 实施计划：
 M2 实施计划：
 
 - [`M2 模式选择与 Prompt Pipeline 实施计划`](./design/m2-mode-prompt-implementation-plan.md)
+- [`M2 正式 Plan Mode 实施记录`](./design/m2-plan-mode-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -232,16 +233,16 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R5.1 | `TODO` | 复核现有 Plan Mode 示例 | 明确可复用命令、工具限制、Widget 和 Session Entry | R0.1 |
+| R5.1 | `DONE` | 复核现有 Plan Mode 示例 | 明确可复用命令、工具限制、Widget 和 Session Entry | R0.1 |
 | R5.2 | `DONE` | 实现 Plan 状态机 | Plan 可以创建、待批准、批准、拒绝和被新版本替代 | R1.3、R2.3 |
-| R5.3 | `TODO` | 实现 Planner 只读门禁 | Planner 禁用写工具，Bash 受只读策略限制 | R4.6 |
-| R5.4 | `TODO` | 实现 Plan 审批记录 | 保存批准、拒绝、修改内容和时间 | R2.7、R5.2 |
-| R5.5 | `TODO` | 实现 Plan 版本管理 | 修改或重新规划创建新版本，不覆盖旧版本 | R5.2、R5.4 |
-| R5.6 | `TODO` | 实现 Plan 转 Task | 批准后将步骤转换为已有 Task 模型 | R1.2、R1.3 |
-| R5.7 | `TODO` | 移除文本进度依赖 | 不依赖 `[DONE:n]`，Plan 进度从关联 Task 推导 | R5.6 |
-| R5.8 | `TODO` | 提供 Plan CLI | `/plan`、`/approve`、`/reject`、`/replan` | R5.2-R5.6 |
-| R5.9 | `TODO` | 编写 Plan 回归测试 | 覆盖只读、批准、拒绝、修改、版本和 Direct 升级 | R4.11、R5.2-R5.8 |
-| R5.10 | `TODO` | 建立 Plan 演示场景 | 复杂任务在批准前不修改代码，批准后进入执行 | R5.9 |
+| R5.3 | `DONE` | 实现 Planner 只读门禁 | Planner 只获得 read/grep/find/ls 子集，第一版完全禁用 Bash | R4.6 |
+| R5.4 | `DONE` | 实现 Plan 审批记录 | 保存批准、拒绝、修改内容和时间 | R2.7、R5.2 |
+| R5.5 | `DONE` | 实现 Plan 版本管理 | 修改或重新规划创建新版本，不覆盖旧版本 | R5.2、R5.4 |
+| R5.6 | `DONE` | 实现 Plan 转 Task | 批准后将步骤转换为已有 Task 模型 | R1.2、R1.3 |
+| R5.7 | `DONE` | 移除文本进度依赖 | 不依赖 `[DONE:n]`，Plan 进度从关联 Task 推导 | R5.6 |
+| R5.8 | `DONE` | 提供 Plan CLI | `/plan`、`/approve`、`/reject`、`/replan` | R5.2-R5.6 |
+| R5.9 | `DONE` | 编写 Plan 回归测试 | 覆盖只读、批准、拒绝、修改、版本和 Direct 升级 | R4.11、R5.2-R5.8 |
+| R5.10 | `DONE` | 建立 Plan 演示场景 | 复杂任务在批准前不修改代码，批准后进入执行 | R5.9 |
 
 ### R6：Task Graph 与 Scheduler
 
@@ -469,13 +470,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R5.2 正式 Plan 状态机完成 | Plan 实体、结构校验、五状态转换、领域事件和 WorkflowStore 重放已实现；审批记录、版本命令和 CLI 仍按后续任务推进 |
 | 2026-07-26 | R4.11 Direct 升级 Plan 完成 | 升级请求先持久化，AgentSession 停止并等待 idle，Attempt 记为 interrupted，再原子创建 Draft Plan 并进入 Planning |
 | 2026-07-26 | R4.12 模式与 Prompt 回归完成 | 22 个 Workflow 测试文件、181 个用例覆盖模式优先级、Profile、Prompt 预算与适配、Plan 状态和 Direct 升级 |
+| 2026-07-26 | R5 正式 Plan Mode 完成 | 只读 Planner、审批记录、版本链、Plan 转 Task、Task 派生进度和四个 Plan CLI 命令已接入 Core |
+| 2026-07-26 | R5 Plan 回归与演示完成 | 27 个测试文件、202 个用例通过；`npm run demo:plan-workflow` 验证批准前零写入、批准后生成 Task Graph |
 
 ## 12. 下一步
 
-M1 Direct Workflow MVP 和 R4 模式与 Prompt Pipeline 已完成并验证。M2 下一步进入正式 Plan Mode：
+M1 Direct Workflow MVP、R4 模式与 Prompt Pipeline、R5 正式 Plan Mode 已完成并验证。M2 下一步进入 Task Graph 与 Scheduler：
 
-1. 完成 R5.1：复核现有 Plan Mode 示例，明确可复用边界。
-2. 完成 R5.3：实现 Planner 只读门禁。
-3. 完成 R5.4：实现 Plan 审批记录。
+1. 完成 R6.1：实现父子 Task 与 DAG 依赖。
+2. 完成 R6.2：实现 Ready 状态推导。
+3. 完成 R6.3-R6.5：完善 Attempt、Scheduler 和执行器接口。
 
-R5 完成前不同时展开 Task Graph、Subagent 或 Job。
+R6 完成前不同时展开 Subagent 或 Job。

@@ -3,6 +3,7 @@ import { type UpgradeDirectToPlanDecision, validateDirectPlanUpgradeReadiness } 
 import type { SessionWorkflowEventLog } from "./event-log.ts";
 import type { WorkflowEventDraft } from "./events.ts";
 import { createWorkflowEventBatch } from "./events.ts";
+import { validatePlan } from "./invariants.ts";
 import { createModeDecision } from "./mode-decision.ts";
 import { selectExecutionMode } from "./mode-selector.ts";
 import type { WorkflowStore } from "./stores.ts";
@@ -16,6 +17,8 @@ import type {
 	FailureRecord,
 	IsoDateTime,
 	Plan,
+	PlanContent,
+	PlanDecisionRecord,
 	PlanId,
 	ResourceUsage,
 	Task,
@@ -49,6 +52,37 @@ export interface StartDirectWorkflowCommand extends WorkflowCommandBase {
 	readonly description?: string;
 	readonly budget?: BudgetLimit;
 	readonly verificationRequirements?: readonly VerificationRequirement[];
+}
+
+export interface StartPlanWorkflowCommand extends WorkflowCommandBase {
+	readonly rootTaskId: TaskId;
+	readonly planId: PlanId;
+	readonly request: UserRequest;
+	readonly title?: string;
+	readonly description?: string;
+	readonly budget?: BudgetLimit;
+}
+
+export interface SubmitPlanForApprovalCommand extends WorkflowCommandBase {
+	readonly planId: PlanId;
+	readonly content: PlanContent;
+	readonly plannerReadOnly: boolean;
+}
+
+export interface ApprovePlanCommand extends WorkflowCommandBase {
+	readonly planId: PlanId;
+	readonly comment: string;
+}
+
+export interface RejectPlanCommand extends WorkflowCommandBase {
+	readonly planId: PlanId;
+	readonly comment: string;
+}
+
+export interface RevisePlanCommand extends WorkflowCommandBase {
+	readonly planId: PlanId;
+	readonly replacementPlanId: PlanId;
+	readonly comment: string;
 }
 
 export interface MarkTaskReadyCommand extends WorkflowCommandBase {
@@ -136,7 +170,7 @@ export interface FinishWorkflowCancellationCommand extends WorkflowCommandBase {
 	readonly writerLeaseReleased: boolean;
 }
 
-export type WorkflowControllerIdKind = "batch" | "event";
+export type WorkflowControllerIdKind = "batch" | "event" | "task";
 
 export interface WorkflowControllerOptions {
 	readonly createId?: (kind: WorkflowControllerIdKind) => string;
@@ -196,6 +230,46 @@ function assertValidDuration(durationMs: number): void {
 
 function fail(code: string, message: string): never {
 	throw new WorkflowControllerError(code, message);
+}
+
+function orderedPlanSteps(plan: Plan): Plan["steps"] {
+	const stepsById = new Map(plan.steps.map((step) => [step.id, step]));
+	const visited = new Set<string>();
+	const ordered: Plan["steps"][number][] = [];
+	const visit = (stepId: string): void => {
+		if (visited.has(stepId)) {
+			return;
+		}
+		const step = stepsById.get(stepId);
+		if (!step) {
+			fail("controller.plan_step_missing", `Plan step ${stepId} does not exist`);
+		}
+		for (const dependencyId of step.dependsOn) {
+			visit(dependencyId);
+		}
+		visited.add(stepId);
+		ordered.push(step);
+	};
+	for (const step of plan.steps) {
+		visit(step.id);
+	}
+	return ordered;
+}
+
+function createPlanDecision(
+	action: PlanDecisionRecord["action"],
+	comment: string,
+	decidedAt: IsoDateTime,
+): PlanDecisionRecord {
+	const normalizedComment = comment.trim();
+	if (!normalizedComment) {
+		fail("controller.plan_decision_comment_required", "Plan decision comment is required");
+	}
+	return {
+		action,
+		comment: normalizedComment,
+		decidedAt,
+	};
 }
 
 export class WorkflowController {
@@ -317,6 +391,151 @@ export class WorkflowController {
 					toStatus: "executing",
 					facts: {
 						directModeSelected: true,
+						rootTaskExists: true,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
+	}
+
+	startPlan(command: StartPlanWorkflowCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		if (this.#store.getWorkflow(command.workflowId)) {
+			fail("controller.workflow_exists", `Workflow ${command.workflowId} already exists`);
+		}
+		if (this.#store.getPlan(command.planId)) {
+			fail("controller.plan_exists", `Plan ${command.planId} already exists`);
+		}
+		const modeSelection = selectExecutionMode({ requestedMode: "plan" });
+		const occurredAt = this.#now();
+		const budget = structuredClone(command.budget ?? {});
+		const workflow: Workflow = {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			id: command.workflowId,
+			status: "received",
+			request: {
+				...structuredClone(command.request),
+				requestedMode: "plan",
+			},
+			rootTaskId: command.rootTaskId,
+			budget,
+			usage: zeroUsage(),
+		};
+		const rootTask: Task = {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			id: command.rootTaskId,
+			workflowId: command.workflowId,
+			kind: "control",
+			title: command.title?.trim() || "Plan workflow",
+			description: command.description?.trim() || command.request.text,
+			status: "pending",
+			dependencyIds: [],
+			budget,
+			usage: zeroUsage(),
+			attemptIds: [],
+			verificationRequirements: [],
+		};
+		const plan: Plan = {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			id: command.planId,
+			workflowId: command.workflowId,
+			version: 1,
+			status: "draft",
+			goal: "",
+			assumptions: [],
+			steps: [],
+			risks: [],
+			verificationRequirements: [],
+			decisionHistory: [],
+		};
+		const workflowCreatedId = this.#eventId();
+		const modeDecidedId = this.#eventId();
+		const taskCreatedId = this.#eventId();
+		const planCreatedId = this.#eventId();
+		const planSelectedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: workflowCreatedId,
+				entityId: workflow.id,
+				entityRevision: 0,
+				eventType: "workflow.created",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: { workflow },
+			},
+			{
+				eventId: modeDecidedId,
+				entityId: workflow.id,
+				entityRevision: 1,
+				eventType: "workflow.mode_decided",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: workflowCreatedId,
+				payload: {
+					decision: createModeDecision({
+						selection: modeSelection,
+						reason: "User selected Plan mode",
+						riskLevel: "low",
+						decidedAt: occurredAt,
+					}),
+				},
+			},
+			{
+				eventId: taskCreatedId,
+				entityId: rootTask.id,
+				entityRevision: 0,
+				eventType: "task.created",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: modeDecidedId,
+				payload: { task: rootTask },
+			},
+			{
+				eventId: planCreatedId,
+				entityId: plan.id,
+				entityRevision: 0,
+				eventType: "plan.created",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: taskCreatedId,
+				payload: { plan },
+			},
+			{
+				eventId: planSelectedId,
+				entityId: workflow.id,
+				entityRevision: 2,
+				eventType: "workflow.plan_selected",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: planCreatedId,
+				payload: { planId: plan.id },
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: workflow.id,
+				entityRevision: 3,
+				eventType: "workflow.status_changed",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: planSelectedId,
+				payload: {
+					fromStatus: "received",
+					toStatus: "planning",
+					facts: {
+						planModeSelected: true,
 						rootTaskExists: true,
 					},
 				},
@@ -653,6 +872,390 @@ export class WorkflowController {
 		return this.#commit(command, events);
 	}
 
+	submitPlanForApproval(command: SubmitPlanForApprovalCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const plan = this.#requirePlan(command.planId, command.workflowId);
+		if (
+			workflow.status !== "planning" ||
+			workflow.currentPlanId !== plan.id ||
+			workflow.modeDecision?.mode !== "plan" ||
+			plan.status !== "draft"
+		) {
+			fail("controller.plan_not_submittable", `Plan ${plan.id} is not the active Draft Plan`);
+		}
+		const latestPlan = this.#store.listPlans(workflow.id).at(-1);
+		const candidate: Plan = {
+			...plan,
+			...structuredClone(command.content),
+			status: "awaiting_approval",
+			revision: plan.revision + 2,
+			updatedAt: this.#now(),
+		};
+		const violations = validatePlan(candidate);
+		if (violations.length > 0) {
+			fail("controller.plan_invalid", violations.map(({ message }) => message).join("; "));
+		}
+		if (!command.plannerReadOnly) {
+			fail("controller.planner_write_detected", "Planner must remain read-only before requesting approval");
+		}
+
+		const occurredAt = candidate.updatedAt;
+		const contentUpdatedId = this.#eventId();
+		const approvalRequestedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: contentUpdatedId,
+				entityId: plan.id,
+				entityRevision: plan.revision + 1,
+				eventType: "plan.content_updated",
+				occurredAt,
+				actor: { kind: "agent", id: "planner" },
+				payload: {
+					content: structuredClone(command.content),
+				},
+			},
+			{
+				eventId: approvalRequestedId,
+				entityId: plan.id,
+				entityRevision: plan.revision + 2,
+				eventType: "plan.awaiting_approval",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: contentUpdatedId,
+				payload: {
+					fromStatus: plan.status,
+					toStatus: "awaiting_approval",
+					facts: {
+						structureValid: true,
+						latestVersion: latestPlan?.id === plan.id,
+						readOnly: command.plannerReadOnly,
+					},
+				},
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 1,
+				eventType: "workflow.status_changed",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: approvalRequestedId,
+				payload: {
+					fromStatus: workflow.status,
+					toStatus: "awaiting_approval",
+					facts: {
+						planReady: true,
+						planReadOnly: command.plannerReadOnly,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
+	}
+
+	approvePlan(command: ApprovePlanCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const plan = this.#requirePlan(command.planId, command.workflowId);
+		if (
+			workflow.status !== "awaiting_approval" ||
+			workflow.currentPlanId !== plan.id ||
+			plan.status !== "awaiting_approval"
+		) {
+			fail("controller.plan_not_awaiting_approval", `Plan ${plan.id} is not awaiting approval`);
+		}
+		const rootTask = workflow.rootTaskId
+			? this.#requireTask(workflow.rootTaskId, workflow.id)
+			: fail("controller.root_task_missing", `Workflow ${workflow.id} has no root task`);
+		const occurredAt = this.#now();
+		const decision = createPlanDecision("approved", command.comment, occurredAt);
+		const stepTaskIds = new Map(plan.steps.map((step) => [step.id, this.#createId("task")]));
+		const planApprovedId = this.#eventId();
+		const events: WorkflowEventDraft[] = [
+			{
+				eventId: planApprovedId,
+				entityId: plan.id,
+				entityRevision: plan.revision + 1,
+				eventType: "plan.approved",
+				occurredAt,
+				actor: { kind: "user" },
+				payload: {
+					fromStatus: plan.status,
+					toStatus: "approved",
+					facts: {},
+					decision,
+				},
+			},
+		];
+		let causationId = planApprovedId;
+		for (const step of orderedPlanSteps(plan)) {
+			const taskId = stepTaskIds.get(step.id);
+			if (!taskId) {
+				fail("controller.plan_step_task_missing", `Plan step ${step.id} has no Task id`);
+			}
+			const task: Task = {
+				schemaVersion: WORKFLOW_SCHEMA_VERSION,
+				revision: 0,
+				createdAt: occurredAt,
+				updatedAt: occurredAt,
+				id: taskId,
+				workflowId: workflow.id,
+				parentTaskId: rootTask.id,
+				sourcePlanId: plan.id,
+				sourcePlanStepId: step.id,
+				kind: "agent",
+				title: step.title,
+				description: step.description,
+				status: "pending",
+				dependencyIds: step.dependsOn.map((dependencyId) => {
+					const dependencyTaskId = stepTaskIds.get(dependencyId);
+					if (!dependencyTaskId) {
+						fail("controller.plan_step_dependency_missing", `Plan step ${dependencyId} has no Task id`);
+					}
+					return dependencyTaskId;
+				}),
+				budget: structuredClone(workflow.budget),
+				usage: zeroUsage(),
+				attemptIds: [],
+				verificationRequirements: plan.verificationRequirements
+					.filter((requirement) => step.verificationRequirementIds.includes(requirement.id))
+					.map((requirement) => structuredClone(requirement)),
+			};
+			causationId = this.#eventId();
+			events.push({
+				eventId: causationId,
+				entityId: task.id,
+				entityRevision: 0,
+				eventType: "task.created",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: planApprovedId,
+				payload: { task },
+			});
+		}
+		events.push({
+			eventId: this.#eventId(),
+			entityId: workflow.id,
+			entityRevision: workflow.revision + 1,
+			eventType: "workflow.status_changed",
+			occurredAt,
+			actor: { kind: "controller" },
+			causationId,
+			payload: {
+				fromStatus: workflow.status,
+				toStatus: "executing",
+				facts: {
+					planApproved: true,
+					taskGraphReady: plan.steps.length > 0,
+				},
+			},
+		});
+		return this.#commit(command, events);
+	}
+
+	rejectPlan(command: RejectPlanCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const plan = this.#requirePlan(command.planId, command.workflowId);
+		if (
+			workflow.status !== "awaiting_approval" ||
+			workflow.currentPlanId !== plan.id ||
+			plan.status !== "awaiting_approval"
+		) {
+			fail("controller.plan_not_awaiting_approval", `Plan ${plan.id} is not awaiting approval`);
+		}
+		const rootTask = workflow.rootTaskId
+			? this.#requireTask(workflow.rootTaskId, workflow.id)
+			: fail("controller.root_task_missing", `Workflow ${workflow.id} has no root task`);
+		const occurredAt = this.#now();
+		const decision = createPlanDecision("rejected", command.comment, occurredAt);
+		const planRejectedId = this.#eventId();
+		const taskCancelledId = this.#eventId();
+		const cancelRequestedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: planRejectedId,
+				entityId: plan.id,
+				entityRevision: plan.revision + 1,
+				eventType: "plan.rejected",
+				occurredAt,
+				actor: { kind: "user" },
+				payload: {
+					fromStatus: plan.status,
+					toStatus: "rejected",
+					facts: {},
+					decision,
+				},
+			},
+			{
+				eventId: taskCancelledId,
+				entityId: rootTask.id,
+				entityRevision: rootTask.revision + 1,
+				eventType: "task.cancelled",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: planRejectedId,
+				payload: {
+					fromStatus: rootTask.status,
+					toStatus: "cancelled",
+					facts: {
+						activeAttemptStopped: true,
+					},
+					reason: decision.comment,
+				},
+			},
+			{
+				eventId: cancelRequestedId,
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 1,
+				eventType: "workflow.cancel_requested",
+				occurredAt,
+				actor: { kind: "user" },
+				causationId: taskCancelledId,
+				payload: {
+					fromStatus: workflow.status,
+					toStatus: "cancelling",
+					facts: {
+						cancellationRequested: true,
+					},
+					reason: decision.comment,
+				},
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 2,
+				eventType: "workflow.cancelled",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: cancelRequestedId,
+				payload: {
+					fromStatus: "cancelling",
+					toStatus: "cancelled",
+					facts: {
+						runtimeResourcesStopped: true,
+						writerLeaseReleased: true,
+					},
+					result: {
+						status: "cancelled",
+						summary: decision.comment,
+						completedTaskIds: [],
+						failedTaskIds: [],
+						changedFiles: [],
+						verificationIds: [],
+						risks: [],
+						unfinishedItems: [decision.comment],
+						usage: zeroUsage(),
+						durationMs: 0,
+						reason: decision.comment,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
+	}
+
+	revisePlan(command: RevisePlanCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const plan = this.#requirePlan(command.planId, command.workflowId);
+		if (
+			workflow.status !== "awaiting_approval" ||
+			workflow.currentPlanId !== plan.id ||
+			plan.status !== "awaiting_approval"
+		) {
+			fail("controller.plan_not_awaiting_approval", `Plan ${plan.id} is not awaiting approval`);
+		}
+		if (this.#store.getPlan(command.replacementPlanId)) {
+			fail("controller.plan_exists", `Plan ${command.replacementPlanId} already exists`);
+		}
+		const occurredAt = this.#now();
+		const decision = createPlanDecision("revision_requested", command.comment, occurredAt);
+		const replacement: Plan = {
+			...structuredClone(plan),
+			id: command.replacementPlanId,
+			version: plan.version + 1,
+			supersedesPlanId: plan.id,
+			status: "draft",
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			decisionHistory: [],
+		};
+		const replacementCreatedId = this.#eventId();
+		const supersededId = this.#eventId();
+		const planSelectedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: replacementCreatedId,
+				entityId: replacement.id,
+				entityRevision: 0,
+				eventType: "plan.created",
+				occurredAt,
+				actor: { kind: "controller" },
+				payload: { plan: replacement },
+			},
+			{
+				eventId: supersededId,
+				entityId: plan.id,
+				entityRevision: plan.revision + 1,
+				eventType: "plan.superseded",
+				occurredAt,
+				actor: { kind: "user" },
+				causationId: replacementCreatedId,
+				payload: {
+					fromStatus: plan.status,
+					toStatus: "superseded",
+					facts: {
+						replacementPlanCreated: true,
+					},
+					replacementPlanId: replacement.id,
+					decision,
+				},
+			},
+			{
+				eventId: planSelectedId,
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 1,
+				eventType: "workflow.plan_selected",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: supersededId,
+				payload: { planId: replacement.id },
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: workflow.id,
+				entityRevision: workflow.revision + 2,
+				eventType: "workflow.status_changed",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: planSelectedId,
+				payload: {
+					fromStatus: workflow.status,
+					toStatus: "planning",
+					facts: {
+						replacementPlanCreated: true,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
+	}
+
 	requestDirectPlanUpgrade(command: RequestDirectPlanUpgradeCommand): WorkflowCommandResult {
 		const duplicate = this.#duplicateResult(command);
 		if (duplicate) {
@@ -789,6 +1392,7 @@ export class WorkflowController {
 			steps: [],
 			risks: [],
 			verificationRequirements: [],
+			decisionHistory: [],
 		};
 		const planCreatedId = this.#eventId();
 		events.push({
@@ -993,6 +1597,14 @@ export class WorkflowController {
 	getRootTask(workflowId: WorkflowId): Task | undefined {
 		const workflow = this.#store.getWorkflow(workflowId);
 		return workflow?.rootTaskId ? this.#store.getTask(workflow.rootTaskId) : undefined;
+	}
+
+	listTasks(workflowId: WorkflowId): readonly Task[] {
+		return this.#store.listTasks(workflowId);
+	}
+
+	listPlans(workflowId: WorkflowId): readonly Plan[] {
+		return this.#store.listPlans(workflowId);
 	}
 
 	listAttempts(taskId: TaskId): readonly Attempt[] {
@@ -1283,6 +1895,14 @@ export class WorkflowController {
 			fail("controller.task_missing", `Task ${taskId} does not exist in workflow ${workflowId}`);
 		}
 		return task;
+	}
+
+	#requirePlan(planId: PlanId, workflowId: WorkflowId): Plan {
+		const plan = this.#store.getPlan(planId);
+		if (!plan || plan.workflowId !== workflowId) {
+			fail("controller.plan_missing", `Plan ${planId} does not exist in workflow ${workflowId}`);
+		}
+		return plan;
 	}
 
 	#requireAttempt(attemptId: AttemptId, taskId: TaskId, workflowId: WorkflowId): Attempt {

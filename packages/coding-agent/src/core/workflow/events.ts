@@ -25,6 +25,7 @@ import type {
 	ModeDecision,
 	Plan,
 	PlanContent,
+	PlanDecisionRecord,
 	PlanId,
 	PlanStatus,
 	ResourceUsage,
@@ -112,10 +113,15 @@ export interface WorkflowEventPayloadMap {
 		readonly content: PlanContent;
 	};
 	readonly "plan.awaiting_approval": PlanStatusChangedPayload;
-	readonly "plan.approved": PlanStatusChangedPayload;
-	readonly "plan.rejected": PlanStatusChangedPayload;
+	readonly "plan.approved": PlanStatusChangedPayload & {
+		readonly decision: PlanDecisionRecord;
+	};
+	readonly "plan.rejected": PlanStatusChangedPayload & {
+		readonly decision: PlanDecisionRecord;
+	};
 	readonly "plan.superseded": PlanStatusChangedPayload & {
 		readonly replacementPlanId: PlanId;
+		readonly decision: PlanDecisionRecord;
 	};
 	readonly "task.created": {
 		readonly task: Task;
@@ -560,11 +566,20 @@ function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolatio
 		}
 		case "plan.approved":
 		case "plan.rejected":
-			return event.actor.kind === "user"
+			if (event.actor.kind !== "user") {
+				return [violation("event.user_actor_required", `${event.eventType} requires a user actor`)];
+			}
+			return event.payload.decision.action === (event.eventType === "plan.approved" ? "approved" : "rejected") &&
+				event.payload.decision.comment.trim().length > 0 &&
+				Number.isFinite(Date.parse(event.payload.decision.decidedAt))
 				? []
-				: [violation("event.user_actor_required", `${event.eventType} requires a user actor`)];
+				: [violation("event.invalid_plan_decision", `${event.eventType} requires a valid decision record`)];
 		case "plan.superseded":
-			return event.payload.replacementPlanId.trim().length > 0 && event.payload.replacementPlanId !== event.entityId
+			return event.payload.replacementPlanId.trim().length > 0 &&
+				event.payload.replacementPlanId !== event.entityId &&
+				event.payload.decision.action === "revision_requested" &&
+				event.payload.decision.comment.trim().length > 0 &&
+				Number.isFinite(Date.parse(event.payload.decision.decidedAt))
 				? []
 				: [violation("event.replacement_plan_required", "Plan superseded event requires a replacement Plan")];
 		case "workflow.cancel_requested":

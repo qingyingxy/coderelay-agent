@@ -195,6 +195,25 @@ export function validatePlan(plan: Plan): readonly DomainViolation[] {
 	if (plan.assumptions.some((assumption) => !assumption.trim())) {
 		violations.push(violation("plan.invalid_assumption", "Plan assumptions cannot be empty"));
 	}
+	for (const decision of plan.decisionHistory) {
+		if (
+			!["approved", "rejected", "revision_requested"].includes(decision.action) ||
+			!decision.comment.trim() ||
+			!Number.isFinite(Date.parse(decision.decidedAt))
+		) {
+			violations.push(violation("plan.invalid_decision", "Plan decision history contains an invalid record"));
+		}
+	}
+	const finalDecision = plan.decisionHistory.at(-1);
+	if (plan.status === "approved" && finalDecision?.action !== "approved") {
+		violations.push(violation("plan.approval_record_required", "Approved Plan requires an approval record"));
+	}
+	if (plan.status === "rejected" && finalDecision?.action !== "rejected") {
+		violations.push(violation("plan.rejection_record_required", "Rejected Plan requires a rejection record"));
+	}
+	if (plan.status === "superseded" && finalDecision?.action !== "revision_requested") {
+		violations.push(violation("plan.revision_record_required", "Superseded Plan requires a revision record"));
+	}
 
 	const stepIds = new Set(plan.steps.map(({ id }) => id));
 	if (stepIds.size !== plan.steps.length) {

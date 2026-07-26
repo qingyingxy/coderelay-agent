@@ -39,6 +39,7 @@ function createDraftPlan(): Plan {
 		steps: [],
 		risks: [],
 		verificationRequirements: [],
+		decisionHistory: [],
 	};
 }
 
@@ -168,6 +169,11 @@ function createApprovedBatch(): WorkflowEventBatch {
 				fromStatus: "awaiting_approval",
 				toStatus: "approved",
 				facts: {},
+				decision: {
+					action: "approved",
+					comment: "Approved for execution",
+					decidedAt: NOW,
+				},
 			},
 		},
 	]);
@@ -186,6 +192,11 @@ function createRejectedBatch(): WorkflowEventBatch {
 				fromStatus: "awaiting_approval",
 				toStatus: "rejected",
 				facts: {},
+				decision: {
+					action: "rejected",
+					comment: "Rejected by user",
+					decidedAt: NOW,
+				},
 			},
 		},
 	]);
@@ -223,6 +234,11 @@ function createReplacementBatch(): WorkflowEventBatch {
 					replacementPlanCreated: true,
 				},
 				replacementPlanId: "plan-2",
+				decision: {
+					action: "revision_requested",
+					comment: "Refine the Plan",
+					decidedAt: NOW,
+				},
 			},
 		},
 		{

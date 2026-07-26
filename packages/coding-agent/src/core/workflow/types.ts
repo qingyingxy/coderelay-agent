@@ -220,12 +220,32 @@ export interface PlanContent {
 	readonly verificationRequirements: readonly VerificationRequirement[];
 }
 
+export type PlanDecisionAction = "approved" | "rejected" | "revision_requested";
+
+export interface PlanDecisionRecord {
+	readonly action: PlanDecisionAction;
+	readonly comment: string;
+	readonly decidedAt: IsoDateTime;
+}
+
 export interface Plan extends EntityMetadata, PlanContent {
 	readonly id: PlanId;
 	readonly workflowId: WorkflowId;
 	readonly version: number;
 	readonly supersedesPlanId?: PlanId;
 	readonly status: PlanStatus;
+	readonly decisionHistory: readonly PlanDecisionRecord[];
+}
+
+export interface PlanProgress {
+	readonly planId: PlanId;
+	readonly totalSteps: number;
+	readonly pendingSteps: number;
+	readonly runningSteps: number;
+	readonly succeededSteps: number;
+	readonly failedSteps: number;
+	readonly cancelledSteps: number;
+	readonly percentComplete: number;
 }
 
 export interface TaskAssignment {

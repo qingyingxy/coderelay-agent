@@ -1,0 +1,93 @@
+import { describe, expect, it } from "vitest";
+import {
+	createPlannerPromptEnvelope,
+	executePlannerPrompt,
+	PlannerRuntimeError,
+	parsePlannerPlanContent,
+} from "../../src/core/workflow/index.ts";
+import type { PromptAgentSession } from "../../src/core/workflow/prompt-agent-session-adapter.ts";
+import { NOW } from "./fixtures.ts";
+
+function envelope() {
+	return createPlannerPromptEnvelope({
+		createdAt: NOW,
+		task: {
+			id: "task-root",
+			workflowId: "workflow-1",
+			title: "Plan request",
+			description: "Plan a CLI change",
+			status: "pending",
+			dependencyIds: [],
+			verificationRequirements: [],
+		},
+		userRequest: "Plan a CLI change",
+		activeToolNames: ["read", "grep", "bash", "edit", "write"],
+	});
+}
+
+class FakePromptSession implements PromptAgentSession {
+	isIdle = true;
+	activeTools = ["read", "grep", "bash", "edit", "write"];
+	promptTools: string[] = [];
+
+	getActiveToolNames(): string[] {
+		return [...this.activeTools];
+	}
+
+	setActiveToolsByName(toolNames: string[]): void {
+		this.activeTools = [...toolNames];
+	}
+
+	async prompt(): Promise<void> {
+		this.promptTools = [...this.activeTools];
+	}
+}
+
+describe("Planner runtime", () => {
+	it("constructs a Planner envelope with read-only tools only", () => {
+		expect(envelope()).toMatchObject({
+			role: "planner",
+			profileName: "planner",
+			toolNames: ["read", "grep"],
+			outputSchema: {
+				id: "plan-content",
+				version: "1",
+			},
+		});
+	});
+
+	it("enforces the read-only tool boundary during execution and restores tools", async () => {
+		const session = new FakePromptSession();
+
+		await executePlannerPrompt(session, envelope());
+
+		expect(session.promptTools).toEqual(["read", "grep"]);
+		expect(session.activeTools).toEqual(["read", "grep", "bash", "edit", "write"]);
+	});
+
+	it("rejects a forged Planner envelope with a write tool", async () => {
+		const session = new FakePromptSession();
+
+		await expect(
+			executePlannerPrompt(session, {
+				...envelope(),
+				toolNames: ["read", "write"],
+			}),
+		).rejects.toThrow(PlannerRuntimeError);
+	});
+
+	it("parses structured PlanContent and rejects prose-only output", () => {
+		const content = parsePlannerPlanContent(`\`\`\`json
+{
+  "goal": "Implement Plan Mode",
+  "assumptions": [],
+  "steps": [],
+  "risks": [],
+  "verificationRequirements": []
+}
+\`\`\``);
+
+		expect(content.goal).toBe("Implement Plan Mode");
+		expect(() => parsePlannerPlanContent("I would inspect the repository first.")).toThrow(PlannerRuntimeError);
+	});
+});

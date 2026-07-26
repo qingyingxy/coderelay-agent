@@ -109,6 +109,12 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
+import { PlanWorkflowRuntime } from "./workflow/plan-runtime.ts";
+import {
+	createPlannerPromptEnvelope,
+	executePlannerPrompt,
+	parsePlannerPlanContent,
+} from "./workflow/planner-runtime.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
 
 // ============================================================================
@@ -320,6 +326,9 @@ export class AgentSession {
 	/** The workflow adapter for the in-flight Direct workflow, if any. */
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
+	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
+	private _nextWorkflowMode: "direct" | "plan" = "direct";
+	private _pendingPlanRevisionRequest: string | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: string[] = [];
@@ -1068,6 +1077,7 @@ export class AgentSession {
 	/** Enable CLI Workflow creation for accepted top-level prompts. */
 	enableWorkflowTracking(): void {
 		this._workflowTrackingEnabled = true;
+		this._planWorkflowRuntime ??= PlanWorkflowRuntime.recoverLatest(this.sessionManager);
 	}
 
 	/**
@@ -1097,13 +1107,59 @@ export class AgentSession {
 
 	/** Return the current or latest authoritative Workflow status line for CLI presentation. */
 	getWorkflowStatusLine(): string | undefined {
-		return this._activeWorkflowAdapter?.statusLine ?? this._latestWorkflowReport?.statusLine;
+		return (
+			this._activeWorkflowAdapter?.statusLine ??
+			this._planWorkflowRuntime?.statusLines[0] ??
+			this._latestWorkflowReport?.statusLine
+		);
 	}
 
 	/** Return the current or latest Workflow summary rendered by `/workflow`. */
 	getWorkflowReportLines(): readonly string[] | undefined {
-		const lines = this._activeWorkflowAdapter?.statusLines ?? this._latestWorkflowReport?.lines;
+		const lines =
+			this._activeWorkflowAdapter?.statusLines ??
+			this._planWorkflowRuntime?.statusLines ??
+			this._latestWorkflowReport?.lines;
 		return lines ? [...lines] : undefined;
+	}
+
+	private async _runPlannerWorkflow(requestText: string): Promise<void> {
+		let runtime = this._planWorkflowRuntime;
+		if (!runtime || runtime.isTerminal || runtime.workflow.status !== "planning") {
+			runtime = PlanWorkflowRuntime.start(this.sessionManager, {
+				request: {
+					text: requestText,
+					cwd: this._cwd,
+					requestedMode: "plan",
+					attachments: [],
+				},
+			});
+			this._planWorkflowRuntime = runtime;
+		}
+		const workflow = runtime.workflow;
+		const rootTask = runtime.tasks.find(({ id }) => id === workflow.rootTaskId);
+		if (!rootTask) {
+			throw new Error(`Plan Workflow ${workflow.id} has no root Task`);
+		}
+		const currentPlan = runtime.currentPlan;
+		const envelope = createPlannerPromptEnvelope({
+			createdAt: new Date().toISOString(),
+			task: rootTask,
+			userRequest: workflow.request.text,
+			activeToolNames: this.getActiveToolNames(),
+			currentPlan: currentPlan.version > 1 ? currentPlan : undefined,
+			revisionRequest: this._pendingPlanRevisionRequest
+				? `${this._pendingPlanRevisionRequest}\n\nUser refinement: ${requestText}`
+				: undefined,
+		});
+		await executePlannerPrompt(this, envelope);
+		const message = this._findLastAssistantMessage();
+		if (!message) {
+			throw new Error("Planner completed without an Assistant message");
+		}
+		runtime.submit(parsePlannerPlanContent(contentText(message.content, "")));
+		this._pendingPlanRevisionRequest = undefined;
+		this._nextWorkflowMode = "direct";
 	}
 
 	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
@@ -1216,6 +1272,11 @@ export class AgentSession {
 				}
 			}
 			if (this._workflowTrackingEnabled && (options?.source ?? "interactive") !== "extension") {
+				if (this._nextWorkflowMode === "plan" && !this.isStreaming) {
+					await this._runPlannerWorkflow(currentText);
+					preflightResult?.(true);
+					return;
+				}
 				directRequestText = currentText;
 			}
 
@@ -1357,18 +1418,66 @@ export class AgentSession {
 			return false;
 		}
 		const [commandName, ...args] = text.trim().split(/\s+/);
-		if (commandName !== "/workflow" && commandName !== "/workflow-cancel") {
+		if (
+			commandName !== "/workflow" &&
+			commandName !== "/workflow-cancel" &&
+			commandName !== "/plan" &&
+			commandName !== "/approve" &&
+			commandName !== "/reject" &&
+			commandName !== "/replan"
+		) {
 			return false;
 		}
 
 		let lines: readonly string[];
-		if (args.length > 0) {
+		if (
+			(commandName === "/workflow" || commandName === "/workflow-cancel" || commandName === "/plan") &&
+			args.length > 0
+		) {
 			lines = [`Usage: ${commandName}`];
 		} else if (commandName === "/workflow-cancel") {
 			const cancelled = await this.cancelWorkflow();
 			lines = cancelled
 				? (this.getWorkflowReportLines() ?? ["Workflow cancellation completed."])
 				: ["No active Workflow to cancel."];
+		} else if (commandName === "/plan") {
+			const runtime = this._planWorkflowRuntime;
+			if (runtime && !runtime.isTerminal) {
+				lines = runtime.statusLines;
+			} else {
+				this._nextWorkflowMode = "plan";
+				lines = ["Plan mode selected. The next request will run the read-only Planner."];
+			}
+		} else if (commandName === "/approve") {
+			const runtime = this._planWorkflowRuntime;
+			if (!runtime || runtime.workflow.status !== "awaiting_approval") {
+				lines = ["No Plan is awaiting approval."];
+			} else {
+				runtime.approve(args.join(" ") || "Approved by user");
+				lines = runtime.statusLines;
+			}
+		} else if (commandName === "/reject") {
+			const runtime = this._planWorkflowRuntime;
+			if (!runtime || runtime.workflow.status !== "awaiting_approval") {
+				lines = ["No Plan is awaiting approval."];
+			} else {
+				runtime.reject(args.join(" ") || "Rejected by user");
+				lines = runtime.statusLines;
+			}
+		} else if (commandName === "/replan") {
+			const runtime = this._planWorkflowRuntime;
+			if (!runtime || runtime.workflow.status !== "awaiting_approval") {
+				lines = ["No Plan is awaiting revision."];
+			} else {
+				const revisionRequest = args.join(" ") || "Revise the Plan";
+				runtime.revise(revisionRequest);
+				this._pendingPlanRevisionRequest = revisionRequest;
+				this._nextWorkflowMode = "plan";
+				lines = [
+					...runtime.statusLines,
+					"Send the refinement details to run the read-only Planner for this version.",
+				];
+			}
 		} else {
 			lines = this.getWorkflowReportLines() ?? ["No Workflow has been created in this session."];
 		}
