@@ -15,8 +15,21 @@ export type CommandId = string;
 export type CorrelationId = string;
 export type IsoDateTime = string;
 
-export type ExecutionMode = "auto" | "direct" | "plan";
-export type ResolvedExecutionMode = Exclude<ExecutionMode, "auto">;
+export const EXECUTION_MODES = ["auto", "direct", "plan"] as const;
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+
+export const RESOLVED_EXECUTION_MODES = ["direct", "plan"] as const;
+export type ResolvedExecutionMode = (typeof RESOLVED_EXECUTION_MODES)[number];
+
+export const DEFAULT_EXECUTION_MODE: ExecutionMode = "auto";
+
+export function isExecutionMode(value: unknown): value is ExecutionMode {
+	return typeof value === "string" && EXECUTION_MODES.some((mode) => mode === value);
+}
+
+export function isResolvedExecutionMode(value: unknown): value is ResolvedExecutionMode {
+	return typeof value === "string" && RESOLVED_EXECUTION_MODES.some((mode) => mode === value);
+}
 export type ModeDecisionSource = "user" | "forced_policy" | "agent" | "default";
 export type RiskLevel = "low" | "medium" | "high";
 

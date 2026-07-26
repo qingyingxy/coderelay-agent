@@ -1,6 +1,6 @@
 # M1：Direct Workflow MVP 实施计划
 
-> 状态：实现中
+> 状态：已完成
 > 范围：R3
 > 前置条件：M0 已完成并验证
 
@@ -20,7 +20,9 @@
 - R3.12 最小 CLI 状态：`DONE`
 - R3.13 领域与持久化测试：`DONE`
 - R3.14 AgentSession 集成测试：`DONE`
-- 下一项：R3.15 Direct 演示场景
+- R3.15 Direct 演示场景：`DONE`
+
+演示入口：`npm run demo:direct-workflow`，说明见 [`M1 Direct Workflow 演示`](../demos/m1-direct-workflow.md)。
 
 ## 1. 阶段目标
 

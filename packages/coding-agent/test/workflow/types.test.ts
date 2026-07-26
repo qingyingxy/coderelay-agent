@@ -1,4 +1,4 @@
-import { describe, expectTypeOf, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import type {
 	AttemptStatus,
 	AttemptTerminalStatus,
@@ -11,8 +11,27 @@ import type {
 	WorkflowStatus,
 	WorkflowTerminalStatus,
 } from "../../src/core/workflow/index.ts";
+import {
+	DEFAULT_EXECUTION_MODE,
+	EXECUTION_MODES,
+	isExecutionMode,
+	isResolvedExecutionMode,
+	RESOLVED_EXECUTION_MODES,
+} from "../../src/core/workflow/index.ts";
 
 describe("workflow domain types", () => {
+	it("defines selectable and resolved execution modes", () => {
+		expect(EXECUTION_MODES).toEqual(["auto", "direct", "plan"]);
+		expect(RESOLVED_EXECUTION_MODES).toEqual(["direct", "plan"]);
+		expect(DEFAULT_EXECUTION_MODE).toBe("auto");
+
+		expect(["auto", "direct", "plan"].every(isExecutionMode)).toBe(true);
+		expect(["direct", "plan"].every(isResolvedExecutionMode)).toBe(true);
+		expect(isExecutionMode("invalid")).toBe(false);
+		expect(isExecutionMode(null)).toBe(false);
+		expect(isResolvedExecutionMode("auto")).toBe(false);
+	});
+
 	it("keeps automatic mode unresolved and user requests explicitly resolvable", () => {
 		expectTypeOf<ExecutionMode>().toEqualTypeOf<"auto" | "direct" | "plan">();
 		expectTypeOf<ResolvedExecutionMode>().toEqualTypeOf<"direct" | "plan">();

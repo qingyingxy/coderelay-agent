@@ -21,12 +21,19 @@ The runtime example shows how to build a recreate function that closes over proc
 | `11-sessions.ts` | In-memory, persistent, continue, list sessions |
 | `12-full-control.ts` | Replace everything, no discovery |
 | `13-session-runtime.ts` | Manage runtime-backed session replacement |
+| `14-direct-workflow-demo.ts` | Deterministic Direct Workflow lifecycle with Faux Provider |
 
 ## Running
 
 ```bash
 cd packages/coding-agent
 npx tsx examples/sdk/01-minimal.ts
+```
+
+Run the no-network Direct Workflow demo from the repository root:
+
+```bash
+npm run demo:direct-workflow
 ```
 
 ## Quick Reference

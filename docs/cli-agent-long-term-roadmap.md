@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M1 实现中
+> 状态：M2 实现中
 > 最后更新：2026-07-26
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -25,6 +25,10 @@ M0 设计交付物：
 M1 实施计划：
 
 - [`M1 Direct Workflow MVP 实施计划`](./design/m1-direct-workflow-implementation-plan.md)
+
+M2 实施计划：
+
+- [`M2 模式选择与 Prompt Pipeline 实施计划`](./design/m2-mode-prompt-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -205,13 +209,13 @@ flowchart TB
 | R3.12 | `DONE` | 提供最小 CLI 状态 | `/workflow`、`/workflow-cancel` 和状态行可以展示权威状态 | R3.6、R3.11 |
 | R3.13 | `DONE` | 编写领域与持久化测试 | 覆盖类型约束、状态机、Store、Event 重放和幂等 | R3.2-R3.6 |
 | R3.14 | `DONE` | 编写 AgentSession 集成测试 | 使用 Fake Provider 覆盖成功、重试、失败、取消和修改文件汇总 | R3.7-R3.13 |
-| R3.15 | `TODO` | 建立 Direct 演示场景 | 单文件低风险任务可重复演示完整闭环 | R3.14 |
+| R3.15 | `DONE` | 建立 Direct 演示场景 | [`M1 Direct Workflow 演示`](./demos/m1-direct-workflow.md) 可重复运行单文件低风险完整闭环 | R3.14 |
 
 ### R4：模式选择、Prompt Pipeline 与 Agent Profile
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R4.1 | `TODO` | 定义执行模式 | 支持 `auto`、`direct`、`plan` | R1.1 |
+| R4.1 | `DONE` | 定义执行模式 | 支持 `auto`、`direct`、`plan` | R1.1 |
 | R4.2 | `TODO` | 定义模式优先级 | 用户指定 > 强制策略 > Agent 建议 > 默认规则 | R4.1 |
 | R4.3 | `TODO` | 定义 ModeDecision | 保存 mode、source、reason、riskLevel 和时间 | R4.2 |
 | R4.4 | `TODO` | 设计需求澄清门禁 | 只询问会实质改变实现方案的问题 | R2.8 |
@@ -339,7 +343,7 @@ flowchart TB
 | 里程碑 | 状态 | 范围 | 演示目标 |
 |---|---|---|---|
 | M0：设计基线 | `DONE` | R0-R2 的设计与协议 | 能完整解释模型、状态机、事件和数据流 |
-| M1：Direct MVP | `IMPLEMENTING` | R3 | 单 Agent Direct 请求可以执行、取消、验证和报告 |
+| M1：Direct MVP | `DONE` | R3 | 单 Agent Direct 请求可以执行、取消、验证和报告 |
 | M2：Plan 与 Task | `TODO` | R4-R6 | 自动模式、Plan 审批、Task Graph 和调度可演示 |
 | M3：受控 Runtime | `TODO` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
 | M4：交付与恢复 | `TODO` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
@@ -449,13 +453,17 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R3.12 最小 CLI 状态完成 | `/workflow` 查看当前或最近 Workflow，`/workflow-cancel` 走两阶段取消，Footer 展示 Store 派生的权威状态行 |
 | 2026-07-26 | R3.13 领域与持久化测试完成 | 补齐核心联合类型、重复完成命令、持久化品牌与损坏历史检测，状态机、Store、重放和幂等验收覆盖完整 |
 | 2026-07-26 | R3.14 AgentSession 集成测试完成 | Faux Provider 覆盖成功、自动重试、失败、取消、真实 write/edit 修改汇总，以及连续请求创建独立 Workflow |
+| 2026-07-26 | R3.15 Direct 演示完成 | `npm run demo:direct-workflow` 使用 Faux Provider 在临时目录重复演示单文件 write、edit、验证、状态查询和最终报告 |
+| 2026-07-26 | M1 Direct MVP 完成 | R3.1-R3.15 全部完成，具备可运行代码、CLI 控制、自动测试和无网络可重复演示 |
+| 2026-07-26 | R4.1 执行模式定义完成 | 固定选择层 `auto`、`direct`、`plan` 与执行层 `direct`、`plan` 的边界，并提供运行时类型守卫 |
 
 ## 12. 下一步
 
-M0 已验证完成。下一步进入 M1 的 R3 Direct Workflow MVP：
+M1 Direct Workflow MVP 已完成并验证。下一步进入 M2 的 R4：
 
-1. R3.1 已完成：源码和测试边界已经固定。
-2. R3.2-R3.14 已完成；接下来完成 R3.15。
-3. 实现 R3.15：建立可重复 Direct 演示场景。
+1. 完成 R4.2-R4.3：模式优先级和 ModeDecision。
+2. 完成 R4.4-R4.5：需求澄清门禁和自动模式建议。
+3. 完成 R4.6-R4.10：Agent Profile 与 Prompt Pipeline。
+4. 完成 R4.11-R4.12：Direct 升级 Plan 和模式/Prompt 测试。
 
-开始 R3 前不同时展开自动模式、正式 Plan、Subagent 或 Job。
+R4 完成前不同时展开正式 Plan 状态机、Task Graph、Subagent 或 Job。
