@@ -51,7 +51,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 - R4.4：`DONE`
 - R4.5：`DONE`
 - R4.6：`DONE`
-- 下一项：R4.7
+- R4.7：`DONE`
+- 下一项：R4.8
 
 ## 6. R4.2 模式选择顺序
 
@@ -118,3 +119,18 @@ ModeSelector 把完整 `ModeAdvice` 作为 Agent 候选，但用户明确选择�
 每个 Profile 包含名称、角色、描述、可选模型、System Prompt、工具白名单、权限上限和默认预算。Profile 校验禁止只读角色获得写入、命令或网络能力，并保证工具不会超过权限上限。
 
 这些定义不替换 Pi 的 Markdown Agent 加载格式。后续 Runtime 可以将 Profile 映射到 Pi 的 `name`、`description`、`model`、`tools` 和 Prompt；项目本地 Profile 仍必须经过 Project Trust。
+
+## 11. R4.7 PromptEnvelope
+
+`PromptEnvelope` 是进入 Prompt Pipeline 的结构化输入，不是最终发送给模型的字符串。它包含：
+
+- `schemaVersion`：Envelope 数据结构版本。
+- `promptVersion`：角色 Prompt 或模板版本。
+- `role` 和 `profileName`：执行角色与具体 Profile。
+- `task`：当前 Task 的身份、描述、状态、依赖和验证要求。
+- `context`：带来源、稳定 ID 和 required 标记的上下文块。
+- `toolNames`：本次调用实际允许的工具名称。
+- `constraints`：安全、权限、预算、Workflow 和输出约束。
+- `outputSchema`：期望结构化输出的名称、版本和 JSON Schema。
+
+领域构造器校验必要字段、唯一 ID、版本、时间和输出 Schema，并复制调用方数据，避免创建后被外部修改。R4.7 不重新构建 Pi 的 System Prompt 或 Tool Schema；R4.8-R4.10 负责输入顺序、裁剪以及 AgentSession 适配。
