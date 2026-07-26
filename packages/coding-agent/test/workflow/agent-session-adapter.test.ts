@@ -128,6 +128,7 @@ describe("AgentSessionAdapter", () => {
 		session.emit({ type: "agent_start" });
 		const runningTask = adapter.controller.getRootTask(WORKFLOW_ID);
 		expect(runningTask?.status).toBe("running");
+		expect(adapter.statusLine).toBe("direct | executing | task: running | attempt: 1");
 
 		emitRun(session, fauxAssistantMessage("Implemented"), false);
 
@@ -159,11 +160,13 @@ describe("AgentSessionAdapter", () => {
 		]);
 		expect(adapter.finalReport).toMatchObject({
 			status: "completed",
+			statusLine: "direct | completed | 1 task | 0 files | tests: not configured",
 			task: {
 				status: "succeeded",
 			},
 			attempts: [{ number: 1, status: "succeeded" }],
 		});
+		expect(adapter.statusLines?.[0]).toBe("direct | completed | 1 task | 0 files | tests: not configured");
 
 		adapter.dispose();
 	});

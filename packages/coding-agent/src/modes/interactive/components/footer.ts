@@ -229,6 +229,13 @@ export class FooterComponent implements Component {
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
 		const lines = [pwdLine, dimStatsLeft + dimRemainder];
 
+		const workflowStatus = this.session.getWorkflowStatusLine();
+		if (workflowStatus) {
+			lines.push(
+				truncateToWidth(theme.fg("dim", sanitizeStatusText(workflowStatus)), width, theme.fg("dim", "...")),
+			);
+		}
+
 		// Add extension statuses on a single line, sorted by key alphabetically
 		const extensionStatuses = this.footerData.getExtensionStatuses();
 		if (extensionStatuses.size > 0) {

@@ -43,6 +43,7 @@ export interface WorkflowFinalReport {
 	readonly workflowId: string;
 	readonly mode: "direct";
 	readonly status: WorkflowTerminalStatus;
+	readonly statusLine: string;
 	readonly summary: string;
 	readonly task: {
 		readonly id: string;
@@ -66,6 +67,12 @@ export interface BuildWorkflowFinalReportInput {
 	readonly rootTask: Task;
 	readonly attempts: readonly Attempt[];
 	readonly verifications: readonly VerificationResult[];
+}
+
+export interface FormatWorkflowStatusLineInput {
+	readonly workflow: Workflow;
+	readonly rootTask: Task;
+	readonly attempts: readonly Attempt[];
 }
 
 const NOT_CONFIGURED_CHECKS: readonly Omit<BasicVerificationCheck, "status">[] = [
@@ -92,6 +99,21 @@ export function buildBasicVerificationReport(
 	const lines = checks.map((check) => `${check.label}: not configured`);
 	const evidenceRefs = checks.map((check) => `${check.kind}:not-configured`);
 	return { changedFiles, checks, lines, evidenceRefs };
+}
+
+/** Format the single authoritative Workflow status line shown by the CLI. */
+export function formatWorkflowStatusLine(input: FormatWorkflowStatusLineInput): string {
+	const { workflow, rootTask } = input;
+	if (isWorkflowTerminalStatus(workflow.status) && workflow.result) {
+		const fileCount = workflow.result.changedFiles.length;
+		return `direct | ${workflow.status} | 1 task | ${fileCount} ${fileCount === 1 ? "file" : "files"} | tests: not configured`;
+	}
+
+	const latestAttempt = input.attempts.reduce(
+		(latest, attempt) => (latest === undefined || attempt.number > latest.number ? attempt : latest),
+		undefined as Attempt | undefined,
+	);
+	return `direct | ${workflow.status} | task: ${rootTask.status} | attempt: ${latestAttempt?.number ?? 0}`;
 }
 
 /** Build the structured M1 terminal report consumed by the later CLI presentation layer. */
@@ -125,8 +147,13 @@ export function buildWorkflowFinalReport(input: BuildWorkflowFinalReportInput): 
 				usage: structuredClone(attempt.usage),
 			}),
 		);
+	const statusLine = formatWorkflowStatusLine({
+		workflow,
+		rootTask,
+		attempts: input.attempts,
+	});
 	const lines = [
-		`Workflow: direct | ${workflow.status}`,
+		statusLine,
 		`Task: ${rootTask.status} | ${rootTask.title}`,
 		`Attempts: ${attempts.length}`,
 		`Changed files: ${verification.changedFiles.length}`,
@@ -140,6 +167,7 @@ export function buildWorkflowFinalReport(input: BuildWorkflowFinalReportInput): 
 		workflowId: workflow.id,
 		mode: "direct",
 		status: workflow.result.status,
+		statusLine,
 		summary: workflow.result.summary,
 		task: {
 			id: rootTask.id,

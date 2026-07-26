@@ -1079,7 +1079,7 @@ export class AgentSession {
 	 */
 	async cancelWorkflow(reason = "User cancelled the workflow"): Promise<boolean> {
 		const adapter = this._activeWorkflowAdapter;
-		if (!adapter) {
+		if (!adapter || adapter.finalReport) {
 			return false;
 		}
 		await adapter.cancel(reason);
@@ -1093,6 +1093,17 @@ export class AgentSession {
 	/** Return the latest terminal Direct Workflow report for this AgentSession. */
 	getLatestWorkflowReport(): WorkflowFinalReport | undefined {
 		return this._latestWorkflowReport ? structuredClone(this._latestWorkflowReport) : undefined;
+	}
+
+	/** Return the current or latest authoritative Workflow status line for CLI presentation. */
+	getWorkflowStatusLine(): string | undefined {
+		return this._activeWorkflowAdapter?.statusLine ?? this._latestWorkflowReport?.statusLine;
+	}
+
+	/** Return the current or latest Workflow summary rendered by `/workflow`. */
+	getWorkflowReportLines(): readonly string[] | undefined {
+		const lines = this._activeWorkflowAdapter?.statusLines ?? this._latestWorkflowReport?.lines;
+		return lines ? [...lines] : undefined;
 	}
 
 	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
@@ -1169,6 +1180,11 @@ export class AgentSession {
 		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
+			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteWorkflowCommand(text))) {
+				preflightResult?.(true);
+				return;
+			}
+
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via pi.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
@@ -1333,6 +1349,49 @@ export class AgentSession {
 			}
 			workflowAdapter?.dispose();
 		}
+	}
+
+	/** Execute built-in Workflow commands without sending them to the model. */
+	private async _tryExecuteWorkflowCommand(text: string): Promise<boolean> {
+		if (!this._workflowTrackingEnabled) {
+			return false;
+		}
+		const [commandName, ...args] = text.trim().split(/\s+/);
+		if (commandName !== "/workflow" && commandName !== "/workflow-cancel") {
+			return false;
+		}
+
+		let lines: readonly string[];
+		if (args.length > 0) {
+			lines = [`Usage: ${commandName}`];
+		} else if (commandName === "/workflow-cancel") {
+			const cancelled = await this.cancelWorkflow();
+			lines = cancelled
+				? (this.getWorkflowReportLines() ?? ["Workflow cancellation completed."])
+				: ["No active Workflow to cancel."];
+		} else {
+			lines = this.getWorkflowReportLines() ?? ["No Workflow has been created in this session."];
+		}
+
+		const message = {
+			role: "custom" as const,
+			customType: "workflow",
+			content: lines.join("\n"),
+			display: true,
+			details: {
+				command: commandName,
+				statusLine: this.getWorkflowStatusLine(),
+			},
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{
+			readonly command: string;
+			readonly statusLine: string | undefined;
+		}>;
+		// Workflow command output is presentation-only: do not persist it or add it
+		// to Agent state, because a status query must never become model context.
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+		return true;
 	}
 
 	/**

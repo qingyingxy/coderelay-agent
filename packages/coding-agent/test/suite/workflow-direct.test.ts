@@ -1,7 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionWorkflowEventLog, WorkflowStore } from "../../src/core/workflow/index.ts";
-import { createHarness, type Harness } from "./harness.ts";
+import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 function replayWorkflow(harness: Harness): {
 	readonly store: WorkflowStore;
@@ -55,11 +55,53 @@ describe("Direct Workflow AgentSession integration", () => {
 		});
 		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
 			status: "completed",
+			statusLine: "direct | completed | 1 task | 0 files | tests: not configured",
 			task: {
 				status: "succeeded",
 			},
 			changedFiles: [],
 		});
+	});
+
+	it("shows the latest Workflow without calling the provider or creating another Workflow", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage("Implemented")]);
+
+		await harness.session.prompt("Implement a CLI change");
+		const callCount = harness.faux.state.callCount;
+		const workflowBatchCount = new SessionWorkflowEventLog(harness.sessionManager).read().length;
+
+		await harness.session.prompt("/workflow");
+
+		const message = harness
+			.eventsOfType("message_end")
+			.map((event) => event.message)
+			.slice()
+			.reverse()
+			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
+		expect(getMessageText(message)).toContain("direct | completed | 1 task | 0 files | tests: not configured");
+		expect(harness.faux.state.callCount).toBe(callCount);
+		expect(new SessionWorkflowEventLog(harness.sessionManager).read()).toHaveLength(workflowBatchCount);
+		expect(harness.session.messages.some((candidate) => candidate.role === "custom")).toBe(false);
+	});
+
+	it("reports when no Workflow exists without calling the provider", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+
+		await harness.session.prompt("/workflow");
+
+		const message = harness
+			.eventsOfType("message_end")
+			.map((event) => event.message)
+			.slice()
+			.reverse()
+			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
+		expect(getMessageText(message)).toBe("No Workflow has been created in this session.");
+		expect(harness.faux.state.callCount).toBe(0);
 	});
 
 	it("creates a second Attempt when AgentSession automatically retries", async () => {
@@ -158,7 +200,17 @@ describe("Direct Workflow AgentSession integration", () => {
 		const promptPromise = harness.session.prompt("Implement a CLI change");
 		await sawMessageUpdate;
 
-		expect(await harness.session.cancelWorkflow("User cancelled")).toBe(true);
+		await harness.session.prompt("/workflow", { streamingBehavior: "steer" });
+		const statusMessage = harness
+			.eventsOfType("message_end")
+			.map((event) => event.message)
+			.slice()
+			.reverse()
+			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
+		expect(getMessageText(statusMessage)).toContain("direct | executing | task: running | attempt: 1");
+		expect(harness.session.pendingMessageCount).toBe(0);
+
+		await harness.session.prompt("/workflow-cancel", { streamingBehavior: "steer" });
 		await promptPromise;
 
 		const { store, workflowId } = replayWorkflow(harness);
@@ -170,12 +222,12 @@ describe("Direct Workflow AgentSession integration", () => {
 		expect(workflow).toMatchObject({
 			status: "cancelled",
 			result: {
-				reason: "User cancelled",
+				reason: "User cancelled the workflow",
 			},
 		});
 		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
 			status: "cancelled",
-			failureReason: "User cancelled",
+			failureReason: "User cancelled the workflow",
 		});
 		expect(await harness.session.cancelWorkflow()).toBe(false);
 	});

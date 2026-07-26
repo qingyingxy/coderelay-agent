@@ -1,3 +1,4 @@
+import { sep } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -24,6 +25,7 @@ function createSession(options: {
 	branchUsage?: AssistantUsage;
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
+	workflowStatus?: string;
 }): AgentSession {
 	const usage = options.usage;
 	const entries: Array<Record<string, unknown>> = [];
@@ -78,6 +80,7 @@ function createSession(options: {
 			getCwd: () => "/tmp/project",
 		},
 		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getWorkflowStatusLine: () => options.workflowStatus,
 		modelRuntime: {
 			isUsingOAuth: () => false,
 		},
@@ -107,7 +110,7 @@ describe("formatCwdForFooter", () => {
 
 	it("abbreviates the home directory and descendants", () => {
 		expect(formatCwdForFooter("/home/user", "/home/user")).toBe("~");
-		expect(formatCwdForFooter("/home/user/project", "/home/user")).toBe("~/project");
+		expect(formatCwdForFooter("/home/user/project", "/home/user")).toBe(`~${sep}project`);
 	});
 });
 
@@ -221,5 +224,18 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		expect(stripAnsi(footer.render(120)[1])).toContain("$1.234 (sub)");
+	});
+
+	it("shows and truncates the authoritative Workflow status line", () => {
+		const width = 48;
+		const session = createSession({
+			sessionName: "",
+			workflowStatus: "direct | executing | task: running | attempt: 1",
+		});
+		const footer = new FooterComponent(session, createFooterData(1));
+
+		const lines = footer.render(width);
+		expect(stripAnsi(lines[2])).toContain("direct | executing");
+		expect(visibleWidth(lines[2])).toBeLessThanOrEqual(width);
 	});
 });

@@ -7,7 +7,12 @@ import type { SessionManager } from "../session-manager.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
 import { SessionWorkflowEventLog } from "./event-log.ts";
-import { buildBasicVerificationReport, buildWorkflowFinalReport, type WorkflowFinalReport } from "./report.ts";
+import {
+	buildBasicVerificationReport,
+	buildWorkflowFinalReport,
+	formatWorkflowStatusLine,
+	type WorkflowFinalReport,
+} from "./report.ts";
 import { WorkflowStore } from "./stores.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type { AttemptId, ResourceUsage, TaskId, VerificationId, WorkflowId } from "./types.ts";
@@ -183,6 +188,35 @@ export class AgentSessionAdapter {
 			attempts: this.#controller.listAttempts(rootTask.id),
 			verifications,
 		});
+	}
+
+	/** Current authoritative status line, derived from the Workflow Store. */
+	get statusLine(): string | undefined {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		const rootTask = this.#controller.getRootTask(this.#workflowId);
+		if (!workflow || !rootTask) {
+			return undefined;
+		}
+		return formatWorkflowStatusLine({
+			workflow,
+			rootTask,
+			attempts: this.#controller.listAttempts(rootTask.id),
+		});
+	}
+
+	/** Current or terminal summary rendered by `/workflow`. */
+	get statusLines(): readonly string[] | undefined {
+		const finalReport = this.finalReport;
+		if (finalReport) {
+			return finalReport.lines;
+		}
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		const rootTask = this.#controller.getRootTask(this.#workflowId);
+		const statusLine = this.statusLine;
+		if (!workflow || !rootTask || !statusLine) {
+			return undefined;
+		}
+		return [statusLine, `Workflow ID: ${workflow.id}`, `Task: ${rootTask.status} | ${rootTask.title}`];
 	}
 
 	start(): this {

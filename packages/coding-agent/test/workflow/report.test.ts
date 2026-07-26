@@ -131,6 +131,7 @@ describe("buildBasicVerificationReport", () => {
 			workflowId: "workflow-1",
 			mode: "direct",
 			status: "completed",
+			statusLine: "direct | completed | 1 task | 1 file | tests: not configured",
 			task: {
 				status: "succeeded",
 			},
@@ -140,6 +141,7 @@ describe("buildBasicVerificationReport", () => {
 		});
 		expect(report.attempts).toHaveLength(1);
 		expect(report.verifications).toHaveLength(1);
+		expect(report.lines[0]).toBe(report.statusLine);
 		expect(report.lines).toContain("Tests: not configured");
 		expect(report.lines.some((line) => line.startsWith("Usage:"))).toBe(true);
 	});
