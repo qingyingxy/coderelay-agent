@@ -47,7 +47,8 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 
 - R4.1：`DONE`
 - R4.2：`DONE`
-- 下一项：R4.3
+- R4.3：`DONE`
+- 下一项：R4.4
 
 ## 6. R4.2 模式选择顺序
 
@@ -60,3 +61,15 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 5. 没有 Agent 建议时使用产品默认规则，当前默认解析为 `direct`。
 
 选择器只返回 `mode` 和 `source`。R4.3 再负责补充 `reason`、`riskLevel`、`decidedAt` 并形成可持久化的 `ModeDecision`。
+
+## 7. R4.3 ModeDecision
+
+`ModeDecision` 由领域构造器创建，包含：
+
+- 已解析的 `mode`。
+- 实际胜出的 `source`。
+- 非空并去除首尾空白的 `reason`。
+- `low`、`medium`、`high` 之一的 `riskLevel`。
+- 有效的 `decidedAt` 时间。
+
+Direct Workflow 在创建 Workflow 和根 Task 的同一个 Event Batch 中持久化 `workflow.mode_decided`。Store 从该事件恢复完整决策，CLI 或 Agent 不能绕过 Controller 直接修改。

@@ -117,6 +117,9 @@ describe("WorkflowController", () => {
 				modeDecision: {
 					mode: "direct",
 					source: "user",
+					reason: "User explicitly selected Direct mode",
+					riskLevel: "low",
+					decidedAt: NOW,
 				},
 			},
 			rootTask: {

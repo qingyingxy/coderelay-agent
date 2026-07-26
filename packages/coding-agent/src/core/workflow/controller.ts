@@ -2,6 +2,8 @@ import { randomUUID } from "crypto";
 import type { SessionWorkflowEventLog } from "./event-log.ts";
 import type { WorkflowEventDraft } from "./events.ts";
 import { createWorkflowEventBatch } from "./events.ts";
+import { createModeDecision } from "./mode-decision.ts";
+import { selectExecutionMode } from "./mode-selector.ts";
 import type { WorkflowStore } from "./stores.ts";
 import { isAttemptTerminalStatus, isTaskTerminalStatus, isWorkflowTerminalStatus } from "./transitions.ts";
 import type {
@@ -202,7 +204,8 @@ export class WorkflowController {
 		if (this.#store.getWorkflow(command.workflowId)) {
 			fail("controller.workflow_exists", `Workflow ${command.workflowId} already exists`);
 		}
-		if (command.request.requestedMode === "plan") {
+		const modeSelection = selectExecutionMode({ requestedMode: command.request.requestedMode });
+		if (modeSelection.mode !== "direct") {
 			fail("controller.mode_conflict", "A Direct workflow cannot override an explicit Plan mode request");
 		}
 		const requirements = structuredClone(command.verificationRequirements ?? [DEFAULT_COMPLETION_REQUIREMENT]);
@@ -212,6 +215,15 @@ export class WorkflowController {
 
 		const occurredAt = this.#now();
 		const budget = structuredClone(command.budget ?? {});
+		const modeDecision = createModeDecision({
+			selection: modeSelection,
+			reason:
+				modeSelection.source === "user"
+					? "User explicitly selected Direct mode"
+					: "No explicit mode or Agent recommendation was available; using the Direct default",
+			riskLevel: "low",
+			decidedAt: occurredAt,
+		});
 		const workflow: Workflow = {
 			schemaVersion: WORKFLOW_SCHEMA_VERSION,
 			revision: 0,
@@ -263,16 +275,7 @@ export class WorkflowController {
 				actor: { kind: "controller" },
 				causationId: workflowCreatedId,
 				payload: {
-					decision: {
-						mode: "direct",
-						source: command.request.requestedMode === "direct" ? "user" : "default",
-						reason:
-							command.request.requestedMode === "direct"
-								? "User selected Direct mode"
-								: "M1 defaults ordinary requests to Direct mode",
-						riskLevel: "low",
-						decidedAt: occurredAt,
-					},
+					decision: modeDecision,
 				},
 			},
 			{

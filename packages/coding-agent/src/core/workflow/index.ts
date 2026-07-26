@@ -3,6 +3,7 @@ export * from "./controller.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";
 export * from "./invariants.ts";
+export * from "./mode-decision.ts";
 export * from "./mode-selector.ts";
 export * from "./report.ts";
 export * from "./stores.ts";

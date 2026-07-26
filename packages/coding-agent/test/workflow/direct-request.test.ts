@@ -93,6 +93,9 @@ describe("Direct Workflow request integration", () => {
 			modeDecision: {
 				mode: "direct",
 				source: "default",
+				reason: "No explicit mode or Agent recommendation was available; using the Direct default",
+				riskLevel: "low",
+				decidedAt: expect.any(String),
 			},
 		});
 		expect(task).toMatchObject({
