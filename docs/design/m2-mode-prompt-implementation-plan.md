@@ -37,7 +37,7 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 
 ## 4. 后续顺序
 
-1. R4.2：实现模式优先级：用户指定 > 强制策略 > Agent 建议 > 默认值。
+1. R4.2：实现模式选择顺序和强制 Plan 安全门禁。
 2. R4.3：定义和持久化 `ModeDecision`。
 3. R4.4-R4.5：实现需求澄清门禁和自动模式建议。
 4. R4.6-R4.10：实现 Agent Profile 与统一 Prompt Pipeline。
@@ -46,4 +46,17 @@ R4.1 不实现模式优先级、自动判断规则或 WorkflowController 分流�
 ## 5. 当前状态
 
 - R4.1：`DONE`
-- 下一项：R4.2
+- R4.2：`DONE`
+- 下一项：R4.3
+
+## 6. R4.2 模式选择顺序
+
+模式选择器是无状态纯函数，不调用 LLM，也不持久化 `ModeDecision`。选择顺序为：
+
+1. 用户明确选择 `plan` 时保持 `plan`，任何来源都不能将其降级为 `direct`。
+2. 强制 Plan 安全策略可以否决用户或 Agent 的 `direct`。
+3. 没有强制 Plan 时，遵循用户明确选择的 `direct`。
+4. 用户未指定时采用 Agent 的结构化建议。
+5. 没有 Agent 建议时使用产品默认规则，当前默认解析为 `direct`。
+
+选择器只返回 `mode` 和 `source`。R4.3 再负责补充 `reason`、`riskLevel`、`decidedAt` 并形成可持久化的 `ModeDecision`。

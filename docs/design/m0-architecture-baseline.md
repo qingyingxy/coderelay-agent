@@ -125,10 +125,14 @@ flowchart TB
   → 只有关键澄清、Plan 批准或权限扩大才暂停用户
 ```
 
-模式优先级固定为：
+模式选择顺序固定为：
 
 ```text
-用户明确指定 > 强制安全策略 > Agent 建议 > 默认规则
+用户明确指定 Plan
+  > 强制安全策略要求 Plan
+  > 用户明确指定 Direct
+  > Agent 建议
+  > 默认规则
 ```
 
 Agent 只提供结构化建议，最终模式转换由 WorkflowController 执行。

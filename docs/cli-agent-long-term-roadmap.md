@@ -216,7 +216,7 @@ flowchart TB
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
 | R4.1 | `DONE` | 定义执行模式 | 支持 `auto`、`direct`、`plan` | R1.1 |
-| R4.2 | `TODO` | 定义模式优先级 | 用户指定 > 强制策略 > Agent 建议 > 默认规则 | R4.1 |
+| R4.2 | `DONE` | 定义模式优先级 | 用户 Plan > 强制 Plan 策略 > 用户 Direct > Agent 建议 > 默认规则 | R4.1 |
 | R4.3 | `TODO` | 定义 ModeDecision | 保存 mode、source、reason、riskLevel 和时间 | R4.2 |
 | R4.4 | `TODO` | 设计需求澄清门禁 | 只询问会实质改变实现方案的问题 | R2.8 |
 | R4.5 | `TODO` | 设计自动模式建议 | 结构化返回复杂度、风险和建议模式 | R4.3 |
@@ -456,12 +456,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R3.15 Direct 演示完成 | `npm run demo:direct-workflow` 使用 Faux Provider 在临时目录重复演示单文件 write、edit、验证、状态查询和最终报告 |
 | 2026-07-26 | M1 Direct MVP 完成 | R3.1-R3.15 全部完成，具备可运行代码、CLI 控制、自动测试和无网络可重复演示 |
 | 2026-07-26 | R4.1 执行模式定义完成 | 固定选择层 `auto`、`direct`、`plan` 与执行层 `direct`、`plan` 的边界，并提供运行时类型守卫 |
+| 2026-07-26 | R4.2 模式优先级完成 | 纯函数实现用户选择、强制 Plan 安全门禁、Agent 建议和默认规则的确定性解析 |
 
 ## 12. 下一步
 
 M1 Direct Workflow MVP 已完成并验证。下一步进入 M2 的 R4：
 
-1. 完成 R4.2-R4.3：模式优先级和 ModeDecision。
+1. 完成 R4.3：ModeDecision。
 2. 完成 R4.4-R4.5：需求澄清门禁和自动模式建议。
 3. 完成 R4.6-R4.10：Agent Profile 与 Prompt Pipeline。
 4. 完成 R4.11-R4.12：Direct 升级 Plan 和模式/Prompt 测试。
