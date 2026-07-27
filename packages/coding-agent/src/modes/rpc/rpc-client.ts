@@ -27,6 +27,10 @@ type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
 	cliPath?: string;
+	/** Executable used to launch the RPC process. Defaults to `node`. */
+	command?: string;
+	/** Arguments inserted before `--mode rpc`. Overrides the default cliPath argument. */
+	commandArgs?: string[];
 	/** Working directory for the agent */
 	cwd?: string;
 	/** Environment variables */
@@ -77,7 +81,8 @@ export class RpcClient {
 
 		this.exitError = null;
 
-		const cliPath = this.options.cliPath ?? "dist/cli.js";
+		const command = this.options.command ?? "node";
+		const commandArgs = this.options.commandArgs ?? [this.options.cliPath ?? "dist/cli.js"];
 		const args = ["--mode", "rpc"];
 
 		if (this.options.provider) {
@@ -90,7 +95,7 @@ export class RpcClient {
 			args.push(...this.options.args);
 		}
 
-		const childProcess = spawn("node", [cliPath, ...args], {
+		const childProcess = spawn(command, [...commandArgs, ...args], {
 			cwd: this.options.cwd,
 			env: { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],

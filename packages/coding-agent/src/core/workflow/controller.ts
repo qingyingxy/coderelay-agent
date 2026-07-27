@@ -175,6 +175,7 @@ export interface CompleteTaskCommand extends WorkflowCommandBase {
 	readonly summary: string;
 	readonly changedFiles: readonly string[];
 	readonly evidenceRefs?: readonly string[];
+	readonly handoffId?: string;
 }
 
 export interface FailWorkflowCommand extends WorkflowCommandBase {
@@ -1056,6 +1057,7 @@ export class WorkflowController {
 						summary: command.summary,
 						changedFiles: structuredClone(command.changedFiles),
 						verificationIds: [verification.id],
+						handoffId: command.handoffId,
 						completedAt: occurredAt,
 					},
 				},

@@ -35,6 +35,7 @@ export interface TaskSchedulerOptions {
 	readonly maxConcurrentAgents?: number;
 	readonly maxConcurrentJobs?: number;
 	readonly writerAvailable?: boolean;
+	readonly agentExecutorKind?: Extract<ExecutorKind, "main_agent" | "subagent">;
 }
 
 export class TaskExecutorRegistry {
@@ -83,11 +84,11 @@ export class TaskSchedulerError extends Error {
 	}
 }
 
-function executorKind(task: Task): ExecutorKind {
+function executorKind(task: Task, agentExecutorKind: Extract<ExecutorKind, "main_agent" | "subagent">): ExecutorKind {
 	switch (task.kind) {
 		case "agent":
 		case "repair":
-			return "main_agent";
+			return agentExecutorKind;
 		case "command":
 			return "job";
 		case "control":
@@ -131,6 +132,7 @@ export class TaskScheduler {
 	readonly #maxConcurrentAgents: number;
 	readonly #maxConcurrentJobs: number;
 	readonly #writerAvailable: boolean;
+	readonly #agentExecutorKind: Extract<ExecutorKind, "main_agent" | "subagent">;
 
 	constructor(options: TaskSchedulerOptions) {
 		if (!Number.isInteger(options.maxConcurrency) || options.maxConcurrency < 1) {
@@ -140,6 +142,7 @@ export class TaskScheduler {
 		this.#maxConcurrentAgents = options.maxConcurrentAgents ?? options.maxConcurrency;
 		this.#maxConcurrentJobs = options.maxConcurrentJobs ?? options.maxConcurrency;
 		this.#writerAvailable = options.writerAvailable ?? true;
+		this.#agentExecutorKind = options.agentExecutorKind ?? "main_agent";
 		if (
 			!Number.isInteger(this.#maxConcurrentAgents) ||
 			this.#maxConcurrentAgents < 0 ||
@@ -178,7 +181,7 @@ export class TaskScheduler {
 				if (selected.length >= limit) {
 					break;
 				}
-				const kind = executorKind(task);
+				const kind = executorKind(task, this.#agentExecutorKind);
 				if (kind === "job") {
 					if (availableJobSlots === 0) {
 						continue;
@@ -201,7 +204,7 @@ export class TaskScheduler {
 			).map((task) => ({
 				workflowId: task.workflowId,
 				taskId: task.id,
-				executorKind: executorKind(task),
+				executorKind: executorKind(task, this.#agentExecutorKind),
 				accessMode: task.accessMode,
 			}));
 		}
@@ -219,7 +222,7 @@ export class TaskScheduler {
 		return selected.map((task) => ({
 			workflowId: task.workflowId,
 			taskId: task.id,
-			executorKind: executorKind(task),
+			executorKind: executorKind(task, this.#agentExecutorKind),
 			accessMode: task.accessMode,
 		}));
 	}

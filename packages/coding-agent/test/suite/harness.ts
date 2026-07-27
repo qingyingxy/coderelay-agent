@@ -22,7 +22,7 @@ import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import type { InlineExtension, ResourceLoader } from "../../src/index.ts";
+import type { InlineExtension, ResourceLoader, SubagentRuntime } from "../../src/index.ts";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
@@ -72,6 +72,7 @@ export interface HarnessOptions {
 	extensionFactories?: Array<InlineExtension | CreateTestExtensionsResultInput>;
 	withConfiguredAuth?: boolean;
 	modelsJson?: Record<string, unknown>;
+	subagentRuntime?: SubagentRuntime;
 }
 
 export interface Harness {
@@ -191,6 +192,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		extensionRunnerRef,
+		subagentRuntime: options.subagentRuntime,
 	});
 
 	const events: AgentSessionEvent[] = [];

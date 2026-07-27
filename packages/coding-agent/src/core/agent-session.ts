@@ -103,13 +103,22 @@ import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader }
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
+import {
+	type AgentRunResult,
+	formatAgentDetails,
+	formatAgentEvents,
+	formatAgentList,
+	formatAgentRunResult,
+	RpcSubagentSessionFactory,
+	SubagentRuntime,
+} from "./subagents/index.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
-import { PlanWorkflowRuntime } from "./workflow/plan-runtime.ts";
+import { PlanWorkflowRuntime, type SubagentTaskExecution } from "./workflow/plan-runtime.ts";
 import {
 	createPlannerPromptEnvelope,
 	executePlannerPrompt,
@@ -232,6 +241,8 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Optional Subagent Runtime override used by tests and embedders. */
+	subagentRuntime?: SubagentRuntime;
 }
 
 export interface ExtensionBindings {
@@ -327,6 +338,8 @@ export class AgentSession {
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
+	private _subagentRuntime: SubagentRuntime | undefined;
+	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
 	private _nextWorkflowMode: "direct" | "plan" = "direct";
 	private _pendingPlanRevisionRequest: string | undefined;
 
@@ -403,6 +416,7 @@ export class AgentSession {
 		this._excludedToolNames = config.excludedToolNames ? new Set(config.excludedToolNames) : undefined;
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
+		this._subagentRuntime = config.subagentRuntime;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -866,6 +880,8 @@ export class AgentSession {
 		);
 		this._disconnectFromAgent();
 		this._eventListeners = [];
+		void this._subagentRuntime?.dispose();
+		this._subagentTaskCompletions.clear();
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1099,7 +1115,7 @@ export class AgentSession {
 		}
 		const planRuntime = this._planWorkflowRuntime;
 		if (planRuntime && !planRuntime.isTerminal) {
-			await planRuntime.cancel(reason);
+			await planRuntime.cancel(reason, this._subagentRuntime);
 			return true;
 		}
 		return false;
@@ -1126,6 +1142,18 @@ export class AgentSession {
 			this._planWorkflowRuntime?.statusLines ??
 			this._latestWorkflowReport?.lines;
 		return lines ? [...lines] : undefined;
+	}
+
+	private _getSubagentRuntime(): SubagentRuntime {
+		this._subagentRuntime ??= new SubagentRuntime({
+			sessionFactory: new RpcSubagentSessionFactory(),
+		});
+		return this._subagentRuntime;
+	}
+
+	private _trackSubagentExecution(execution: SubagentTaskExecution): void {
+		this._subagentTaskCompletions.set(execution.agent.id, execution.completion);
+		void execution.completion.catch(() => undefined);
 	}
 
 	private async _runPlannerWorkflow(requestText: string): Promise<void> {
@@ -1431,7 +1459,9 @@ export class AgentSession {
 			commandName !== "/reject" &&
 			commandName !== "/replan" &&
 			commandName !== "/tasks" &&
-			commandName !== "/task"
+			commandName !== "/task" &&
+			commandName !== "/agents" &&
+			commandName !== "/agent"
 		) {
 			return false;
 		}
@@ -1520,6 +1550,99 @@ export class AgentSession {
 				runtime.cancelTask(taskId, detailParts.join(" ") || "Cancelled by user");
 				runtime.refreshTaskReadiness();
 				lines = runtime.taskDetails(taskId);
+			}
+		} else if (commandName === "/agents") {
+			const planRuntime = this._planWorkflowRuntime;
+			if (!planRuntime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (args.length === 0) {
+				lines = formatAgentList(this._subagentRuntime?.list(planRuntime.workflow.id) ?? []);
+			} else if (planRuntime.workflow.status !== "executing") {
+				lines = [`Plan Workflow is ${planRuntime.workflow.status}; Agent dispatch is unavailable.`];
+			} else if (args[0] === "dispatch" && args.length <= 2) {
+				const fallback = Math.max(1, planRuntime.workflow.budget.maxConcurrentAgents ?? 4);
+				const requested = args[1] === undefined ? fallback : Number(args[1]);
+				if (!Number.isInteger(requested) || requested < 1) {
+					lines = ["Usage: /agents dispatch [max-concurrency]"];
+				} else {
+					const subagentRuntime = this._getSubagentRuntime();
+					const executions = await planRuntime.startReadySubagents(subagentRuntime, requested);
+					for (const execution of executions) {
+						this._trackSubagentExecution(execution);
+					}
+					lines = [
+						`Dispatched ${executions.length} Subagent${executions.length === 1 ? "" : "s"}.`,
+						...formatAgentList(subagentRuntime.list(planRuntime.workflow.id)),
+					];
+				}
+			} else {
+				lines = ["Usage: /agents | /agents dispatch [max-concurrency]"];
+			}
+		} else if (commandName === "/agent") {
+			const planRuntime = this._planWorkflowRuntime;
+			const [action, agentOrTaskId, ...detailParts] = args;
+			if (!planRuntime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (!action || !agentOrTaskId) {
+				lines = [
+					"Usage: /agent spawn <task-id> [explorer|worker|reviewer] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>",
+				];
+			} else {
+				const subagentRuntime = this._getSubagentRuntime();
+				if (action === "spawn") {
+					const role = detailParts[0];
+					const profileRole = role === "explorer" || role === "worker" || role === "reviewer" ? role : undefined;
+					if (detailParts.length > 1 || (role !== undefined && profileRole === undefined)) {
+						lines = ["Usage: /agent spawn <task-id> [explorer|worker|reviewer]"];
+					} else {
+						const execution = await planRuntime.startSubagentTask(subagentRuntime, agentOrTaskId, {
+							profileRole,
+						});
+						this._trackSubagentExecution(execution);
+						lines = formatAgentList([execution.agent]);
+					}
+				} else if (action === "show" && detailParts.length === 0) {
+					const agent = subagentRuntime.registry.get(agentOrTaskId);
+					if (!agent) {
+						lines = [`Agent ${agentOrTaskId} does not exist.`];
+					} else {
+						const handoff = agent.handoffId ? subagentRuntime.registry.getHandoff(agent.handoffId) : undefined;
+						lines = formatAgentDetails(
+							agent,
+							handoff,
+							formatAgentEvents(subagentRuntime.registry.events(agent.id)),
+						);
+					}
+				} else if (action === "send" && detailParts.length > 0) {
+					await subagentRuntime.send(agentOrTaskId, detailParts.join(" "));
+					const updatedAgent = subagentRuntime.registry.get(agentOrTaskId);
+					lines = updatedAgent ? formatAgentList([updatedAgent]) : [`Agent ${agentOrTaskId} does not exist.`];
+				} else if (action === "wait" && detailParts.length === 0) {
+					const completion = this._subagentTaskCompletions.get(agentOrTaskId);
+					lines = formatAgentRunResult(completion ? await completion : await subagentRuntime.wait(agentOrTaskId));
+				} else if (action === "interrupt") {
+					const result = await subagentRuntime.interrupt(
+						agentOrTaskId,
+						detailParts.join(" ") || "Interrupted by user",
+					);
+					const completion = this._subagentTaskCompletions.get(agentOrTaskId);
+					lines = formatAgentRunResult(completion ? await completion : result);
+				} else if (action === "retry" && detailParts.length === 0) {
+					const source = subagentRuntime.registry.get(agentOrTaskId);
+					if (!source) {
+						lines = [`Agent ${agentOrTaskId} does not exist.`];
+					} else {
+						const execution = await planRuntime.startSubagentTask(subagentRuntime, source.taskId, {
+							retryAgentId: source.id,
+						});
+						this._trackSubagentExecution(execution);
+						lines = formatAgentList([execution.agent]);
+					}
+				} else {
+					lines = [
+						"Usage: /agent spawn <task-id> [explorer|worker|reviewer] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>",
+					];
+				}
 			}
 		} else {
 			lines = this.getWorkflowReportLines() ?? ["No Workflow has been created in this session."];

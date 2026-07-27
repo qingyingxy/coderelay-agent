@@ -3,6 +3,8 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PlanContent } from "../../src/core/workflow/index.ts";
 import { SessionWorkflowEventLog, WorkflowStore } from "../../src/core/workflow/index.ts";
+import { SubagentRuntime, WorkflowRuntimeRegistry, WriterLeaseRegistry } from "../../src/index.ts";
+import { FakeSubagentSessionFactory, subagentHandoff } from "../workflow/subagent-fixtures.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 function planContent(goal: string, secondTitle = "Add tests"): PlanContent {
@@ -51,6 +53,52 @@ function planContent(goal: string, secondTitle = "Add tests"): PlanContent {
 				id: "verify-plan",
 				kind: "test",
 				description: "Run Plan regression tests",
+				required: true,
+			},
+		],
+	};
+}
+
+function subagentPlanContent(): PlanContent {
+	return {
+		goal: "Inspect the CLI Workflow",
+		assumptions: [],
+		steps: [
+			{
+				id: "inspect-step",
+				title: "Inspect Workflow integration",
+				description: "Inspect the CLI Workflow without changing files",
+				dependsOn: [],
+				fileIntents: [
+					{
+						path: "src/core/agent-session.ts",
+						action: "inspect",
+						reason: "Locate CLI integration",
+					},
+				],
+				verificationRequirementIds: ["inspect-evidence"],
+			},
+			{
+				id: "summarize-step",
+				title: "Summarize Workflow integration",
+				description: "Summarize the prior inspection",
+				dependsOn: ["inspect-step"],
+				fileIntents: [
+					{
+						path: "src/core/workflow/plan-runtime.ts",
+						action: "inspect",
+						reason: "Trace Task completion",
+					},
+				],
+				verificationRequirementIds: ["inspect-evidence"],
+			},
+		],
+		risks: [],
+		verificationRequirements: [
+			{
+				id: "inspect-evidence",
+				kind: "manual",
+				description: "Return exact source evidence",
 				required: true,
 			},
 		],
@@ -227,6 +275,88 @@ describe("Plan Workflow AgentSession integration", () => {
 			status: "blocked",
 			blockedReason: { code: "dependency_failed" },
 		});
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("dispatches a ready Task to an isolated Subagent and exposes Agent CLI status", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		let sequence = 0;
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			createId: (kind) => `${kind}-${++sequence}`,
+		});
+		const harness = await createHarness({ subagentRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(subagentPlanContent()))]);
+
+		await harness.session.prompt("/plan");
+		await harness.session.prompt("Inspect the CLI Workflow");
+		await harness.session.prompt("/approve");
+		await harness.session.prompt("/agents dispatch 1");
+
+		expect(factory.sessions).toHaveLength(1);
+		expect(factory.sessions[0]?.config.toolNames).toEqual(["read", "grep", "find", "ls"]);
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "CLI Workflow inspected",
+				evidence: [{ path: "src/core/agent-session.ts", line: 1422, note: "Workflow commands" }],
+			}),
+		);
+		await harness.session.prompt("/agent wait agent-1");
+		await harness.session.prompt("/agents dispatch 1");
+		expect(factory.sessions).toHaveLength(2);
+		expect(factory.sessions[1]?.promptCalls[0]).toContain("Dependency Handoff:");
+		expect(factory.sessions[1]?.promptCalls[0]).toContain("CLI Workflow inspected");
+		factory.sessions[1]?.complete(
+			subagentHandoff({
+				conclusion: "CLI Workflow summarized",
+				evidence: [{ path: "src/core/workflow/plan-runtime.ts", line: 190, note: "Task completion" }],
+			}),
+		);
+		await harness.session.prompt("/agent wait agent-3");
+		await harness.session.prompt("/agent show agent-1");
+		await harness.session.prompt("/agents");
+
+		const replayed = replay(harness);
+		const task = replayed.store
+			.listTasks(replayed.workflowId)
+			.find(({ sourcePlanStepId }) => sourcePlanStepId === "inspect-step");
+		expect(task).toMatchObject({
+			status: "succeeded",
+			assignment: {
+				executorKind: "subagent",
+				agentId: "agent-1",
+				agentProfile: "explorer",
+			},
+			result: {
+				handoffId: "handoff-2",
+				summary: "CLI Workflow inspected",
+			},
+		});
+		expect(
+			replayed.store
+				.listTasks(replayed.workflowId)
+				.find(({ sourcePlanStepId }) => sourcePlanStepId === "summarize-step"),
+		).toMatchObject({
+			status: "succeeded",
+			result: {
+				handoffId: "handoff-4",
+				summary: "CLI Workflow summarized",
+			},
+		});
+		const workflowOutput = harness
+			.eventsOfType("message_end")
+			.map(({ message }) => message)
+			.filter((message) => message.role === "custom" && message.customType === "workflow")
+			.map(getMessageText)
+			.join("\n");
+		expect(workflowOutput).toContain("Dispatched 1 Subagent.");
+		expect(workflowOutput).toContain("agent-1 | idle | explorer");
+		expect(workflowOutput).toContain("agent-3 | idle | explorer");
+		expect(workflowOutput).toContain("handoff-2 | CLI Workflow inspected");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

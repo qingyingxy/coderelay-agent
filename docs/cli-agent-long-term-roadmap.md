@@ -1,7 +1,7 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M3 实现中（R7 已完成）
-> 最后更新：2026-07-26
+> 状态：M3 实现中（R7-R8 已完成）
+> 最后更新：2026-07-27
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
 ## 1. 文档目的
@@ -35,6 +35,7 @@ M2 实施计划：
 M3 实施计划：
 
 - [`M3 运行保障能力实施记录`](./design/m3-runtime-guardrails-implementation-plan.md)
+- [`M3 Subagent Runtime 实施记录`](./design/m3-subagent-runtime-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -283,17 +284,17 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R8.1 | `TODO` | 复核现有 Subagent 示例 | 明确可复用的独立进程、parallel、chain、流式和取消能力 | R0.1 |
-| R8.2 | `TODO` | 定义 AgentRegistry | 保存 ID、父子关系、Task、Session、Profile、状态、预算和用量 | R1.7、R4.6 |
-| R8.3 | `TODO` | 实现 Subagent API | `spawn`、`send`、`wait`、`interrupt`、`list`、`retry` | R8.2 |
-| R8.4 | `TODO` | 创建独立 AgentSession | 每个子 Agent 有独立会话和受限上下文 | R4.10、R8.3 |
-| R8.5 | `TODO` | 实现权限与预算继承 | 子 Agent 不能扩大权限或突破父级预算 | R7.1、R7.7 |
-| R8.6 | `TODO` | 实现 Agent 事件与流式进度 | started、progress、blocked、completed、failed、usage | R2.6、R8.2 |
-| R8.7 | `TODO` | 校验结构化 Handoff | 缺少关键结果时不能把 Task 标记为成功 | R1.5、R8.6 |
-| R8.8 | `TODO` | 聚合多个 Handoff | 汇总并行结果，识别冲突、重复和未完成项 | R8.7 |
-| R8.9 | `TODO` | 接入 Scheduler | Scheduler 可以分配受约束的 Subagent | R6.5、R8.3 |
-| R8.10 | `TODO` | 提供 Agent CLI | 展示 Agent、Profile、父子关系、Task、状态和资源用量 | R8.2-R8.9 |
-| R8.11 | `TODO` | 编写 Subagent 测试 | 使用 Fake Provider 和伪子进程覆盖成功、失败、取消和超限 | R8.3-R8.10 |
+| R8.1 | `DONE` | 复核现有 Subagent 示例 | 明确可复用的独立进程、parallel、chain、流式和取消能力 | R0.1 |
+| R8.2 | `DONE` | 定义 AgentRegistry | 保存 ID、父子关系、Task、Session、Profile、状态、预算和用量 | R1.7、R4.6 |
+| R8.3 | `DONE` | 实现 Subagent API | `spawn`、`send`、`wait`、`interrupt`、`list`、`retry` | R8.2 |
+| R8.4 | `DONE` | 创建独立 AgentSession | 每个子 Agent 有独立会话和受限上下文 | R4.10、R8.3 |
+| R8.5 | `DONE` | 实现权限与预算继承 | 子 Agent 不能扩大权限或突破父级预算 | R7.1、R7.7 |
+| R8.6 | `DONE` | 实现 Agent 事件与流式进度 | started、progress、blocked、completed、failed、usage | R2.6、R8.2 |
+| R8.7 | `DONE` | 校验结构化 Handoff | 缺少关键结果时不能把 Task 标记为成功 | R1.5、R8.6 |
+| R8.8 | `DONE` | 聚合多个 Handoff | 汇总并行结果，识别冲突、重复和未完成项 | R8.7 |
+| R8.9 | `DONE` | 接入 Scheduler | Scheduler 可以分配受约束的 Subagent | R6.5、R8.3 |
+| R8.10 | `DONE` | 提供 Agent CLI | 展示 Agent、Profile、父子关系、Task、状态和资源用量 | R8.2-R8.9 |
+| R8.11 | `DONE` | 编写 Subagent 测试 | 使用 Fake Provider 和伪子进程覆盖成功、失败、取消和超限 | R8.3-R8.10 |
 
 ### R9：Background Job Runtime
 
@@ -480,12 +481,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R6 Task Graph 与 Scheduler 完成 | DAG 校验、Ready/Blocked 推导、独立 Attempt、受约束调度、Executor 接缝和 Task CLI 已接入 Core；30 个文件、213 个 Workflow 用例通过 |
 | 2026-07-26 | M2 Plan 与 Task 完成 | R4-R6 全部完成；自动模式、正式 Plan、Task Graph 和确定性 Scheduler 均有测试与离线演示 |
 | 2026-07-26 | R7 运行保障能力完成 | 权限交集、只读角色、跨进程 Writer Lease、修改归属、预算限制和级联取消已接入 Core、CLI；34 个文件、224 个 Workflow 用例和离线演示通过 |
+| 2026-07-27 | R8 Subagent 与结构化 Handoff 完成 | 独立 RPC Session、AgentRegistry、控制 API、父子层级、继承守卫、事件、Handoff、Scheduler 和 Agent CLI 已接入 Core；36 个文件、227 个 Workflow 用例，以及 Faux Provider、伪子进程与离线演示通过 |
 
 ## 12. 下一步
 
-M0-M2 和 R7 已完成并验证。下一步继续 M3：
+M0-M2、R7 和 R8 已完成并验证。下一步继续 M3：
 
-1. 完成 R8.1-R8.4：复核 Subagent 示例，定义 AgentRegistry、API 和独立 AgentSession。
-2. 完成 R8.5-R8.9：接入权限、预算、事件、Handoff 和 Scheduler。
-3. 完成 R8.10-R8.11：提供 Agent CLI、回归测试和离线演示。
-4. R8 验收后再进入 R9 Background Job Runtime。
+1. 完成 R9.1-R9.3：定义 Job、JobRegistry 和后台控制 API。
+2. 完成 R9.4-R9.7：实现增量日志、超时、进程树清理、通知和 Scheduler 接入。
+3. 完成 R9.8-R9.9：提供 Job CLI、回归测试和离线演示。
+4. R9 验收后结束 M3，再进入 M4 交付与恢复。

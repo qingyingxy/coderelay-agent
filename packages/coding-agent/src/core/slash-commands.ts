@@ -38,6 +38,16 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Inspect, retry, or cancel a Task",
 		argumentHint: "show <id> | retry <id> | cancel <id> [reason]",
 	},
+	{
+		name: "agents",
+		description: "List Subagents or dispatch ready Tasks",
+		argumentHint: "[dispatch [max-concurrency]]",
+	},
+	{
+		name: "agent",
+		description: "Spawn, inspect, steer, wait for, interrupt, or retry a Subagent",
+		argumentHint: "<spawn|show|send|wait|interrupt|retry> <id> [details]",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },
