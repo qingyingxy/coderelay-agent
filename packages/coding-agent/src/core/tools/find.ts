@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { spawn } from "child_process";
+import { minimatch } from "minimatch";
 import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
@@ -238,7 +239,8 @@ export function createFindToolDefinition(
 							current = parent;
 						}
 						if (!insideGitRepo) args.push("--no-require-git");
-						args.push("--max-results", String(effectiveLimit));
+						const filterPathGlob = process.platform === "win32" && pattern.includes("/");
+						if (!filterPathGlob) args.push("--max-results", String(effectiveLimit));
 
 						// fd --glob matches against the basename unless --full-path is set; in --full-path
 						// mode it matches against the absolute candidate path, so a path-containing
@@ -250,7 +252,7 @@ export function createFindToolDefinition(
 								effectivePattern = `**/${pattern}`;
 							}
 						}
-						args.push("--", effectivePattern, searchPath);
+						args.push("--", filterPathGlob ? "*" : effectivePattern, searchPath);
 
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
@@ -272,7 +274,14 @@ export function createFindToolDefinition(
 						});
 
 						rl.on("line", (line) => {
+							if (filterPathGlob) {
+								const relativePath = line.startsWith(searchPath)
+									? line.slice(searchPath.length + 1)
+									: path.relative(searchPath, line);
+								if (!minimatch(toPosixPath(relativePath), pattern, { dot: true })) return;
+							}
 							lines.push(line);
+							if (filterPathGlob && lines.length >= effectiveLimit) stopChild?.();
 						});
 
 						child.on("error", (error) => {

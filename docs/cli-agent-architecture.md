@@ -177,7 +177,7 @@ Task 和 Attempt 有独立状态机。Task 表示可交付工作，Attempt 表�
 
 Pi 原有 `/resume` 用于切换会话，因此 Workflow 恢复使用 `/workflow-resume`，避免破坏既有功能。
 
-- Interactive：Footer 状态行和各资源面板。
+- Interactive：输入框上方常驻 Workflow 进度面板，显示阶段、完成/总 Task、运行/等待数量、当前执行者、Verification 和 Repair；Footer 保留简要状态行。
 - Print：`--workflow-report` 输出最终人类可读报告。
 - JSON：额外输出 `workflow_result`。
 - RPC：`get_workflow` 返回同一个可序列化 Workflow View。

@@ -36,9 +36,12 @@ Type `/` in the editor to open command completion. Extensions can register custo
 
 | Command | Description |
 |---------|-------------|
-| `/login`, `/logout` | Manage OAuth or API-key credentials |
+| `/auth` | Manage credentials and the active provider |
+| `/provider [provider]` | Switch the active provider and its default model |
+| `/login [provider]` | Add or replace OAuth or API-key credentials |
+| `/logout` | Remove stored credentials |
 | [`/llama`](llama-cpp.md) | Download, load, and unload llama.cpp router models |
-| `/model` | Switch models |
+| `/model` | Switch models within the active provider |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
 | `/resume` | Pick from previous sessions |
@@ -58,6 +61,19 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/changelog` | Display version history |
 | `/quit` | Quit pi |
+
+### Credentials and Providers
+
+Pi can keep credentials for multiple providers. Adding a key does not make it the active provider automatically.
+
+- `/auth` opens one management menu for adding or replacing credentials, removing stored credentials, and switching providers.
+- `/provider` lists configured providers and marks the active one.
+- `/provider openai` switches directly when the provider name or ID is an exact match.
+- `/model` lists and searches only models belonging to the active provider.
+- `/login openai` adds or replaces only OpenAI credentials; credentials for other providers remain stored.
+- `/logout` removes a selected stored credential. Environment variables and credentials declared in `models.json` are unchanged.
+
+Switching providers also selects a model for that provider and saves both as the defaults for future sessions. Pi prefers that provider's previously saved model, then its built-in default, then its first available model.
 
 ## Message Queue
 

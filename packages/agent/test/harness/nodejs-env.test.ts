@@ -103,39 +103,42 @@ describe("NodeExecutionEnv", () => {
 		expect(getOrThrow(await env.absolutePath(pathToFileURL(filePath).href))).toBe(filePath);
 	});
 
-	it("returns fileInfo for files, directories, and symlinks without following symlinks", async () => {
-		const root = createTempDir();
-		const env = new NodeExecutionEnv({ cwd: root });
-		getOrThrow(await env.createDir("dir", { recursive: true }));
-		getOrThrow(await env.writeFile("dir/file.txt", "hello"));
-		await symlink(join(root, "dir/file.txt"), join(root, "file-link"));
-		await symlink(join(root, "dir"), join(root, "dir-link"));
+	it.skipIf(process.platform === "win32")(
+		"returns fileInfo for files, directories, and symlinks without following symlinks",
+		async () => {
+			const root = createTempDir();
+			const env = new NodeExecutionEnv({ cwd: root });
+			getOrThrow(await env.createDir("dir", { recursive: true }));
+			getOrThrow(await env.writeFile("dir/file.txt", "hello"));
+			await symlink(join(root, "dir/file.txt"), join(root, "file-link"));
+			await symlink(join(root, "dir"), join(root, "dir-link"));
 
-		expect(getOrThrow(await env.fileInfo("dir"))).toMatchObject({
-			name: "dir",
-			path: join(root, "dir"),
-			kind: "directory",
-		});
-		expect(getOrThrow(await env.fileInfo("dir/file.txt"))).toMatchObject({
-			name: "file.txt",
-			path: join(root, "dir/file.txt"),
-			kind: "file",
-			size: 5,
-		});
-		expect(getOrThrow(await env.fileInfo("file-link"))).toMatchObject({
-			name: "file-link",
-			path: join(root, "file-link"),
-			kind: "symlink",
-		});
-		expect(getOrThrow(await env.fileInfo("dir-link"))).toMatchObject({
-			name: "dir-link",
-			path: join(root, "dir-link"),
-			kind: "symlink",
-		});
-		expect(getOrThrow(await env.canonicalPath("file-link"))).toBe(await realpath(join(root, "dir/file.txt")));
-	});
+			expect(getOrThrow(await env.fileInfo("dir"))).toMatchObject({
+				name: "dir",
+				path: join(root, "dir"),
+				kind: "directory",
+			});
+			expect(getOrThrow(await env.fileInfo("dir/file.txt"))).toMatchObject({
+				name: "file.txt",
+				path: join(root, "dir/file.txt"),
+				kind: "file",
+				size: 5,
+			});
+			expect(getOrThrow(await env.fileInfo("file-link"))).toMatchObject({
+				name: "file-link",
+				path: join(root, "file-link"),
+				kind: "symlink",
+			});
+			expect(getOrThrow(await env.fileInfo("dir-link"))).toMatchObject({
+				name: "dir-link",
+				path: join(root, "dir-link"),
+				kind: "symlink",
+			});
+			expect(getOrThrow(await env.canonicalPath("file-link"))).toBe(await realpath(join(root, "dir/file.txt")));
+		},
+	);
 
-	it("lists symlinks as symlinks", async () => {
+	it.skipIf(process.platform === "win32")("lists symlinks as symlinks", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		getOrThrow(await env.writeFile("target.txt", "hello"));
@@ -252,7 +255,7 @@ describe("NodeExecutionEnv", () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		const result = getOrThrow(
-			await env.exec('printf \'%s:%s\' "$PWD" "$NODE_ENV_TEST"', {
+			await env.exec(`node -e "process.stdout.write(process.cwd()+':'+process.env.NODE_ENV_TEST)"`, {
 				env: { NODE_ENV_TEST: "ok" },
 			}),
 		);

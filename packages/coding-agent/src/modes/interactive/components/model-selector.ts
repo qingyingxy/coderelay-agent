@@ -60,6 +60,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private refreshStatusSuccess = false;
 	private tui: TUI;
 	private scopedModels: ReadonlyArray<ScopedModelItem>;
+	private providerId?: string;
 	private scope: ModelScope = "all";
 	private scopeText?: Text;
 	private scopeHintText?: Text;
@@ -76,6 +77,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		onSelect: (model: Model<any>) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
+		providerId?: string,
 	) {
 		super();
 
@@ -83,8 +85,11 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.currentModel = currentModel;
 		this.settingsManager = settingsManager;
 		this.modelRuntime = modelRuntime;
-		this.scopedModels = scopedModels;
-		this.scope = scopedModels.length > 0 ? "scoped" : "all";
+		this.providerId = providerId;
+		this.scopedModels = providerId
+			? scopedModels.filter((scoped) => scoped.model.provider === providerId)
+			: scopedModels;
+		this.scope = this.scopedModels.length > 0 ? "scoped" : "all";
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
@@ -93,12 +98,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add hint about model filtering
-		if (scopedModels.length > 0) {
+		if (providerId) {
+			this.addChild(
+				new Text(
+					theme.fg("warning", `Only showing models for active provider "${providerId}". Use /provider to switch.`),
+					0,
+					0,
+				),
+			);
+		}
+		if (this.scopedModels.length > 0) {
 			this.scopeText = new Text(this.getScopeText(), 0, 0);
 			this.addChild(this.scopeText);
 			this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
 			this.addChild(this.scopeHintText);
-		} else {
+		} else if (!providerId) {
 			const hintText = "Only showing models from configured providers. Use /login to add providers.";
 			this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
 		}
@@ -137,11 +151,14 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private loadModelsFromSnapshot(): void {
-		const models = this.modelRuntime.getAvailableSnapshot().map((model: Model<any>) => ({
-			provider: model.provider,
-			id: model.id,
-			model,
-		}));
+		const models = this.modelRuntime
+			.getAvailableSnapshot()
+			.filter((model) => !this.providerId || model.provider === this.providerId)
+			.map((model: Model<any>) => ({
+				provider: model.provider,
+				id: model.id,
+				model,
+			}));
 		this.allModels = this.sortModels(models);
 		this.scopedModels = this.scopedModels.map((scoped) => {
 			const refreshed = this.modelRuntime.getModel(scoped.model.provider, scoped.model.id);

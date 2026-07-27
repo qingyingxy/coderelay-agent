@@ -142,6 +142,7 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { WorkflowProgressComponent } from "./components/workflow-progress.ts";
 import { editInExternalEditor } from "./external-editor.ts";
 import { getModelSearchText } from "./model-search.ts";
 import {
@@ -334,6 +335,7 @@ export class InteractiveMode {
 	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
+	private workflowProgress: WorkflowProgressComponent;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
 	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
@@ -476,6 +478,7 @@ export class InteractiveMode {
 		this.editor = this.defaultEditor;
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor as Component);
+		this.workflowProgress = new WorkflowProgressComponent(() => this.session.getWorkflowView());
 		this.footerDataProvider = new FooterDataProvider(this.sessionManager.getCwd());
 		this.footer = new FooterComponent(this.session, this.footerDataProvider);
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -553,11 +556,7 @@ export class InteractiveMode {
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
 			modelCommand.getArgumentCompletions = async (prefix: string): Promise<AutocompleteItem[] | null> => {
-				// Get available models (scoped or from registry)
-				const models =
-					this.session.scopedModels.length > 0
-						? this.session.scopedModels.map((s) => s.model)
-						: await this.session.modelRuntime.getAvailable();
+				const models = await this.getActiveProviderModelCandidates();
 
 				if (models.length === 0) return null;
 
@@ -586,6 +585,23 @@ export class InteractiveMode {
 					label: provider.id,
 					description: formatLoginProviderCompletionDescription(provider),
 				}));
+			};
+		}
+
+		const providerCommand = slashCommands.find((command) => command.name === "provider");
+		if (providerCommand) {
+			providerCommand.getArgumentCompletions = async (prefix: string): Promise<AutocompleteItem[] | null> => {
+				const providers = await this.getProviderSwitchOptions();
+				return createFuzzyAutocompleteItems(
+					providers,
+					prefix,
+					(provider) => `${provider.id} ${provider.name}`,
+					(provider) => ({
+						value: provider.id,
+						label: provider.id,
+						description: provider.active ? `${provider.name} (active)` : provider.name,
+					}),
+				);
 			};
 		}
 
@@ -714,6 +730,7 @@ export class InteractiveMode {
 		this.ui.addChild(this.statusContainer);
 		this.renderWidgets(); // Initialize with default spacer
 		this.ui.addChild(this.widgetContainerAbove);
+		this.ui.addChild(this.workflowProgress);
 		this.ui.addChild(this.editorContainer);
 		this.ui.addChild(this.widgetContainerBelow);
 		this.ui.addChild(this.footer);
@@ -1048,10 +1065,14 @@ export class InteractiveMode {
 	private formatDisplayPath(p: string): string {
 		const home = os.homedir();
 		let result = p;
+		const normalizedPath = p.replace(/\\/g, "/");
+		const normalizedHome = home.replace(/\\/g, "/");
+		const comparablePath = process.platform === "win32" ? normalizedPath.toLowerCase() : normalizedPath;
+		const comparableHome = process.platform === "win32" ? normalizedHome.toLowerCase() : normalizedHome;
 
 		// Replace home directory with ~
-		if (result.startsWith(home)) {
-			result = `~${result.slice(home.length)}`;
+		if (comparablePath === comparableHome || comparablePath.startsWith(`${comparableHome}/`)) {
+			result = `~${normalizedPath.slice(normalizedHome.length)}`;
 		}
 
 		return result;
@@ -2723,6 +2744,17 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
+			if (text === "/provider" || text.startsWith("/provider ")) {
+				const providerRef = text.startsWith("/provider ") ? text.slice(10).trim() : undefined;
+				this.editor.setText("");
+				await this.handleProviderCommand(providerRef);
+				return;
+			}
+			if (text === "/auth") {
+				this.editor.setText("");
+				this.showAuthManager();
+				return;
+			}
 			if (text === "/login" || text.startsWith("/login ")) {
 				const providerRef = text.startsWith("/login ") ? text.slice(7).trim() : undefined;
 				this.editor.setText("");
@@ -3159,6 +3191,18 @@ export class InteractiveMode {
 
 			case "summarization_retry_finished": {
 				this.clearStatusIndicator("retry");
+				this.ui.requestRender();
+				break;
+			}
+
+			case "workflow_mode_decided":
+			case "workflow_waiting_for_user":
+			case "workflow_dispatch_started":
+			case "workflow_dispatch_settled":
+			case "workflow_verification_started":
+			case "workflow_repair_created":
+			case "workflow_automation_waiting":
+			case "workflow_result": {
 				this.ui.requestRender();
 				break;
 			}
@@ -4333,8 +4377,14 @@ export class InteractiveMode {
 	}
 
 	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
-		const models = await this.getModelCandidates();
+		const models = await this.getActiveProviderModelCandidates();
 		return findExactModelReferenceMatch(searchTerm, models);
+	}
+
+	private async getActiveProviderModelCandidates(): Promise<Model<any>[]> {
+		const models = await this.getModelCandidates();
+		const activeProvider = isUnknownModel(this.session.model) ? undefined : this.session.model?.provider;
+		return activeProvider ? models.filter((model) => model.provider === activeProvider) : models;
 	}
 
 	private async getModelCandidates(): Promise<Model<any>[]> {
@@ -4468,6 +4518,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				initialSearchInput,
+				isUnknownModel(this.session.model) ? undefined : this.session.model?.provider,
 			);
 			return { component: selector, focus: selector };
 		});
@@ -4873,6 +4924,143 @@ export class InteractiveMode {
 				status: { type, source: "stored credential" },
 			}))
 			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private async getProviderSwitchOptions(): Promise<AuthSelectorProvider[]> {
+		const models = await this.getModelCandidates();
+		const providerIds = [...new Set(models.map((model) => model.provider))];
+		return providerIds
+			.map((providerId) => {
+				const authStatus = this.session.modelRuntime.getProviderAuthStatus(providerId);
+				const authType = this.session.modelRuntime.isUsingOAuth(providerId)
+					? ("oauth" as const)
+					: ("api_key" as const);
+				return {
+					id: providerId,
+					name: this.session.modelRuntime.getProvider(providerId)?.name ?? providerId,
+					authType,
+					status: authStatus.configured
+						? {
+								type: authType,
+								source: authStatus.label ?? authStatus.source,
+							}
+						: undefined,
+					active: this.session.model?.provider === providerId,
+				};
+			})
+			.sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	private async handleProviderCommand(providerRef?: string): Promise<void> {
+		const providerOptions = await this.getProviderSwitchOptions();
+		if (providerOptions.length === 0) {
+			this.showStatus("No configured providers. Use /auth or /login first.");
+			return;
+		}
+
+		if (providerRef) {
+			const normalizedProviderRef = providerRef.toLowerCase();
+			const providerOption = providerOptions.find(
+				(provider) =>
+					provider.id.toLowerCase() === normalizedProviderRef ||
+					provider.name.toLowerCase() === normalizedProviderRef,
+			);
+			if (providerOption) {
+				await this.switchActiveProvider(providerOption);
+				return;
+			}
+		}
+
+		this.showProviderSelector(providerOptions, providerRef);
+	}
+
+	private showProviderSelector(providerOptions: AuthSelectorProvider[], initialSearchInput?: string): void {
+		this.showSelector((done) => {
+			const selector = new OAuthSelectorComponent(
+				"provider",
+				providerOptions,
+				async (providerId) => {
+					done();
+					const providerOption = providerOptions.find((provider) => provider.id === providerId);
+					if (providerOption) {
+						await this.switchActiveProvider(providerOption);
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+				initialSearchInput,
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	private async switchActiveProvider(providerOption: AuthSelectorProvider): Promise<void> {
+		const models = (await this.getModelCandidates()).filter((model) => model.provider === providerOption.id);
+		if (models.length === 0) {
+			this.showError(`No available models for ${providerOption.name}.`);
+			return;
+		}
+
+		if (this.session.model?.provider === providerOption.id) {
+			this.showStatus(`Provider already active: ${providerOption.name} (${this.session.model.id})`);
+			return;
+		}
+
+		const savedModelId =
+			this.settingsManager.getDefaultProvider() === providerOption.id
+				? this.settingsManager.getDefaultModel()
+				: undefined;
+		const defaultModelId = hasDefaultModelProvider(providerOption.id)
+			? defaultModelPerProvider[providerOption.id]
+			: undefined;
+		const model =
+			models.find((candidate) => candidate.id === savedModelId) ??
+			models.find((candidate) => candidate.id === defaultModelId) ??
+			models[0];
+		if (!model) {
+			this.showError(`No available models for ${providerOption.name}.`);
+			return;
+		}
+
+		try {
+			await this.session.setModel(model);
+			this.footer.invalidate();
+			this.updateEditorBorderColor();
+			this.showStatus(`Provider: ${providerOption.name} (${model.id})`);
+			void this.maybeWarnAboutAnthropicSubscriptionAuth(model);
+			this.checkDaxnutsEasterEgg(model);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	private showAuthManager(): void {
+		const addCredentials = "Add or replace provider credentials";
+		const removeCredentials = "Remove stored provider credentials";
+		const switchProvider = "Switch active provider";
+		this.showSelector((done) => {
+			const selector = new ExtensionSelectorComponent(
+				"Authentication:",
+				[addCredentials, removeCredentials, switchProvider],
+				(option) => {
+					done();
+					if (option === addCredentials) {
+						this.showLoginAuthTypeSelector();
+					} else if (option === removeCredentials) {
+						void this.showOAuthSelector("logout");
+					} else {
+						void this.handleProviderCommand();
+					}
+				},
+				() => {
+					done();
+					this.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector };
+		});
 	}
 
 	private findLoginProviderOptions(providerRef: string): AuthSelectorProvider[] {

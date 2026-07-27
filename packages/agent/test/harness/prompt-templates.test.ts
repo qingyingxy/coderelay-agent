@@ -65,7 +65,7 @@ describe("loadPromptTemplates", () => {
 		});
 	});
 
-	it("loads explicit markdown files and symlinked files", async () => {
+	it.skipIf(process.platform === "win32")("loads explicit markdown files and symlinked files", async () => {
 		const root = createTempDir();
 		const env = new NodeExecutionEnv({ cwd: root });
 		await env.writeFile("target.md", "---\ndescription: Target\n---\nTarget body");

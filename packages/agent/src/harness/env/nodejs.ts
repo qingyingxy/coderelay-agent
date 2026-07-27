@@ -14,7 +14,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
@@ -81,7 +81,7 @@ function fileInfoFromStats(
 	const kind = fileKindFromStats(stats);
 	if (!kind) return err(new FileError("invalid", "Unsupported file type", path));
 	return ok({
-		name: path.replace(/\/+$/, "").split("/").pop() ?? path,
+		name: basename(path),
 		path,
 		kind,
 		size: stats.size,
@@ -148,7 +148,7 @@ async function runCommand(
 			return;
 		}
 		const timeout = setTimeout(() => {
-			if (child.pid) killProcessTree(child.pid);
+			if (child.pid) void killProcessTree(child.pid);
 		}, timeoutMs);
 		child.stdout?.setEncoding("utf8");
 		child.stdout?.on("data", (chunk: string) => {
@@ -165,25 +165,46 @@ async function runCommand(
 	});
 }
 
+function isLegacyWslBashPath(path: string): boolean {
+	const normalized = path.replace(/\//g, "\\").toLowerCase();
+	return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized);
+}
+
 async function findBashOnPath(): Promise<string | null> {
 	const result =
 		process.platform === "win32"
 			? await runCommand("where", ["bash.exe"], 5000)
 			: await runCommand("which", ["bash"], 5000);
 	if (result.status !== 0 || !result.stdout) return null;
-	const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-	return firstMatch && (await pathExists(firstMatch)) ? firstMatch : null;
+	const matches = result.stdout
+		.trim()
+		.split(/\r?\n/)
+		.filter((path) => path.length > 0);
+	const existing: string[] = [];
+	for (const path of matches) {
+		if (await pathExists(path)) existing.push(path);
+	}
+	return existing.find((path) => !isLegacyWslBashPath(path)) ?? existing[0] ?? null;
+}
+
+async function findGitBash(): Promise<string | null> {
+	if (process.platform !== "win32") return null;
+	const result = await runCommand("where", ["git.exe"], 5000);
+	if (result.status !== 0 || !result.stdout) return null;
+	for (const gitPath of result.stdout.trim().split(/\r?\n/)) {
+		if (!gitPath) continue;
+		const gitRoot = resolve(dirname(gitPath), "..");
+		for (const candidate of [join(gitRoot, "bin", "bash.exe"), join(gitRoot, "usr", "bin", "bash.exe")]) {
+			if (await pathExists(candidate)) return candidate;
+		}
+	}
+	return null;
 }
 
 interface ShellConfig {
 	shell: string;
 	args: string[];
 	commandTransport?: "argv" | "stdin";
-}
-
-function isLegacyWslBashPath(path: string): boolean {
-	const normalized = path.replace(/\//g, "\\").toLowerCase();
-	return /^[a-z]:\\windows\\(?:system32|sysnative)\\bash\.exe$/.test(normalized);
 }
 
 function getBashShellConfig(shell: string): ShellConfig {
@@ -207,6 +228,10 @@ async function getShellConfig(customShellPath?: string): Promise<Result<ShellCon
 			if (await pathExists(candidate)) {
 				return ok(getBashShellConfig(candidate));
 			}
+		}
+		const gitBash = await findGitBash();
+		if (gitBash) {
+			return ok(getBashShellConfig(gitBash));
 		}
 		const bashOnPath = await findBashOnPath();
 		if (bashOnPath) {
@@ -247,18 +272,22 @@ function getShellEnv(
 	};
 }
 
-function killProcessTree(pid: number): void {
+function killProcessTree(pid: number): Promise<void> {
 	if (process.platform === "win32") {
-		try {
-			spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
-				stdio: "ignore",
-				detached: true,
-				windowsHide: true,
-			});
-		} catch {
-			// Ignore errors.
-		}
-		return;
+		return new Promise((resolvePromise) => {
+			let taskkill: ReturnType<typeof spawn>;
+			try {
+				taskkill = spawn("taskkill", ["/F", "/T", "/PID", String(pid)], {
+					stdio: "ignore",
+					windowsHide: true,
+				});
+			} catch {
+				resolvePromise();
+				return;
+			}
+			taskkill.once("error", () => resolvePromise());
+			taskkill.once("close", () => resolvePromise());
+		});
 	}
 
 	try {
@@ -270,6 +299,7 @@ function killProcessTree(pid: number): void {
 			// Process already dead.
 		}
 	}
+	return Promise.resolve();
 }
 
 function waitForChildProcess(child: ChildProcess): Promise<number | null> {
@@ -397,7 +427,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 
 			const onAbort = () => {
 				if (child?.pid) {
-					killProcessTree(child.pid);
+					void killProcessTree(child.pid);
 				}
 			};
 
@@ -439,7 +469,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 					? setTimeout(() => {
 							timedOut = true;
 							if (child?.pid) {
-								killProcessTree(child.pid);
+								void killProcessTree(child.pid);
 							}
 						}, timeoutMs)
 					: undefined;
@@ -669,7 +699,7 @@ export class NodeExecutionEnv implements ExecutionEnv {
 	}
 
 	async cleanup(): Promise<void> {
-		for (const pid of this.activeChildPids) killProcessTree(pid);
+		await Promise.all([...this.activeChildPids].map((pid) => killProcessTree(pid)));
 		this.activeChildPids.clear();
 	}
 }

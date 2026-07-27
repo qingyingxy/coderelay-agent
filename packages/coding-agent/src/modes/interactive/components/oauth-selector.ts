@@ -17,7 +17,10 @@ export type AuthSelectorProvider = {
 	authType: "oauth" | "api_key";
 	method?: ApiKeyAuth | OAuthAuth;
 	status?: AuthCheck;
+	active?: boolean;
 };
+
+export type AuthSelectorMode = "login" | "logout" | "provider";
 
 export function formatAuthSelectorProviderType(authType: AuthSelectorProvider["authType"]): string {
 	return authType === "oauth" ? "subscription" : "API key";
@@ -43,13 +46,13 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private allProviders: AuthSelectorProvider[];
 	private filteredProviders: AuthSelectorProvider[];
 	private selectedIndex: number = 0;
-	private mode: "login" | "logout";
+	private mode: AuthSelectorMode;
 	private onSelectCallback: (providerId: string, authType: AuthSelectorProvider["authType"]) => void;
 	private onCancelCallback: () => void;
 	private showAuthTypeLabels: boolean;
 
 	constructor(
-		mode: "login" | "logout",
+		mode: AuthSelectorMode,
 		providers: AuthSelectorProvider[],
 		onSelect: (providerId: string, authType: AuthSelectorProvider["authType"]) => void,
 		onCancel: () => void,
@@ -60,7 +63,7 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.mode = mode;
 		this.allProviders = providers;
 		this.filteredProviders = providers;
-		this.showAuthTypeLabels = new Set(providers.map((provider) => provider.authType)).size > 1;
+		this.showAuthTypeLabels = mode !== "provider" && new Set(providers.map((provider) => provider.authType)).size > 1;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 
@@ -69,7 +72,12 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add title
-		const title = mode === "login" ? "Select provider to configure:" : "Select provider to logout:";
+		const title =
+			mode === "login"
+				? "Select provider to configure:"
+				: mode === "logout"
+					? "Select provider to logout:"
+					: "Select active provider:";
 		this.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
 		this.addChild(new Spacer(1));
 
@@ -131,14 +139,15 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 			const authTypeLabel = this.showAuthTypeLabels
 				? theme.fg("muted", ` [${formatAuthSelectorProviderType(provider.authType)}]`)
 				: "";
+			const activeLabel = provider.active ? theme.fg("accent", " • active") : "";
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", "→ ");
 				const text = theme.fg("accent", provider.name);
-				line = prefix + text + authTypeLabel + statusIndicator;
+				line = prefix + text + authTypeLabel + statusIndicator + activeLabel;
 			} else {
 				const text = `  ${theme.fg("text", provider.name)}`;
-				line = text + authTypeLabel + statusIndicator;
+				line = text + authTypeLabel + statusIndicator + activeLabel;
 			}
 
 			this.listContainer.addChild(new TruncatedText(line, 1, 0));
@@ -155,7 +164,9 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 				this.allProviders.length === 0
 					? this.mode === "login"
 						? "No providers available"
-						: "No providers logged in. Use /login first."
+						: this.mode === "logout"
+							? "No providers logged in. Use /login first."
+							: "No configured providers. Use /login first."
 					: "No matching providers";
 			this.listContainer.addChild(new TruncatedText(theme.fg("muted", `  ${message}`), 1, 0));
 		}

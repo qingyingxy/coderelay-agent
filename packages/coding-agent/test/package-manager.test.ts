@@ -212,14 +212,15 @@ Content`,
 
 				mkdirSync(join(agentDir), { recursive: true });
 				mkdirSync(join(tempDir, ".pi"), { recursive: true });
-				symlinkSync(sharedExtensionsDir, join(agentDir, "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(agentDir, "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(agentDir, "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(agentDir, "themes"), "dir");
-				symlinkSync(sharedExtensionsDir, join(tempDir, ".pi", "extensions"), "dir");
-				symlinkSync(sharedSkillsDir, join(tempDir, ".pi", "skills"), "dir");
-				symlinkSync(sharedPromptsDir, join(tempDir, ".pi", "prompts"), "dir");
-				symlinkSync(sharedThemesDir, join(tempDir, ".pi", "themes"), "dir");
+				const directoryLinkType = process.platform === "win32" ? "junction" : "dir";
+				symlinkSync(sharedExtensionsDir, join(agentDir, "extensions"), directoryLinkType);
+				symlinkSync(sharedSkillsDir, join(agentDir, "skills"), directoryLinkType);
+				symlinkSync(sharedPromptsDir, join(agentDir, "prompts"), directoryLinkType);
+				symlinkSync(sharedThemesDir, join(agentDir, "themes"), directoryLinkType);
+				symlinkSync(sharedExtensionsDir, join(tempDir, ".pi", "extensions"), directoryLinkType);
+				symlinkSync(sharedSkillsDir, join(tempDir, ".pi", "skills"), directoryLinkType);
+				symlinkSync(sharedPromptsDir, join(tempDir, ".pi", "prompts"), directoryLinkType);
+				symlinkSync(sharedThemesDir, join(tempDir, ".pi", "themes"), directoryLinkType);
 
 				const result = await packageManager.resolve();
 
@@ -1101,6 +1102,7 @@ Content`,
 		it("should emit progress events on install attempt", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
+			vi.spyOn(packageManager as any, "runCommand").mockRejectedValue(new Error("expected install failure"));
 
 			// Use public install method which emits progress events
 			try {
@@ -1118,6 +1120,7 @@ Content`,
 		it("should recognize github URLs without git: prefix", async () => {
 			const events: ProgressEvent[] = [];
 			packageManager.setProgressCallback((event) => events.push(event));
+			vi.spyOn(packageManager as any, "runCommand").mockRejectedValue(new Error("expected clone failure"));
 			const previousGitTerminalPrompt = process.env.GIT_TERMINAL_PROMPT;
 			process.env.GIT_TERMINAL_PROMPT = "0";
 

@@ -1,5 +1,5 @@
 import { setKeybindings } from "@earendil-works/pi-tui";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
@@ -143,5 +143,80 @@ describe("OAuthSelectorComponent", () => {
 		);
 
 		expect(stripAnsi(selector.render(120).join("\n"))).toContain("✓ command in models.json");
+	});
+
+	it("renders configured providers and marks the active provider", () => {
+		const selector = new OAuthSelectorComponent(
+			"provider",
+			[
+				{
+					id: "openai",
+					name: "OpenAI",
+					authType: "api_key",
+					status: { type: "api_key", source: "stored credential" },
+					active: true,
+				},
+				{
+					id: "anthropic",
+					name: "Anthropic",
+					authType: "oauth",
+					status: { type: "oauth", source: "stored credential" },
+				},
+			],
+			() => {},
+			() => {},
+		);
+
+		const output = stripAnsi(selector.render(120).join("\n"));
+		expect(output).toContain("Select active provider:");
+		expect(output).toContain("OpenAI");
+		expect(output).toContain("active");
+		expect(output).not.toContain("[API key]");
+		expect(output).not.toContain("[subscription]");
+	});
+
+	it("switches to the saved model for the selected provider", async () => {
+		const switchActiveProvider = (
+			InteractiveMode as unknown as {
+				prototype: {
+					switchActiveProvider(
+						this: object,
+						provider: { id: string; name: string; authType: "oauth" | "api_key" },
+					): Promise<void>;
+				};
+			}
+		).prototype.switchActiveProvider;
+		const setModel = vi.fn(async () => {});
+		const showStatus = vi.fn();
+		const fakeThis = {
+			getModelCandidates: async () => [
+				{ provider: "openai", id: "fallback" },
+				{ provider: "openai", id: "saved" },
+				{ provider: "anthropic", id: "other" },
+			],
+			session: {
+				model: { provider: "anthropic", id: "other" },
+				setModel,
+			},
+			settingsManager: {
+				getDefaultProvider: () => "openai",
+				getDefaultModel: () => "saved",
+			},
+			footer: { invalidate: vi.fn() },
+			updateEditorBorderColor: vi.fn(),
+			showStatus,
+			showError: vi.fn(),
+			maybeWarnAboutAnthropicSubscriptionAuth: vi.fn(async () => {}),
+			checkDaxnutsEasterEgg: vi.fn(),
+		};
+
+		await switchActiveProvider.call(fakeThis, {
+			id: "openai",
+			name: "OpenAI",
+			authType: "api_key",
+		});
+
+		expect(setModel).toHaveBeenCalledWith({ provider: "openai", id: "saved" });
+		expect(showStatus).toHaveBeenCalledWith("Provider: OpenAI (saved)");
 	});
 });

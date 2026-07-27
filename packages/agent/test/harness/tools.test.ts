@@ -389,33 +389,36 @@ describe("AgentHarness tools", () => {
 			expect(getOrThrow(await env.readTextFile("file.txt"))).toBe("ALPHA\nBETA\n");
 		});
 
-		it("serializes concurrent edits through canonical and symlink paths", async () => {
-			const env = new SlowReadExecutionEnv({ cwd: createTempDir() });
-			getOrThrow(await env.writeFile("target.txt", "alpha\nbeta\ngamma\n"));
-			await symlink("target.txt", `${env.cwd}/link.txt`);
-			const tool = createEditTool();
+		it.skipIf(process.platform === "win32")(
+			"serializes concurrent edits through canonical and symlink paths",
+			async () => {
+				const env = new SlowReadExecutionEnv({ cwd: createTempDir() });
+				getOrThrow(await env.writeFile("target.txt", "alpha\nbeta\ngamma\n"));
+				await symlink("target.txt", `${env.cwd}/link.txt`);
+				const tool = createEditTool();
 
-			await Promise.all([
-				tool.execute(
-					"edit-target",
-					{ path: "target.txt", edits: [{ oldText: "alpha", newText: "ALPHA" }] },
-					undefined,
-					undefined,
-					{ env },
-				),
-				tool.execute(
-					"edit-link",
-					{ path: "link.txt", edits: [{ oldText: "beta", newText: "BETA" }] },
-					undefined,
-					undefined,
-					{ env },
-				),
-			]);
+				await Promise.all([
+					tool.execute(
+						"edit-target",
+						{ path: "target.txt", edits: [{ oldText: "alpha", newText: "ALPHA" }] },
+						undefined,
+						undefined,
+						{ env },
+					),
+					tool.execute(
+						"edit-link",
+						{ path: "link.txt", edits: [{ oldText: "beta", newText: "BETA" }] },
+						undefined,
+						undefined,
+						{ env },
+					),
+				]);
 
-			expect(getOrThrow(await env.readTextFile("target.txt"))).toBe("ALPHA\nBETA\ngamma\n");
-		});
+				expect(getOrThrow(await env.readTextFile("target.txt"))).toBe("ALPHA\nBETA\ngamma\n");
+			},
+		);
 
-		it("edits regular files through symlinks", async () => {
+		it.skipIf(process.platform === "win32")("edits regular files through symlinks", async () => {
 			const context = createContext();
 			getOrThrow(await context.env.writeFile("target.txt", "before\n"));
 			await symlink("target.txt", `${context.env.cwd}/link.txt`);
@@ -549,7 +552,10 @@ describe("AgentHarness tools", () => {
 					execution.cwd = turnContext.workspace;
 					execution.env = { PI_BASH_PREPARE_EXPLICIT: "explicit" };
 					execution.inheritEnv = false;
-					execution.command += `\nprintf '%s:%s:%s:%s' "$prefix" "\${PI_BASH_PREPARE_INHERITED-}" "$PI_BASH_PREPARE_EXPLICIT" "$PWD"`;
+					execution.command +=
+						`\nexport prefix; node -e "` +
+						`process.stdout.write([process.env.prefix,process.env.PI_BASH_PREPARE_INHERITED||'',` +
+						`process.env.PI_BASH_PREPARE_EXPLICIT||'',process.cwd()].join(':'))"`;
 				},
 			});
 

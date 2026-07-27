@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { delimiter } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "child_process";
 import { getBinDir } from "../config.ts";
 
@@ -31,10 +31,11 @@ function findBashOnPath(): string | null {
 				windowsHide: true,
 			});
 			if (result.status === 0 && result.stdout) {
-				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-				if (firstMatch && existsSync(firstMatch)) {
-					return firstMatch;
-				}
+				const matches = result.stdout
+					.trim()
+					.split(/\r?\n/)
+					.filter((path) => path.length > 0 && existsSync(path));
+				return matches.find((path) => !isLegacyWslBashPath(path)) ?? matches[0] ?? null;
 			}
 		} catch {
 			// Ignore errors
@@ -49,6 +50,28 @@ function findBashOnPath(): string | null {
 			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
 			if (firstMatch) {
 				return firstMatch;
+			}
+		}
+	} catch {
+		// Ignore errors
+	}
+	return null;
+}
+
+function findGitBash(): string | null {
+	if (process.platform !== "win32") return null;
+	try {
+		const result = spawnSync("where", ["git.exe"], {
+			encoding: "utf-8",
+			timeout: 5000,
+			windowsHide: true,
+		});
+		if (result.status !== 0 || !result.stdout) return null;
+		for (const gitPath of result.stdout.trim().split(/\r?\n/)) {
+			if (!gitPath) continue;
+			const gitRoot = resolve(dirname(gitPath), "..");
+			for (const candidate of [join(gitRoot, "bin", "bash.exe"), join(gitRoot, "usr", "bin", "bash.exe")]) {
+				if (existsSync(candidate)) return candidate;
 			}
 		}
 	} catch {
@@ -89,6 +112,11 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 			if (existsSync(path)) {
 				return getBashShellConfig(path);
 			}
+		}
+
+		const gitBash = findGitBash();
+		if (gitBash) {
+			return getBashShellConfig(gitBash);
 		}
 
 		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
