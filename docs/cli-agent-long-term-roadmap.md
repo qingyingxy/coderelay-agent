@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M4 已完成（R10）
+> 状态：M0-M6 已完成；R12 自动 Workflow 编排已实现并验证
 > 最后更新：2026-07-27
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -41,6 +41,10 @@ M3 实施计划：
 M4 实施计划：
 
 - [`M4 交付闭环与恢复实施记录`](./design/m4-delivery-recovery-implementation-plan.md)
+
+M6 实施计划：
+
+- [`M6 自动 Workflow 编排实施计划`](./design/m6-autonomous-workflow-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -162,7 +166,7 @@ flowchart TB
 
 ## 6. 长期任务计划
 
-下面的 R0-R11 是 12 个开发阶段，不是用户请求在运行时依次经过的 12 个流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
+下面的 R0-R12 是 13 个开发阶段，不是用户请求在运行时依次经过的 13 个流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
 
 ### R0：范围与架构基线
 
@@ -350,6 +354,26 @@ flowchart TB
 | R11.11 | `DONE` | 编写演示脚本 | 展示 Plan、Task、Subagent、Job、修复、取消和报告 | R11.7 |
 | R11.12 | `DONE` | 整理简历材料 | 只写实际完成、测试和评测过的能力与指标 | R11.8-R11.11 |
 
+### R12：自动 Workflow 编排
+
+R12 不重复实现现有 Mode、Scheduler、Delivery 或 Repair，而是用一个可恢复、幂等、事件驱动的 Runner 将它们接成默认自动闭环。详细设计见 [`M6 自动 Workflow 编排实施计划`](./design/m6-autonomous-workflow-implementation-plan.md)。
+
+| ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
+|---|---|---|---|---|
+| R12.1 | `DONE` | 定义自动化策略与 Runner 端口 | 固定 Mode、调度、验证、Repair 开关、动作结果和等待原因 | R11 |
+| R12.2 | `DONE` | 实现单 Workflow Pump | 可重复调用、单推进器、无忙轮询、取消优先 | R12.1 |
+| R12.3 | `DONE` | 接入真实自动 Mode | CLI 普通请求调用 Advisor、Clarification Gate 和 ModeSelector，并持久化决策 | R4、R12.2 |
+| R12.4 | `DONE` | 接入 Direct 升级 Plan | 运行中升级走停止写入、Attempt interrupted、Draft Plan 和审批链路 | R4.11、R12.3 |
+| R12.5 | `DONE` | 审批后自动启动调度 | `/approve` 后无需手动 dispatch，自动创建并启动 Attempt | R5、R6、R12.2 |
+| R12.6 | `DONE` | 事件驱动持续调度 | Agent/Job 完成后自动回写、刷新 Ready 并继续调度 | R8、R9、R12.5 |
+| R12.7 | `DONE` | 自动进入 Delivery | 所有可执行 Task 成功后按交付版本幂等触发验证 | R10、R12.6 |
+| R12.8 | `DONE` | 自动创建并调度 Repair | Verification 失败后在预算内创建唯一 Repair，并在成功后重新验证 | R10.6-R10.7、R12.7 |
+| R12.9 | `DONE` | 完善停止与等待原因 | 澄清、审批、扩权、Lease、外部资源、预算和重复失败均有明确状态 | R12.3-R12.8 |
+| R12.10 | `DONE` | 接入四种表现层 | Interactive、Print、JSON、RPC 使用同一 Runner 和 View | R11、R12.9 |
+| R12.11 | `DONE` | 实现自动流程恢复 | 重启后从权威状态继续，不重复 Dispatch、Verification 或 Repair | R10.9-R10.12、R12.2 |
+| R12.12 | `DONE` | 建立自动闭环测试 | 覆盖 Mode、审批、并发调度、验证、Repair、取消、恢复和幂等 | R12.1-R12.11 |
+| R12.13 | `DONE` | 建立离线演示和真实任务基线 | Showcase 无手动 dispatch/verify；真实模型评测与机制评测分开 | R12.12 |
+
 ## 7. 里程碑
 
 | 里程碑 | 状态 | 范围 | 演示目标 |
@@ -360,6 +384,7 @@ flowchart TB
 | M3：受控 Runtime | `DONE` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
 | M4：交付与恢复 | `DONE` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
 | M5：作品版本 | `DONE` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
+| M6：自动 Workflow | `DONE` | R12 | 自动 Mode、调度、验证和有界 Repair 可以无手动推进地形成闭环 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -430,6 +455,8 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 子 Agent 复制完整上下文 | Token 浪费和信息污染 | 使用结构化 Handoff 和 Prompt 裁剪 |
 | 多 Writer 并发修改 | 冲突和修改归属不清 | 第一版强制单 Writer Lease |
 | 自动模式频繁询问用户 | CLI 体验变差 | 默认 auto，仅关键审批和澄清暂停 |
+| 自动推进重复触发副作用 | 重复 Agent、Job、Verification 或 Repair | 单推进器、稳定幂等键和交付版本指纹 |
+| 自动 Repair 无限循环 | 成本、时间和修改范围失控 | 重试与预算上限、失败指纹和无修改检测 |
 | 为简历提前包装未完成功能 | 项目可信度下降 | 只记录已实现并验证的事实和指标 |
 
 ## 11. 决策记录
@@ -492,11 +519,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-27 | M4 交付与恢复完成 | R10.1-R10.13 全部完成；Event Log 保持事实来源，Snapshot 仅用于加速恢复，不确定运行资源统一标记为 interrupted |
 | 2026-07-27 | R11 CLI 打磨与作品材料完成 | 统一 Workflow View 已接入 Interactive、Print、JSON 和 RPC；CLI 回归覆盖 Direct、Plan、Subagent、Job、取消、Repair 与恢复；固定评测、架构、演示和简历证据已落地 |
 | 2026-07-27 | M5 作品版本完成 | R0-R11 全部完成；项目明确标注基于 Pi 二次开发，个人贡献边界和可重复验证入口已写入文档 |
+| 2026-07-27 | M6 自动 Workflow 编排立项 | 保留现有 Core 为权威状态源，新增薄 Runner 接通真实自动 Mode、事件驱动调度、自动 Delivery 和有界 Repair；只在关键澄清、Plan 审批、扩权或不可恢复阻塞时暂停 |
+| 2026-07-27 | R12 自动 Workflow 编排完成 | `AutonomousWorkflowRunner` 已接通自动 Mode、澄清、审批后调度、Delivery、Repair、恢复和四种输出；专项回归与 `demo:autonomous-workflow` 通过 |
+| 2026-07-27 | M6 自动 Workflow 完成 | R0-R12 全部完成；默认 CLI 入口使用 Auto Mode，除关键澄清和 Plan 审批外无需手动 dispatch、wait 或 verify |
 
-## 12. 下一步
+## 12. 后续维护
 
-M0-M5 已完成。后续不再扩展首版范围，只处理作品发布：
+M0-M6、R0-R12 已完成。后续工作不再新增主路线阶段，按以下原则维护：
 
-1. 在真实终端录制 `npm run demo:cli-agent-showcase`，保存演示视频或 GIF。
-2. 选择固定真实仓库任务和明确模型版本，建立与确定性评测分离的模型效果基线。
-3. 按目标岗位调整简历措辞，但继续保留 Pi Fork 和个人贡献边界。
+1. 用 `npm run demo:autonomous-workflow` 验证确定性自动闭环。
+2. 真实模型任务效果单独评测，不与机制正确性测试混合统计。
+3. 新增权限、远程执行、多 Writer 或工作区隔离前，先补正式安全设计。
+4. 自动流程协议变更必须同步更新 RPC Schema、Workflow View、恢复测试和本路线图。

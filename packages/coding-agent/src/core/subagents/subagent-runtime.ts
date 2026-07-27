@@ -179,6 +179,11 @@ export class SubagentRuntime {
 		}
 	}
 
+	availableSlots(workflowId: string): number {
+		const liveAgents = this.registry.list(workflowId).filter(({ status }) => LIVE_AGENT_STATUSES.has(status));
+		return Math.max(0, this.#maxAgents - liveAgents.length);
+	}
+
 	async spawn(input: SpawnSubagentInput): Promise<AgentInstance> {
 		const profileViolations = validateAgentProfile(input.profile);
 		if (profileViolations.length > 0) {

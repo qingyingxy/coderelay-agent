@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DeliveryWorkflowPort } from "../delivery/types.ts";
 import type { JobRuntime } from "../jobs/job-runtime.ts";
 import type { Job } from "../jobs/types.ts";
@@ -25,6 +25,7 @@ import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type {
 	Attempt,
+	ModeDecision,
 	Plan,
 	PlanContent,
 	PlanProgress,
@@ -42,6 +43,7 @@ export interface StartPlanRuntimeInput {
 	readonly rootTaskId?: string;
 	readonly planId?: string;
 	readonly budget?: Workflow["budget"];
+	readonly modeDecision?: ModeDecision;
 }
 
 export interface StartSubagentTaskInput {
@@ -60,6 +62,15 @@ export interface SubagentTaskExecution {
 export interface JobTaskExecution {
 	readonly job: Job;
 	readonly completion: Promise<Job>;
+}
+
+export interface WorkflowTaskExecution {
+	readonly taskId: string;
+	readonly executorKind: "subagent" | "job";
+	readonly resourceId: string;
+	readonly completion: Promise<AgentRunResult | Job>;
+	readonly subagent?: SubagentTaskExecution;
+	readonly job?: JobTaskExecution;
 }
 
 export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
@@ -99,6 +110,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			planId: input.planId ?? createId("plan"),
 			request: input.request,
 			budget: input.budget,
+			modeDecision: input.modeDecision,
 		});
 		const snapshotStore = new SessionWorkflowSnapshotStore(sessionManager);
 		const runtime = new PlanWorkflowRuntime(controller, workflowId, createId, snapshotStore);
@@ -121,7 +133,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		const targetWorkflowId = workflowId ?? snapshot?.workflowId;
 		const workflow = controller
 			.listWorkflows()
-			.filter((candidate) => candidate.modeDecision?.mode === "plan")
+			.filter((candidate) => candidate.modeDecision?.mode === "plan" || candidate.currentPlanId !== undefined)
 			.filter((candidate) => targetWorkflowId === undefined || candidate.id === targetWorkflowId)
 			.at(-1);
 		if (!workflow) {
@@ -179,6 +191,35 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 
 	get isTerminal(): boolean {
 		return isWorkflowTerminalStatus(this.workflow.status);
+	}
+
+	get deliveryFingerprint(): string {
+		const plan = this.currentPlan;
+		const tasks = this.tasks
+			.filter(({ kind }) => kind !== "control")
+			.map((task) => ({
+				id: task.id,
+				revision: task.revision,
+				status: task.status,
+				currentAttemptId: task.currentAttemptId,
+				modifications: task.modifications.map(({ path, operation, attemptId, toolCallId }) => ({
+					path,
+					operation,
+					attemptId,
+					toolCallId,
+				})),
+			}))
+			.sort((left, right) => left.id.localeCompare(right.id));
+		return createHash("sha256")
+			.update(
+				JSON.stringify({
+					planId: plan.id,
+					planVersion: plan.version,
+					tasks,
+					requirements: plan.verificationRequirements,
+				}),
+			)
+			.digest("hex");
 	}
 
 	get statusLines(): readonly string[] {
@@ -491,6 +532,53 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		return Promise.all(dispatches.map(({ taskId }) => this.startSubagentTask(runtime, taskId)));
 	}
 
+	async startReadyTasks(
+		subagentRuntime: SubagentRuntime,
+		jobRuntime: JobRuntime,
+		maxConcurrency: number,
+	): Promise<readonly WorkflowTaskExecution[]> {
+		this.refreshTaskReadiness();
+		const budget = this.workflow.budget;
+		const dispatches = new TaskScheduler({
+			maxConcurrency,
+			maxConcurrentAgents: Math.min(
+				budget.maxConcurrentAgents ?? maxConcurrency,
+				subagentRuntime.availableSlots(this.#workflowId),
+			),
+			maxConcurrentJobs: Math.min(budget.maxConcurrentJobs ?? maxConcurrency, jobRuntime.availableSlots),
+			agentExecutorKind: "subagent",
+			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+		}).select(this.tasks);
+		const executions: WorkflowTaskExecution[] = [];
+		try {
+			for (const dispatch of dispatches) {
+				if (dispatch.executorKind === "job") {
+					const job = await this.startJobTask(jobRuntime, dispatch.taskId);
+					executions.push({
+						taskId: dispatch.taskId,
+						executorKind: "job",
+						resourceId: job.job.id,
+						completion: job.completion,
+						job,
+					});
+					continue;
+				}
+				const subagent = await this.startSubagentTask(subagentRuntime, dispatch.taskId);
+				executions.push({
+					taskId: dispatch.taskId,
+					executorKind: "subagent",
+					resourceId: subagent.agent.id,
+					completion: subagent.completion,
+					subagent,
+				});
+			}
+			return executions;
+		} catch (error) {
+			await Promise.allSettled(executions.map(({ completion }) => completion));
+			throw error;
+		}
+	}
+
 	taskDetails(taskId: string): readonly string[] {
 		const task = this.#controller.getTask(taskId);
 		if (!task || task.workflowId !== this.#workflowId) {
@@ -638,6 +726,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			readonly id?: string;
 		};
 		readonly status: Extract<VerificationResult["status"], "passed" | "failed" | "skipped">;
+		readonly deliveryFingerprint?: string;
 		readonly summary: string;
 		readonly evidenceRefs?: readonly string[];
 		readonly command?: string;
@@ -672,11 +761,13 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		readonly summary: string;
 		readonly risks: readonly string[];
 		readonly unfinishedItems: readonly string[];
+		readonly deliveryFingerprint?: string;
 	}): void {
 		this.#controller.completeDelivery({
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 			...input,
+			deliveryFingerprint: input.deliveryFingerprint ?? this.deliveryFingerprint,
 		});
 		this.#checkpoint();
 	}
@@ -754,7 +845,9 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 				taskId,
 				verificationId,
 				summary: result.handoff.conclusion,
-				changedFiles: [...new Set(result.modifications.map(({ path }) => path))],
+				changedFiles: [
+					...new Set([...result.modifications.map(({ path }) => path), ...result.handoff.changedFiles]),
+				],
 				evidenceRefs,
 				handoffId: result.handoff.id,
 			});

@@ -22,6 +22,8 @@ type FakeSession = {
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
 	getWorkflowView: ReturnType<typeof vi.fn>;
+	waitForWorkflowAutomation: ReturnType<typeof vi.fn>;
+	workflowClarificationPending: boolean;
 };
 
 type FakeRuntimeHost = {
@@ -135,6 +137,8 @@ function createRuntimeHost(assistantMessage: AssistantMessage, workflow?: Workfl
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 		getWorkflowView: vi.fn(() => workflow),
+		waitForWorkflowAutomation: vi.fn(async () => undefined),
+		workflowClarificationPending: false,
 	};
 
 	return {

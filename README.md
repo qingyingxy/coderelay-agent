@@ -28,6 +28,7 @@ The personal-project contribution is the productized CLI workflow layer: Direct/
 - [Deterministic evaluation](docs/cli-agent-evaluation.md)
 - [Reproducible showcase](docs/cli-agent-showcase.md)
 - [Development roadmap](docs/cli-agent-long-term-roadmap.md)
+- [Autonomous workflow implementation plan](docs/design/m6-autonomous-workflow-implementation-plan.md)
 
 To learn more about Pi:
 

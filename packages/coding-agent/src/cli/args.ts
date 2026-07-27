@@ -6,6 +6,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
+import { type ExecutionMode, isExecutionMode } from "../core/workflow/types.ts";
 
 export type Mode = "text" | "json" | "rpc";
 
@@ -36,6 +37,7 @@ export interface Args {
 	noExtensions?: boolean;
 	print?: boolean;
 	workflowReport?: boolean;
+	workflowMode?: ExecutionMode;
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
@@ -147,6 +149,20 @@ export function parseArgs(args: string[]): Args {
 			}
 		} else if (arg === "--workflow-report") {
 			result.workflowReport = true;
+		} else if (arg === "--workflow-mode") {
+			const workflowMode = args[i + 1];
+			if (workflowMode === undefined || workflowMode.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--workflow-mode requires a value" });
+			} else if (isExecutionMode(workflowMode)) {
+				result.workflowMode = workflowMode;
+				i++;
+			} else {
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid workflow mode "${workflowMode}". Valid values: auto, direct, plan`,
+				});
+				i++;
+			}
 		} else if (arg === "--export" && i + 1 < args.length) {
 			result.export = args[++i];
 		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
@@ -246,6 +262,7 @@ ${chalk.bold("Options:")}
   --mode <mode>                  Output mode: text (default), json, or rpc
   --print, -p                    Non-interactive mode: process prompt and exit
   --workflow-report             Append the structured Workflow report in text mode
+  --workflow-mode <mode>        Workflow mode: auto (default), direct, or plan
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID

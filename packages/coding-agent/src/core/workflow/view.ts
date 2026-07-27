@@ -1,6 +1,7 @@
 import type { Job } from "../jobs/types.ts";
 import type { AgentInstance } from "../subagents/types.ts";
-import type { Attempt, Plan, Task, VerificationResult, Workflow } from "./types.ts";
+import type { WorkflowAutomationWaitReason } from "./autonomous-workflow-types.ts";
+import type { Attempt, ExecutionMode, Plan, Task, VerificationResult, Workflow } from "./types.ts";
 import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
 
 export const WORKFLOW_VIEW_ACTIONS = [
@@ -32,6 +33,12 @@ export interface WorkflowView {
 	readonly budgetStatus: string;
 	readonly availableActions: readonly WorkflowViewAction[];
 	readonly stopReason?: string;
+	readonly automation?: {
+		readonly enabled: boolean;
+		readonly mode: ExecutionMode;
+		readonly running: boolean;
+		readonly waitingReason?: WorkflowAutomationWaitReason;
+	};
 }
 
 export function deriveWorkflowViewActions(workflow: Workflow, tasks: readonly Task[]): readonly WorkflowViewAction[] {

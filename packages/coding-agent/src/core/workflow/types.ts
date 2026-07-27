@@ -179,6 +179,7 @@ export interface VerificationResult {
 	readonly workflowId: WorkflowId;
 	readonly taskId?: TaskId;
 	readonly requirementId: string;
+	readonly deliveryFingerprint?: string;
 	readonly status: VerificationStatus;
 	readonly command?: string;
 	readonly exitCode?: number;

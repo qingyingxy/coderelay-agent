@@ -1,5 +1,8 @@
 export * from "./agent-profile.ts";
 export * from "./agent-session-adapter.ts";
+export * from "./autonomous-workflow-policy.ts";
+export * from "./autonomous-workflow-runner.ts";
+export * from "./autonomous-workflow-types.ts";
 export * from "./clarification-gate.ts";
 export * from "./controller.ts";
 export * from "./direct-plan-upgrade.ts";
@@ -7,6 +10,7 @@ export * from "./event-log.ts";
 export * from "./events.ts";
 export * from "./invariants.ts";
 export * from "./mode-advisor.ts";
+export * from "./mode-advisor-runtime.ts";
 export * from "./mode-decision.ts";
 export * from "./mode-selector.ts";
 export * from "./plan-progress.ts";

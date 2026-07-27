@@ -4,7 +4,13 @@ import { sumResourceUsage } from "../workflow/runtime-policy.ts";
 import type { ResourceUsage, VerificationRequirement, VerificationResult } from "../workflow/types.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "../workflow/writer-lease.ts";
 import { DiffCollector } from "./diff-collector.ts";
-import type { DeliveryRunResult, DeliveryWorkflowPort, ReadonlyReviewer, ReviewResult } from "./types.ts";
+import type {
+	DeliveryRunOptions,
+	DeliveryRunResult,
+	DeliveryWorkflowPort,
+	ReadonlyReviewer,
+	ReviewResult,
+} from "./types.ts";
 
 const DELIVERY_KINDS = new Set<VerificationRequirement["kind"]>(["diff", "review", "test", "build"]);
 
@@ -40,9 +46,10 @@ export class DeliveryRuntime {
 		this.#writerLeaseRegistry = options.writerLeaseRegistry ?? DEFAULT_WRITER_LEASE_REGISTRY;
 	}
 
-	async run(port: DeliveryWorkflowPort): Promise<DeliveryRunResult> {
+	async run(port: DeliveryWorkflowPort, options: DeliveryRunOptions = {}): Promise<DeliveryRunResult> {
 		port.beginVerification();
 		const workflow = port.workflow;
+		const deliveryFingerprint = port.deliveryFingerprint;
 		const rootTask = port.tasks.find(({ id }) => id === workflow.rootTaskId);
 		if (!rootTask) {
 			throw new Error(`Workflow ${workflow.id} has no root Task`);
@@ -51,14 +58,26 @@ export class DeliveryRuntime {
 		const risks: string[] = [];
 		const unfinishedItems: string[] = [];
 		const jobUsage: ResourceUsage[] = [];
+		const completedByRequirement = new Map(
+			port.verifications
+				.filter(
+					(verification) =>
+						deliveryFingerprint === undefined || verification.deliveryFingerprint === deliveryFingerprint,
+				)
+				.map((verification) => [verification.requirementId, verification]),
+		);
 		for (const requirement of port.currentPlan.verificationRequirements) {
 			if (!DELIVERY_KINDS.has(requirement.kind)) {
+				continue;
+			}
+			if (completedByRequirement.has(requirement.id)) {
 				continue;
 			}
 			if (requirement.kind === "diff") {
 				port.recordVerification({
 					verificationId: `verification-${randomUUID()}`,
 					requirementId: requirement.id,
+					deliveryFingerprint,
 					status: "passed",
 					summary: diff.summary,
 					evidenceRefs: diff.evidenceRefs,
@@ -66,7 +85,7 @@ export class DeliveryRuntime {
 				continue;
 			}
 			if (requirement.kind === "review") {
-				const review = await this.#runReview(port, requirement.id, diff, rootTask);
+				const review = await this.#runReview(port, requirement.id, diff, rootTask, deliveryFingerprint);
 				risks.push(...review.risks);
 				unfinishedItems.push(...review.unfinishedItems);
 				continue;
@@ -75,6 +94,7 @@ export class DeliveryRuntime {
 				port.recordVerification({
 					verificationId: `verification-${randomUUID()}`,
 					requirementId: requirement.id,
+					deliveryFingerprint,
 					status: "skipped",
 					summary: `${requirement.kind} command is not configured`,
 					skipReason: "Verification command is not configured",
@@ -107,6 +127,7 @@ export class DeliveryRuntime {
 				port.recordVerification({
 					verificationId: `verification-${randomUUID()}`,
 					requirementId: requirement.id,
+					deliveryFingerprint,
 					actor: { kind: "job", id: result.id },
 					status: result.status === "succeeded" ? "passed" : "failed",
 					summary:
@@ -121,7 +142,12 @@ export class DeliveryRuntime {
 				this.#writerLeaseRegistry.release(lease.id);
 			}
 		}
-		const verifications = port.verifications;
+		const verifications = port.verifications.filter(
+			(verification) =>
+				deliveryFingerprint === undefined ||
+				verification.deliveryFingerprint === deliveryFingerprint ||
+				verification.taskId !== undefined,
+		);
 		const latest = new Map<string, VerificationResult>();
 		for (const verification of verifications) {
 			latest.set(verification.requirementId, verification);
@@ -134,22 +160,43 @@ export class DeliveryRuntime {
 			.filter(({ required }) => required)
 			.map((requirement) => ({ requirement, result: latest.get(requirement.id) }))
 			.filter(({ result }) => result?.status === "skipped" || result === undefined);
-		if (skipped.length > 0) {
-			const reason = `Required Verification unavailable: ${skipped.map(({ requirement }) => requirement.id).join(", ")}`;
-			port.failDelivery(reason);
-			return {
-				status: "failed",
-				diff,
-				verifications: port.verifications,
-				risks,
-				unfinishedItems: [...unfinishedItems, reason],
-				usage: sumResourceUsage(jobUsage),
-			};
-		}
 		if (failed.length > 0) {
 			const failedVerification = failed[0]?.result;
 			if (!failedVerification) {
 				throw new Error("Failed Verification result is missing");
+			}
+			const matchingFailures = port.verifications.filter(
+				(verification) =>
+					verification.status === "failed" &&
+					verification.requirementId === failedVerification.requirementId &&
+					verification.summary === failedVerification.summary &&
+					verification.exitCode === failedVerification.exitCode,
+			);
+			const latestRepair = port.tasks.filter(({ kind }) => kind === "repair").at(-1);
+			const repairChangedFiles = latestRepair
+				? new Set([
+						...(latestRepair.result?.changedFiles ?? []),
+						...latestRepair.modifications.map(({ path }) => path),
+					])
+				: undefined;
+			const stopReason =
+				options.allowRepair === false
+					? "Automatic Repair is disabled"
+					: latestRepair?.status === "succeeded" && repairChangedFiles?.size === 0
+						? `Repair Task ${latestRepair.id} produced no file changes`
+						: matchingFailures.length > 1
+							? `Verification ${failedVerification.requirementId} repeated the same failure`
+							: undefined;
+			if (stopReason) {
+				port.failDelivery(stopReason);
+				return {
+					status: "failed",
+					diff,
+					verifications: port.verifications,
+					risks,
+					unfinishedItems: [...unfinishedItems, stopReason],
+					usage: sumResourceUsage(jobUsage),
+				};
 			}
 			try {
 				const repairTask = port.createRepair(failedVerification.id);
@@ -175,10 +222,23 @@ export class DeliveryRuntime {
 				};
 			}
 		}
+		if (skipped.length > 0) {
+			const reason = `Required Verification unavailable: ${skipped.map(({ requirement }) => requirement.id).join(", ")}`;
+			port.failDelivery(reason);
+			return {
+				status: "failed",
+				diff,
+				verifications: port.verifications,
+				risks,
+				unfinishedItems: [...unfinishedItems, reason],
+				usage: sumResourceUsage(jobUsage),
+			};
+		}
 		port.completeDelivery({
 			summary: `Delivery completed: ${diff.summary}`,
 			risks,
 			unfinishedItems,
+			deliveryFingerprint,
 		});
 		return {
 			status: "completed",
@@ -195,6 +255,7 @@ export class DeliveryRuntime {
 		requirementId: string,
 		diff: ReturnType<DiffCollector["collect"]>,
 		rootTask: DeliveryWorkflowPort["tasks"][number],
+		deliveryFingerprint: string | undefined,
 	): Promise<ReviewResult> {
 		let review: ReviewResult;
 		try {
@@ -220,6 +281,7 @@ export class DeliveryRuntime {
 		port.recordVerification({
 			verificationId: `verification-${randomUUID()}`,
 			requirementId,
+			deliveryFingerprint,
 			actor: { kind: "agent", id: review.handoff?.agentId ?? `reviewer-${requirementId}` },
 			status: review.status,
 			summary: review.summary,

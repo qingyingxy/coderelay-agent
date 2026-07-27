@@ -37,6 +37,7 @@
 		"demo:delivery-recovery": "tsx packages/coding-agent/examples/sdk/20-delivery-recovery-demo.ts",
 		"eval:cli-agent": "tsx packages/coding-agent/examples/sdk/21-cli-agent-evaluation.ts",
 		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
+		"demo:autonomous-workflow": "tsx packages/coding-agent/examples/sdk/23-autonomous-workflow-showcase.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run test:scripts && npm run test --workspaces --if-present",

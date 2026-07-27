@@ -120,13 +120,31 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
-import { type JobTaskExecution, PlanWorkflowRuntime, type SubagentTaskExecution } from "./workflow/plan-runtime.ts";
+import { createWorkflowAutomationPolicy, requiresPlanMode } from "./workflow/autonomous-workflow-policy.ts";
+import { AutonomousWorkflowRunner } from "./workflow/autonomous-workflow-runner.ts";
+import type { AutonomousWorkflowEvent, WorkflowAutomationResult } from "./workflow/autonomous-workflow-types.ts";
+import type { RequiredClarification } from "./workflow/clarification-gate.ts";
+import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
+import {
+	createModeAdvisorPromptEnvelope,
+	executeModeAdvisorPrompt,
+	parseModeAdvisorResult,
+} from "./workflow/mode-advisor-runtime.ts";
+import { createModeDecision } from "./workflow/mode-decision.ts";
+import { selectExecutionMode } from "./workflow/mode-selector.ts";
+import {
+	type JobTaskExecution,
+	PlanWorkflowRuntime,
+	type SubagentTaskExecution,
+	type WorkflowTaskExecution,
+} from "./workflow/plan-runtime.ts";
 import {
 	createPlannerPromptEnvelope,
 	executePlannerPrompt,
 	parsePlannerPlanContent,
 } from "./workflow/planner-runtime.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
+import type { ExecutionMode, ModeDecision } from "./workflow/types.ts";
 import type { WorkflowView } from "./workflow/view.ts";
 
 // ============================================================================
@@ -159,6 +177,7 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
+	| AutonomousWorkflowEvent
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -199,7 +218,21 @@ export type AgentSessionEvent =
 	  }
 	| { type: "summarization_retry_finished" }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "bash_execution_update"; id?: string; delta: string };
+	| { type: "bash_execution_update"; id?: string; delta: string }
+	| {
+			type: "workflow_mode_decided";
+			decision: ModeDecision;
+	  }
+	| {
+			type: "workflow_waiting_for_user";
+			kind: "clarification" | "approval";
+			workflowId?: string;
+			questions?: readonly RequiredClarification[];
+	  }
+	| {
+			type: "workflow_result";
+			workflow: WorkflowView;
+	  };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -308,6 +341,16 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
+interface PendingWorkflowClarification {
+	readonly requestText: string;
+	readonly questions: readonly RequiredClarification[];
+}
+
+interface WorkflowModePreflight {
+	readonly requestText: string;
+	readonly decision: ModeDecision;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -341,6 +384,13 @@ export class AgentSession {
 	private _idleWaitPromise: Promise<void> | undefined;
 	private _resolveIdleWait: (() => void) | undefined;
 	private _workflowTrackingEnabled = false;
+	private _workflowMode: ExecutionMode = "direct";
+	private _workflowModeExplicit = false;
+	private _workflowAutomationEnabled = false;
+	private _autonomousWorkflowRunner: AutonomousWorkflowRunner | undefined;
+	private _autonomousWorkflowId: string | undefined;
+	private _latestWorkflowAutomationResult: WorkflowAutomationResult | undefined;
+	private _pendingWorkflowClarification: PendingWorkflowClarification | undefined;
 	/** The workflow adapter for the in-flight Direct workflow, if any. */
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
@@ -878,6 +928,7 @@ export class AgentSession {
 	 * Call this when completely done with the session.
 	 */
 	dispose(): void {
+		this._autonomousWorkflowRunner?.stop();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -1109,9 +1160,218 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Enable CLI Workflow creation for accepted top-level prompts. */
-	enableWorkflowTracking(): void {
+	enableWorkflowTracking(mode?: ExecutionMode, automationEnabled = false): void {
 		this._workflowTrackingEnabled = true;
+		this._workflowMode = mode ?? "direct";
+		this._workflowModeExplicit = mode !== undefined;
+		this._workflowAutomationEnabled = automationEnabled;
+		this._recoverPendingWorkflowClarification();
 		this._planWorkflowRuntime ??= PlanWorkflowRuntime.recoverLatest(this.sessionManager);
+		if (
+			this._workflowAutomationEnabled &&
+			this._planWorkflowRuntime &&
+			["executing", "verifying"].includes(this._planWorkflowRuntime.workflow.status)
+		) {
+			this._kickWorkflowAutomation();
+		}
+	}
+
+	get workflowMode(): ExecutionMode {
+		return this._workflowMode;
+	}
+
+	get workflowAutomationEnabled(): boolean {
+		return this._workflowAutomationEnabled;
+	}
+
+	get workflowClarificationPending(): boolean {
+		return this._pendingWorkflowClarification !== undefined;
+	}
+
+	setWorkflowMode(mode: ExecutionMode): void {
+		this._workflowMode = mode;
+		this._workflowModeExplicit = true;
+		this._autonomousWorkflowRunner?.stop();
+		this._autonomousWorkflowRunner = undefined;
+		this._autonomousWorkflowId = undefined;
+	}
+
+	setWorkflowAutomationEnabled(enabled: boolean): void {
+		this._workflowAutomationEnabled = enabled;
+		this._autonomousWorkflowRunner?.stop();
+		this._autonomousWorkflowRunner = undefined;
+		this._autonomousWorkflowId = undefined;
+		if (enabled) {
+			this._kickWorkflowAutomation();
+		}
+	}
+
+	async pumpWorkflow(): Promise<WorkflowAutomationResult | undefined> {
+		const runtime = this._planWorkflowRuntime;
+		if (!runtime || runtime.isTerminal) {
+			return undefined;
+		}
+		const result = await this._getAutonomousWorkflowRunner(runtime).pump();
+		this._latestWorkflowAutomationResult = result;
+		return result;
+	}
+
+	async waitForWorkflowAutomation(): Promise<WorkflowAutomationResult | undefined> {
+		const runtime = this._planWorkflowRuntime;
+		if (!runtime || runtime.isTerminal || !this._workflowAutomationEnabled) {
+			return undefined;
+		}
+		const result = await this._getAutonomousWorkflowRunner(runtime).pump();
+		this._latestWorkflowAutomationResult = result;
+		return result;
+	}
+
+	async submitWorkflowClarification(answer: string): Promise<void> {
+		if (!this._pendingWorkflowClarification) {
+			throw new Error("No Workflow clarification is awaiting an answer");
+		}
+		if (!answer.trim()) {
+			throw new Error("Workflow clarification answer cannot be empty");
+		}
+		await this.prompt(answer, { expandPromptTemplates: false, source: "rpc" });
+	}
+
+	decideWorkflowPlan(action: "approve" | "reject" | "revise", comment: string): void {
+		const runtime = this._planWorkflowRuntime;
+		if (!runtime || runtime.workflow.status !== "awaiting_approval") {
+			throw new Error("No Plan is awaiting a decision");
+		}
+		const normalizedComment = comment.trim();
+		if (!normalizedComment) {
+			throw new Error("Plan decision comment cannot be empty");
+		}
+		if (action === "approve") {
+			runtime.approve(normalizedComment);
+			this._kickWorkflowAutomation();
+			return;
+		}
+		if (action === "reject") {
+			runtime.reject(normalizedComment);
+			return;
+		}
+		runtime.revise(normalizedComment);
+		this._pendingPlanRevisionRequest = normalizedComment;
+		this._nextWorkflowMode = "plan";
+	}
+
+	private _getAutonomousWorkflowRunner(runtime: PlanWorkflowRuntime): AutonomousWorkflowRunner {
+		if (this._autonomousWorkflowRunner && this._autonomousWorkflowId === runtime.workflow.id) {
+			return this._autonomousWorkflowRunner;
+		}
+		const maxConcurrency = Math.max(
+			1,
+			runtime.workflow.budget.maxConcurrentAgents ?? 4,
+			runtime.workflow.budget.maxConcurrentJobs ?? 4,
+		);
+		this._autonomousWorkflowId = runtime.workflow.id;
+		this._autonomousWorkflowRunner = new AutonomousWorkflowRunner({
+			runtime,
+			subagentRuntime: this._getSubagentRuntime(),
+			jobRuntime: this._getJobRuntime(),
+			deliveryRuntime: this._getDeliveryRuntime(),
+			policy: createWorkflowAutomationPolicy(this._workflowMode, {
+				enabled: this._workflowAutomationEnabled,
+				maxConcurrency,
+			}),
+			onExecution: (execution) => this._trackWorkflowExecution(execution),
+			onEvent: (event) => {
+				this._emit(event);
+				if (event.type === "workflow_automation_waiting" && event.reason === "terminal") {
+					const workflow = this.getWorkflowView();
+					if (workflow) {
+						this._emit({ type: "workflow_result", workflow });
+					}
+				}
+			},
+		});
+		return this._autonomousWorkflowRunner;
+	}
+
+	private _kickWorkflowAutomation(): void {
+		const runtime = this._planWorkflowRuntime;
+		if (!runtime || runtime.isTerminal || !this._workflowAutomationEnabled) {
+			return;
+		}
+		void this._getAutonomousWorkflowRunner(runtime)
+			.pump()
+			.then((result) => {
+				this._latestWorkflowAutomationResult = result;
+			})
+			.catch((error) => {
+				if (!runtime.isTerminal) {
+					runtime.failDelivery(
+						`Workflow automation failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			});
+	}
+
+	private _trackWorkflowExecution(execution: WorkflowTaskExecution): void {
+		if (execution.subagent) {
+			this._trackSubagentExecution(execution.subagent);
+		}
+		if (execution.job) {
+			this._trackJobExecution(execution.job);
+		}
+	}
+
+	private _appendWorkflowAutomationEntry(data: unknown): void {
+		const entryId = this.sessionManager.appendCustomEntry("workflow-automation", data);
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) {
+			this._emit({ type: "entry_appended", entry });
+		}
+	}
+
+	private _recoverPendingWorkflowClarification(): void {
+		let pending: PendingWorkflowClarification | undefined;
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== "workflow-automation") {
+				continue;
+			}
+			const data = entry.data;
+			if (typeof data !== "object" || data === null || !("kind" in data)) {
+				continue;
+			}
+			if (data.kind === "clarification_answered") {
+				pending = undefined;
+				continue;
+			}
+			if (
+				data.kind !== "clarification_requested" ||
+				!("requestText" in data) ||
+				typeof data.requestText !== "string" ||
+				!("questions" in data) ||
+				!Array.isArray(data.questions)
+			) {
+				continue;
+			}
+			pending = {
+				requestText: data.requestText,
+				questions: structuredClone(data.questions) as RequiredClarification[],
+			};
+		}
+		this._pendingWorkflowClarification = pending;
+	}
+
+	private _showWorkflowAutomationMessage(lines: readonly string[]): void {
+		const message = {
+			role: "custom" as const,
+			customType: "workflow",
+			content: lines.join("\n"),
+			display: true,
+			details: {
+				workflow: this.getWorkflowView(),
+			},
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{ readonly workflow: WorkflowView | undefined }>;
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
 	}
 
 	/**
@@ -1122,6 +1382,7 @@ export class AgentSession {
 	 * Returns false when there is no active workflow to cancel.
 	 */
 	async cancelWorkflow(reason = "User cancelled the workflow"): Promise<boolean> {
+		this._autonomousWorkflowRunner?.stop();
 		const adapter = this._activeWorkflowAdapter;
 		if (adapter && !adapter.finalReport) {
 			await adapter.cancel(reason);
@@ -1143,6 +1404,38 @@ export class AgentSession {
 		return false;
 	}
 
+	async upgradeDirectWorkflowToPlan(reason: string): Promise<boolean> {
+		const adapter = this._activeWorkflowAdapter;
+		const view = adapter?.view;
+		if (!adapter || !view || view.workflow.status !== "executing") {
+			return false;
+		}
+		const decision = decideDirectPlanUpgrade(
+			{
+				complexity: "high",
+				riskLevel: "medium",
+				confidence: "low",
+				reason,
+			},
+			new Date().toISOString(),
+		);
+		if (decision.action !== "upgrade_to_plan") {
+			return false;
+		}
+		await adapter.upgradeToPlan(decision);
+		const runtime = PlanWorkflowRuntime.recoverLatest(this.sessionManager, {}, view.workflow.id);
+		if (!runtime || runtime.workflow.status !== "planning") {
+			throw new Error(`Direct Workflow ${view.workflow.id} did not recover in Planning state`);
+		}
+		this._planWorkflowRuntime = runtime;
+		this._pendingPlanRevisionRequest = [
+			`Direct-to-Plan upgrade: ${reason}`,
+			`Existing changed files: ${view.workflow.result?.changedFiles.join(", ") || "(see Workflow task modifications)"}`,
+		].join("\n");
+		await this._runPlannerWorkflow(runtime.workflow.request.text);
+		return true;
+	}
+
 	/** Return the latest terminal Direct Workflow report for this AgentSession. */
 	getLatestWorkflowReport(): WorkflowFinalReport | undefined {
 		return this._latestWorkflowReport ? structuredClone(this._latestWorkflowReport) : undefined;
@@ -1152,16 +1445,36 @@ export class AgentSession {
 	getWorkflowView(): WorkflowView | undefined {
 		const active = this._activeWorkflowAdapter?.view;
 		if (active) {
-			return structuredClone(active);
+			return this._withWorkflowAutomation(active);
 		}
 		const planRuntime = this._planWorkflowRuntime;
 		if (planRuntime) {
 			const workflowId = planRuntime.workflow.id;
-			return structuredClone(
+			return this._withWorkflowAutomation(
 				planRuntime.view(this._subagentRuntime?.list(workflowId) ?? [], this._jobRuntime?.jobs(workflowId) ?? []),
 			);
 		}
-		return this._latestWorkflowView ? structuredClone(this._latestWorkflowView) : undefined;
+		return this._latestWorkflowView ? this._withWorkflowAutomation(this._latestWorkflowView) : undefined;
+	}
+
+	private _withWorkflowAutomation(view: WorkflowView): WorkflowView {
+		const waitingReason =
+			this._latestWorkflowAutomationResult?.workflowId === view.workflow.id
+				? this._latestWorkflowAutomationResult.waitingReason
+				: undefined;
+		const automationStatus = this._workflowAutomationEnabled
+			? `automation:${this._autonomousWorkflowRunner?.isRunning ? "running" : (waitingReason ?? "idle")}`
+			: "automation:off";
+		return {
+			...structuredClone(view),
+			statusLine: `${view.statusLine} | mode:${this._workflowMode} | ${automationStatus}`,
+			automation: {
+				enabled: this._workflowAutomationEnabled,
+				mode: this._workflowMode,
+				running: this._autonomousWorkflowRunner?.isRunning ?? false,
+				waitingReason,
+			},
+		};
 	}
 
 	/** Return the current or latest authoritative Workflow status line for CLI presentation. */
@@ -1184,7 +1497,11 @@ export class AgentSession {
 
 	private _trackSubagentExecution(execution: SubagentTaskExecution): void {
 		this._subagentTaskCompletions.set(execution.agent.id, execution.completion);
-		void execution.completion.catch(() => undefined);
+		void execution.completion
+			.catch(() => undefined)
+			.finally(() => {
+				this._kickWorkflowAutomation();
+			});
 	}
 
 	private _getJobRuntime(): JobRuntime {
@@ -1208,10 +1525,137 @@ export class AgentSession {
 
 	private _trackJobExecution(execution: JobTaskExecution): void {
 		this._jobTaskCompletions.set(execution.job.id, execution.completion);
-		void execution.completion.catch(() => undefined);
+		void execution.completion
+			.catch(() => undefined)
+			.finally(() => {
+				this._kickWorkflowAutomation();
+			});
 	}
 
-	private async _runPlannerWorkflow(requestText: string): Promise<void> {
+	private async _preflightWorkflowMode(requestText: string): Promise<WorkflowModePreflight | undefined> {
+		let effectiveRequestText = requestText;
+		let clarificationContext: string | undefined;
+		if (this._pendingWorkflowClarification) {
+			const pending = this._pendingWorkflowClarification;
+			clarificationContext = [
+				"Questions:",
+				...pending.questions.map(({ id, question }) => `${id}: ${question}`),
+				"",
+				`User answer: ${requestText}`,
+			].join("\n");
+			effectiveRequestText = `${pending.requestText}\n\nClarification answer:\n${requestText}`;
+			this._appendWorkflowAutomationEntry({
+				kind: "clarification_answered",
+				requestText: pending.requestText,
+				answer: requestText,
+				answeredAt: new Date().toISOString(),
+			});
+			this._pendingWorkflowClarification = undefined;
+		}
+
+		const decidedAt = new Date().toISOString();
+		if (this._nextWorkflowMode === "plan" || this._workflowMode === "plan") {
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ requestedMode: "plan" }),
+				reason: "User explicitly selected Plan mode",
+				riskLevel: "low",
+				decidedAt,
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText: effectiveRequestText, decision };
+		}
+		if (requiresPlanMode({ text: effectiveRequestText })) {
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ forcePlan: true }),
+				reason:
+					"Safety policy requires Plan mode for destructive, release, migration, or permission-sensitive work",
+				riskLevel: "high",
+				decidedAt,
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText: effectiveRequestText, decision };
+		}
+		if (this._workflowMode === "direct") {
+			const explicitlySelected = this._workflowModeExplicit;
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ requestedMode: explicitlySelected ? "direct" : undefined }),
+				reason: explicitlySelected
+					? "User explicitly selected Direct mode"
+					: "No explicit mode or Agent recommendation was available; using the Direct default",
+				riskLevel: "low",
+				decidedAt,
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText: effectiveRequestText, decision };
+		}
+
+		try {
+			const envelope = createModeAdvisorPromptEnvelope({
+				createdAt: decidedAt,
+				requestText: effectiveRequestText,
+				clarificationContext,
+			});
+			await executeModeAdvisorPrompt(this, envelope);
+			const message = this._findLastAssistantMessage();
+			if (!message) {
+				throw new Error("Mode Advisor completed without an Assistant message");
+			}
+			const result = parseModeAdvisorResult(contentText(message.content, ""));
+			if (result.clarification.required) {
+				const pending = {
+					requestText: effectiveRequestText,
+					questions: result.clarification.questions,
+				} satisfies PendingWorkflowClarification;
+				this._pendingWorkflowClarification = pending;
+				this._appendWorkflowAutomationEntry({
+					kind: "clarification_requested",
+					requestText: pending.requestText,
+					questions: pending.questions,
+					requestedAt: decidedAt,
+				});
+				this._emit({
+					type: "workflow_waiting_for_user",
+					kind: "clarification",
+					questions: pending.questions,
+				});
+				this._showWorkflowAutomationMessage([
+					"Workflow requires clarification:",
+					...pending.questions.map(({ id, question }) => `- ${id}: ${question}`),
+					"Reply with the missing information to continue.",
+				]);
+				return undefined;
+			}
+			if (result.clarification.assumptions.length > 0) {
+				effectiveRequestText = [
+					effectiveRequestText,
+					"",
+					"Safe assumptions selected during Workflow preflight:",
+					...result.clarification.assumptions.map(({ id, answer, reason }) => `- ${id}: ${answer} (${reason})`),
+				].join("\n");
+			}
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ agentAdvice: result.advice }),
+				reason: result.advice.reason,
+				riskLevel: result.advice.riskLevel,
+				decidedAt,
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText: effectiveRequestText, decision };
+		} catch (error) {
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ forcePlan: true }),
+				reason: `Mode Advisor unavailable; conservatively selected Plan: ${
+					error instanceof Error ? error.message : String(error)
+				}`,
+				riskLevel: "medium",
+				decidedAt,
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText: effectiveRequestText, decision };
+		}
+	}
+
+	private async _runPlannerWorkflow(requestText: string, modeDecision?: ModeDecision): Promise<void> {
 		let runtime = this._planWorkflowRuntime;
 		if (!runtime || runtime.isTerminal || runtime.workflow.status !== "planning") {
 			runtime = PlanWorkflowRuntime.start(this.sessionManager, {
@@ -1221,8 +1665,11 @@ export class AgentSession {
 					requestedMode: "plan",
 					attachments: [],
 				},
+				modeDecision,
 			});
 			this._planWorkflowRuntime = runtime;
+			this._autonomousWorkflowRunner = undefined;
+			this._autonomousWorkflowId = undefined;
 		}
 		const workflow = runtime.workflow;
 		const rootTask = runtime.tasks.find(({ id }) => id === workflow.rootTaskId);
@@ -1248,9 +1695,14 @@ export class AgentSession {
 		runtime.submit(parsePlannerPlanContent(contentText(message.content, "")));
 		this._pendingPlanRevisionRequest = undefined;
 		this._nextWorkflowMode = "direct";
+		this._emit({
+			type: "workflow_waiting_for_user",
+			kind: "approval",
+			workflowId: runtime.workflow.id,
+		});
 	}
 
-	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
+	private _startDirectWorkflow(requestText: string, modeDecision?: ModeDecision): AgentSessionAdapter {
 		if (this._planWorkflowRuntime?.isTerminal) {
 			this._planWorkflowRuntime = undefined;
 		}
@@ -1261,12 +1713,14 @@ export class AgentSession {
 			request: {
 				text: requestText,
 				cwd: this._cwd,
+				requestedMode: modeDecision?.source === "user" ? "direct" : undefined,
 				attachments: [],
 			},
+			modeDecision,
 		});
 	}
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[], emitSettled = true): Promise<void> {
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
@@ -1276,7 +1730,12 @@ export class AgentSession {
 		} finally {
 			this._systemPromptOverride = undefined;
 			this._flushPendingBashMessages();
-			await this._emitAgentSettled();
+			if (emitSettled) {
+				await this._emitAgentSettled();
+			} else {
+				this._isAgentRunActive = false;
+				this._resolveIdleWaitIfIdle();
+			}
 		}
 	}
 
@@ -1324,6 +1783,7 @@ export class AgentSession {
 		const preflightResult = options?.preflightResult;
 		let messages: AgentMessage[] | undefined;
 		let directRequestText: string | undefined;
+		let directModeDecision: ModeDecision | undefined;
 		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
@@ -1362,13 +1822,33 @@ export class AgentSession {
 					currentImages = inputResult.images ?? currentImages;
 				}
 			}
-			if (this._workflowTrackingEnabled && (options?.source ?? "interactive") !== "extension") {
-				if (this._nextWorkflowMode === "plan" && !this.isStreaming) {
-					await this._runPlannerWorkflow(currentText);
+			if (this._workflowTrackingEnabled && (options?.source ?? "interactive") !== "extension" && !this.isStreaming) {
+				const activePlan = this._planWorkflowRuntime;
+				if (
+					activePlan &&
+					!activePlan.isTerminal &&
+					activePlan.workflow.status !== "planning" &&
+					this._pendingWorkflowClarification === undefined
+				) {
+					throw new Error(
+						`Plan Workflow ${activePlan.workflow.id} is ${activePlan.workflow.status}; approve, revise, reject, or cancel it before starting another request`,
+					);
+				}
+				const preflight = await this._preflightWorkflowMode(currentText);
+				if (!preflight) {
+					await this._emitAgentSettled();
+					preflightResult?.(true);
+					return;
+				}
+				currentText = preflight.requestText;
+				if (preflight.decision.mode === "plan") {
+					await this._runPlannerWorkflow(currentText, preflight.decision);
+					await this._emitAgentSettled();
 					preflightResult?.(true);
 					return;
 				}
 				directRequestText = currentText;
+				directModeDecision = preflight.decision;
 			}
 
 			// Expand skill commands (/skill:name args) and prompt templates (/template args)
@@ -1476,7 +1956,7 @@ export class AgentSession {
 			}
 
 			if (directRequestText !== undefined) {
-				workflowAdapter = this._startDirectWorkflow(directRequestText);
+				workflowAdapter = this._startDirectWorkflow(directRequestText, directModeDecision);
 				this._activeWorkflowAdapter = workflowAdapter;
 			}
 		} catch (error) {
@@ -1490,7 +1970,7 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		try {
-			await this._runAgentPrompt(messages);
+			await this._runAgentPrompt(messages, (options?.source ?? "interactive") !== "extension");
 		} finally {
 			const finalReport = workflowAdapter?.finalReport;
 			if (finalReport) {
@@ -1518,6 +1998,11 @@ export class AgentSession {
 			commandName !== "/cancel" &&
 			commandName !== "/workflow-cancel" &&
 			commandName !== "/plan" &&
+			commandName !== "/direct" &&
+			commandName !== "/auto" &&
+			commandName !== "/workflow-auto" &&
+			commandName !== "/workflow-pump" &&
+			commandName !== "/upgrade-plan" &&
 			commandName !== "/approve" &&
 			commandName !== "/reject" &&
 			commandName !== "/replan" &&
@@ -1534,7 +2019,15 @@ export class AgentSession {
 		}
 
 		let lines: readonly string[];
-		if ((commandName === "/workflow" || commandName === "/plan" || commandName === "/tasks") && args.length > 0) {
+		if (
+			(commandName === "/workflow" ||
+				commandName === "/plan" ||
+				commandName === "/direct" ||
+				commandName === "/auto" ||
+				commandName === "/tasks" ||
+				commandName === "/workflow-pump") &&
+			args.length > 0
+		) {
 			lines = [`Usage: ${commandName}`];
 		} else if (commandName === "/workflow-cancel" && args.length > 0) {
 			lines = ["Usage: /workflow-cancel"];
@@ -1551,6 +2044,36 @@ export class AgentSession {
 				this._nextWorkflowMode = "plan";
 				lines = ["Plan mode selected. The next request will run the read-only Planner."];
 			}
+		} else if (commandName === "/direct") {
+			this.setWorkflowMode("direct");
+			lines = ["Workflow mode set to Direct."];
+		} else if (commandName === "/auto") {
+			this.setWorkflowMode("auto");
+			lines = ["Workflow mode set to Auto."];
+		} else if (commandName === "/workflow-auto") {
+			const setting = args[0];
+			if (args.length !== 1 || (setting !== "on" && setting !== "off")) {
+				lines = ["Usage: /workflow-auto on|off"];
+			} else {
+				this.setWorkflowAutomationEnabled(setting === "on");
+				lines = [`Workflow automation ${setting === "on" ? "enabled" : "disabled"}.`];
+			}
+		} else if (commandName === "/workflow-pump") {
+			const result = await this.pumpWorkflow();
+			lines = result
+				? [
+						`Workflow pump: ${result.status}`,
+						`Actions: ${result.actions.length}`,
+						`Waiting: ${result.waitingReason ?? "(none)"}`,
+					]
+				: ["No active Plan Workflow can be advanced."];
+		} else if (commandName === "/upgrade-plan") {
+			const upgraded = await this.upgradeDirectWorkflowToPlan(
+				args.join(" ") || "Direct execution discovered complexity requiring Plan mode",
+			);
+			lines = upgraded
+				? (this._planWorkflowRuntime?.statusLines ?? ["Direct Workflow upgraded to Plan."])
+				: ["No executing Direct Workflow can be upgraded."];
 		} else if (commandName === "/approve") {
 			const runtime = this._planWorkflowRuntime;
 			if (!runtime || runtime.workflow.status !== "awaiting_approval") {
@@ -1558,6 +2081,7 @@ export class AgentSession {
 			} else {
 				runtime.approve(args.join(" ") || "Approved by user");
 				lines = runtime.statusLines;
+				this._kickWorkflowAutomation();
 			}
 		} else if (commandName === "/reject") {
 			const runtime = this._planWorkflowRuntime;
@@ -1613,6 +2137,7 @@ export class AgentSession {
 			} else if (action === "retry") {
 				runtime.retryTask(taskId);
 				lines = runtime.taskDetails(taskId);
+				this._kickWorkflowAutomation();
 			} else {
 				runtime.cancelTask(taskId, detailParts.join(" ") || "Cancelled by user");
 				runtime.refreshTaskReadiness();
@@ -1631,6 +2156,12 @@ export class AgentSession {
 				const requested = args[1] === undefined ? fallback : Number(args[1]);
 				if (!Number.isInteger(requested) || requested < 1) {
 					lines = ["Usage: /agents dispatch [max-concurrency]"];
+				} else if (this._workflowAutomationEnabled) {
+					const result = await this.pumpWorkflow();
+					lines = [
+						`Automatic Workflow pump requested; ${result?.actions.length ?? 0} action(s) observed.`,
+						...formatAgentList(this._subagentRuntime?.list(planRuntime.workflow.id) ?? []),
+					];
 				} else {
 					const subagentRuntime = this._getSubagentRuntime();
 					const executions = await planRuntime.startReadySubagents(subagentRuntime, requested);
@@ -1724,6 +2255,12 @@ export class AgentSession {
 				const requested = args[1] === undefined ? fallback : Number(args[1]);
 				if (!Number.isInteger(requested) || requested < 1) {
 					lines = ["Usage: /jobs dispatch [max-concurrency]"];
+				} else if (this._workflowAutomationEnabled) {
+					const result = await this.pumpWorkflow();
+					lines = [
+						`Automatic Workflow pump requested; ${result?.actions.length ?? 0} action(s) observed.`,
+						...formatJobs(this._jobRuntime?.jobs(planRuntime.workflow.id) ?? []),
+					];
 				} else {
 					const jobRuntime = this._getJobRuntime();
 					const executions = await planRuntime.startReadyJobs(jobRuntime, requested);
@@ -1790,6 +2327,9 @@ export class AgentSession {
 				lines = ["No Plan Workflow is ready for delivery verification."];
 			} else if (hasIncompleteTasks) {
 				lines = ["Delivery verification requires every executable Task to succeed first."];
+			} else if (this._workflowAutomationEnabled) {
+				const result = await this.pumpWorkflow();
+				lines = result ? runtime.statusLines : ["No Plan Workflow is ready for delivery verification."];
 			} else {
 				const result = await this._getDeliveryRuntime().run(runtime);
 				lines =
@@ -1804,7 +2344,7 @@ export class AgentSession {
 			const [action, id, ...detailParts] = args;
 			if (!action || action === "list") {
 				const workflows = PlanWorkflowRuntime.list(this.sessionManager).filter(
-					({ modeDecision }) => modeDecision?.mode === "plan",
+					({ modeDecision, currentPlanId }) => modeDecision?.mode === "plan" || currentPlanId !== undefined,
 				);
 				lines =
 					workflows.length === 0
@@ -1825,6 +2365,7 @@ export class AgentSession {
 					} else {
 						this._planWorkflowRuntime = recovered;
 						lines = recovered.statusLines;
+						this._kickWorkflowAutomation();
 					}
 				}
 			} else if (action === "retry" && id && detailParts.length === 0) {
@@ -1834,6 +2375,7 @@ export class AgentSession {
 				} else {
 					runtime.retryTask(id);
 					lines = runtime.taskDetails(id);
+					this._kickWorkflowAutomation();
 				}
 			} else if (action === "cancel" && detailParts.length === 0) {
 				const current = this._planWorkflowRuntime;

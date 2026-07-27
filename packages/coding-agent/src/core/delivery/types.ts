@@ -49,6 +49,7 @@ export interface ReadonlyReviewer {
 
 export interface DeliveryWorkflowPort {
 	readonly workflow: Workflow;
+	readonly deliveryFingerprint?: string;
 	readonly currentPlan: {
 		readonly verificationRequirements: readonly VerificationRequirement[];
 	};
@@ -63,6 +64,7 @@ export interface DeliveryWorkflowPort {
 			readonly id?: string;
 		};
 		readonly status: Extract<VerificationResult["status"], "passed" | "failed" | "skipped">;
+		readonly deliveryFingerprint?: string;
 		readonly summary: string;
 		readonly evidenceRefs?: readonly string[];
 		readonly command?: string;
@@ -74,6 +76,7 @@ export interface DeliveryWorkflowPort {
 		readonly summary: string;
 		readonly risks: readonly string[];
 		readonly unfinishedItems: readonly string[];
+		readonly deliveryFingerprint?: string;
 	}): void;
 	failDelivery(reason: string): void;
 }
@@ -86,4 +89,8 @@ export interface DeliveryRunResult {
 	readonly risks: readonly string[];
 	readonly unfinishedItems: readonly string[];
 	readonly usage: ResourceUsage;
+}
+
+export interface DeliveryRunOptions {
+	readonly allowRepair?: boolean;
 }

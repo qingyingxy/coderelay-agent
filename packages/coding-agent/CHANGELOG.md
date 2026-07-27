@@ -11,6 +11,7 @@
 - Added a Background Job Runtime with Command Task scheduling, incremental stdout/stderr logs, timeout and process-tree cleanup, completion notifications, and Job CLI controls.
 - Added a delivery and recovery runtime with scoped Diff ownership, read-only Review, Job-backed Test/Build verification, bounded Repair Tasks, Completion Gate, terminal reports, Workflow Snapshots, interrupted-resource recovery, and Resume CLI controls.
 - Added a unified Workflow view across interactive, Print, JSON, and RPC modes, richer Task/Agent/Job status, deterministic CLI evaluation, and an offline end-to-end showcase.
+- Added default Auto Mode and a single-pump autonomous Workflow runner that continues approved Task graphs through Agent/Job dispatch, delivery verification, bounded Repair, recovery, Print/JSON output, and explicit RPC controls without manual dispatch or verify commands.
 
 ## [0.82.1] - 2026-07-25
 

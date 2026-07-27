@@ -20,6 +20,7 @@ import type {
 	FailureRecord,
 	FileModificationRecord,
 	IsoDateTime,
+	ModeDecision,
 	Plan,
 	PlanContent,
 	PlanDecisionRecord,
@@ -58,6 +59,7 @@ export interface StartDirectWorkflowCommand extends WorkflowCommandBase {
 	readonly description?: string;
 	readonly budget?: BudgetLimit;
 	readonly verificationRequirements?: readonly VerificationRequirement[];
+	readonly modeDecision?: ModeDecision;
 }
 
 export interface StartPlanWorkflowCommand extends WorkflowCommandBase {
@@ -67,6 +69,7 @@ export interface StartPlanWorkflowCommand extends WorkflowCommandBase {
 	readonly title?: string;
 	readonly description?: string;
 	readonly budget?: BudgetLimit;
+	readonly modeDecision?: ModeDecision;
 }
 
 export interface SubmitPlanForApprovalCommand extends WorkflowCommandBase {
@@ -195,6 +198,7 @@ export interface RecordDeliveryVerificationCommand extends WorkflowCommandBase {
 		readonly id?: string;
 	};
 	readonly status: Extract<VerificationResult["status"], "passed" | "failed" | "skipped">;
+	readonly deliveryFingerprint?: string;
 	readonly summary: string;
 	readonly evidenceRefs?: readonly string[];
 	readonly command?: string;
@@ -212,6 +216,7 @@ export interface CompleteDeliveryWorkflowCommand extends WorkflowCommandBase {
 	readonly summary: string;
 	readonly risks?: readonly string[];
 	readonly unfinishedItems?: readonly string[];
+	readonly deliveryFingerprint?: string;
 }
 
 export interface RecoverInterruptedWorkflowCommand extends WorkflowCommandBase {
@@ -401,7 +406,9 @@ export class WorkflowController {
 		if (this.#store.getWorkflow(command.workflowId)) {
 			fail("controller.workflow_exists", `Workflow ${command.workflowId} already exists`);
 		}
-		const modeSelection = selectExecutionMode({ requestedMode: command.request.requestedMode });
+		const modeSelection = command.modeDecision
+			? { mode: command.modeDecision.mode, source: command.modeDecision.source }
+			: selectExecutionMode({ requestedMode: command.request.requestedMode });
 		if (modeSelection.mode !== "direct") {
 			fail("controller.mode_conflict", "A Direct workflow cannot override an explicit Plan mode request");
 		}
@@ -412,15 +419,22 @@ export class WorkflowController {
 
 		const occurredAt = this.#now();
 		const budget = structuredClone(command.budget ?? {});
-		const modeDecision = createModeDecision({
-			selection: modeSelection,
-			reason:
-				modeSelection.source === "user"
-					? "User explicitly selected Direct mode"
-					: "No explicit mode or Agent recommendation was available; using the Direct default",
-			riskLevel: "low",
-			decidedAt: occurredAt,
-		});
+		const modeDecision = command.modeDecision
+			? createModeDecision({
+					selection: modeSelection,
+					reason: command.modeDecision.reason,
+					riskLevel: command.modeDecision.riskLevel,
+					decidedAt: command.modeDecision.decidedAt,
+				})
+			: createModeDecision({
+					selection: modeSelection,
+					reason:
+						modeSelection.source === "user"
+							? "User explicitly selected Direct mode"
+							: "No explicit mode or Agent recommendation was available; using the Direct default",
+					riskLevel: "low",
+					decidedAt: occurredAt,
+				});
 		const workflow: Workflow = {
 			schemaVersion: WORKFLOW_SCHEMA_VERSION,
 			revision: 0,
@@ -519,7 +533,12 @@ export class WorkflowController {
 		if (this.#store.getPlan(command.planId)) {
 			fail("controller.plan_exists", `Plan ${command.planId} already exists`);
 		}
-		const modeSelection = selectExecutionMode({ requestedMode: "plan" });
+		const modeSelection = command.modeDecision
+			? { mode: command.modeDecision.mode, source: command.modeDecision.source }
+			: selectExecutionMode({ requestedMode: "plan" });
+		if (modeSelection.mode !== "plan") {
+			fail("controller.mode_conflict", "A Plan workflow requires a Plan mode decision");
+		}
 		const occurredAt = this.#now();
 		const budget = structuredClone(command.budget ?? {});
 		const workflow: Workflow = {
@@ -596,12 +615,19 @@ export class WorkflowController {
 				actor: { kind: "controller" },
 				causationId: workflowCreatedId,
 				payload: {
-					decision: createModeDecision({
-						selection: modeSelection,
-						reason: "User selected Plan mode",
-						riskLevel: "low",
-						decidedAt: occurredAt,
-					}),
+					decision: command.modeDecision
+						? createModeDecision({
+								selection: modeSelection,
+								reason: command.modeDecision.reason,
+								riskLevel: command.modeDecision.riskLevel,
+								decidedAt: command.modeDecision.decidedAt,
+							})
+						: createModeDecision({
+								selection: modeSelection,
+								reason: "User selected Plan mode",
+								riskLevel: "low",
+								decidedAt: occurredAt,
+							}),
 				},
 			},
 			{
@@ -1180,6 +1206,7 @@ export class WorkflowController {
 			id: command.verificationId,
 			workflowId: workflow.id,
 			requirementId: requirement.id,
+			deliveryFingerprint: command.deliveryFingerprint,
 			status: "running",
 			command: command.command ?? requirement.command,
 			summary,
@@ -1239,6 +1266,16 @@ export class WorkflowController {
 			fail("controller.failed_verification_required", "Repair requires a failed Verification");
 		}
 		const repairs = this.#store.listTasks(workflow.id).filter(({ kind }) => kind === "repair");
+		const existingRepair = repairs.find(
+			({ repairForVerificationId, status }) =>
+				repairForVerificationId === verification.id && !isTaskTerminalStatus(status),
+		);
+		if (existingRepair) {
+			fail(
+				"controller.repair_exists",
+				`Verification ${verification.id} already has active Repair Task ${existingRepair.id}`,
+			);
+		}
 		const maximumRepairs = workflow.budget.maxRetries ?? BUILTIN_AGENT_PROFILES.worker.defaultBudget.maxRetries ?? 0;
 		if (repairs.length >= maximumRepairs) {
 			fail("controller.repair_budget_exhausted", `Repair limit ${maximumRepairs} reached`);
@@ -1328,7 +1365,14 @@ export class WorkflowController {
 		if (tasks.length === 0 || tasks.some(({ status }) => status !== "succeeded")) {
 			fail("controller.tasks_incomplete", "All executable Tasks must succeed before completion");
 		}
-		const verifications = this.#store.listVerifications(workflow.id);
+		const verifications = this.#store
+			.listVerifications(workflow.id)
+			.filter(
+				(verification) =>
+					command.deliveryFingerprint === undefined ||
+					verification.deliveryFingerprint === command.deliveryFingerprint ||
+					verification.taskId !== undefined,
+			);
 		const latestByRequirement = new Map<string, VerificationResult>();
 		for (const verification of verifications) {
 			latestByRequirement.set(verification.requirementId, verification);

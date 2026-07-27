@@ -78,6 +78,23 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--workflow-mode flag", () => {
+		test("parses auto, direct, and plan", () => {
+			expect(parseArgs(["--workflow-mode", "auto"]).workflowMode).toBe("auto");
+			expect(parseArgs(["--workflow-mode", "direct"]).workflowMode).toBe("direct");
+			expect(parseArgs(["--workflow-mode", "plan"]).workflowMode).toBe("plan");
+		});
+
+		test("reports invalid or missing values", () => {
+			expect(parseArgs(["--workflow-mode", "unsafe"]).diagnostics).toEqual([
+				expect.objectContaining({ type: "error", message: expect.stringContaining("Invalid workflow mode") }),
+			]);
+			expect(parseArgs(["--workflow-mode"]).diagnostics).toEqual([
+				{ type: "error", message: "--workflow-mode requires a value" },
+			]);
+		});
+	});
+
 	describe("--resume flag", () => {
 		test("parses --resume flag", () => {
 			const result = parseArgs(["--resume"]);

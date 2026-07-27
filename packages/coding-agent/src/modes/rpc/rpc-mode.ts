@@ -456,6 +456,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
+					workflowMode: session.workflowMode,
+					workflowAutomationEnabled: session.workflowAutomationEnabled,
+					workflowClarificationPending: session.workflowClarificationPending,
 					workflow: session.getWorkflowView(),
 				};
 				return success(id, "get_state", state);
@@ -463,6 +466,37 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "get_workflow": {
 				return success(id, "get_workflow", { workflow: session.getWorkflowView() ?? null });
+			}
+
+			case "set_workflow_mode": {
+				session.setWorkflowMode(command.mode);
+				return success(id, "set_workflow_mode");
+			}
+
+			case "set_workflow_automation": {
+				session.setWorkflowAutomationEnabled(command.enabled);
+				return success(id, "set_workflow_automation");
+			}
+
+			case "pump_workflow": {
+				const result = await session.pumpWorkflow();
+				return success(id, "pump_workflow", { result: result ?? null });
+			}
+
+			case "decide_workflow_plan": {
+				session.decideWorkflowPlan(command.action, command.comment);
+				const workflow = session.getWorkflowView();
+				if (!workflow) {
+					return error(id, "decide_workflow_plan", "Workflow view is unavailable after Plan decision");
+				}
+				return success(id, "decide_workflow_plan", { workflow });
+			}
+
+			case "submit_workflow_clarification": {
+				await session.submitWorkflowClarification(command.answer);
+				return success(id, "submit_workflow_clarification", {
+					workflow: session.getWorkflowView() ?? null,
+				});
 			}
 
 			// =================================================================

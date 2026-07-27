@@ -11,6 +11,8 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { WorkflowAutomationResult } from "../../core/workflow/autonomous-workflow-types.ts";
+import type { ExecutionMode } from "../../core/workflow/types.ts";
 import type { WorkflowView } from "../../core/workflow/view.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
@@ -248,6 +250,29 @@ export class RpcClient {
 	 */
 	async getWorkflow(): Promise<WorkflowView | null> {
 		const response = await this.send({ type: "get_workflow" });
+		return this.getData<{ workflow: WorkflowView | null }>(response).workflow;
+	}
+
+	async setWorkflowMode(mode: ExecutionMode): Promise<void> {
+		await this.send({ type: "set_workflow_mode", mode });
+	}
+
+	async setWorkflowAutomation(enabled: boolean): Promise<void> {
+		await this.send({ type: "set_workflow_automation", enabled });
+	}
+
+	async pumpWorkflow(): Promise<WorkflowAutomationResult | null> {
+		const response = await this.send({ type: "pump_workflow" });
+		return this.getData<{ result: WorkflowAutomationResult | null }>(response).result;
+	}
+
+	async decideWorkflowPlan(action: "approve" | "reject" | "revise", comment: string): Promise<WorkflowView> {
+		const response = await this.send({ type: "decide_workflow_plan", action, comment });
+		return this.getData<{ workflow: WorkflowView }>(response).workflow;
+	}
+
+	async submitWorkflowClarification(answer: string): Promise<WorkflowView | null> {
+		const response = await this.send({ type: "submit_workflow_clarification", answer });
 		return this.getData<{ workflow: WorkflowView | null }>(response).workflow;
 	}
 

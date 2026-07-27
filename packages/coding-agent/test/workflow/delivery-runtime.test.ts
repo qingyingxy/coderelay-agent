@@ -252,6 +252,71 @@ describe("DeliveryRuntime", () => {
 		expect(plan.workflow.status).toBe("failed");
 		expect(plan.workflow.result?.reason).toContain("Repair limit 0 reached");
 	});
+
+	it("stops when a successful Repair produces no file changes", async () => {
+		const plan = createPlan("repair-no-change", false, 2);
+		const jobs = new JobRuntime({
+			processFactory: new SequencedFactory([0, 1, 1]),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const [implementation] = await plan.startReadyJobs(jobs, 1);
+		await implementation?.completion;
+		const delivery = new DeliveryRuntime({
+			jobRuntime: jobs,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		await delivery.run(plan);
+		const sessions = new FakeSubagentSessionFactory();
+		const subagents = new SubagentRuntime({
+			sessionFactory: sessions,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const [repair] = await plan.startReadySubagents(subagents, 1);
+		sessions.sessions[0]?.complete(subagentHandoff({ conclusion: "No change was needed" }));
+		await repair?.completion;
+
+		const result = await delivery.run(plan);
+
+		expect(result.status).toBe("failed");
+		expect(plan.workflow.result?.reason).toContain("produced no file changes");
+		expect(plan.tasks.filter(({ kind }) => kind === "repair")).toHaveLength(1);
+	});
+
+	it("stops when verification repeats the same failure after Repair", async () => {
+		const plan = createPlan("repair-repeat", false, 2);
+		const jobs = new JobRuntime({
+			processFactory: new SequencedFactory([0, 1, 1]),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const [implementation] = await plan.startReadyJobs(jobs, 1);
+		await implementation?.completion;
+		const delivery = new DeliveryRuntime({
+			jobRuntime: jobs,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		await delivery.run(plan);
+		const sessions = new FakeSubagentSessionFactory();
+		const subagents = new SubagentRuntime({
+			sessionFactory: sessions,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const [repair] = await plan.startReadySubagents(subagents, 1);
+		sessions.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "Repair changed the implementation",
+				changedFiles: ["src/fix.ts"],
+			}),
+		);
+		await repair?.completion;
+
+		const result = await delivery.run(plan);
+
+		expect(result.status).toBe("failed");
+		expect(plan.workflow.result?.reason).toContain("repeated the same failure");
+		expect(plan.tasks.filter(({ kind }) => kind === "repair")).toHaveLength(1);
+	});
 });
 
 describe("DiffCollector", () => {

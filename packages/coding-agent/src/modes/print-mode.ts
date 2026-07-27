@@ -37,6 +37,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
 	let disposed = false;
+	let workflowResultEmitted = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeRuntime = async (): Promise<void> => {
@@ -105,6 +106,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
 			if (mode === "json") {
+				if (event.type === "workflow_result") {
+					workflowResultEmitted = true;
+				}
 				writeRawStdout(`${JSON.stringify(event)}\n`);
 			}
 		});
@@ -128,8 +132,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			await session.prompt(message);
 		}
 
+		await session.waitForWorkflowAutomation();
 		const workflow = session.getWorkflowView();
-		if (mode === "json" && workflow) {
+		if (mode === "json" && workflow && !workflowResultEmitted) {
 			writeRawStdout(`${JSON.stringify({ type: "workflow_result", workflow })}\n`);
 		}
 
@@ -154,7 +159,13 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 				writeRawStdout(`[workflow]\n${workflow.reportLines.join("\n")}\n`);
 			}
 		}
-		if (workflow?.workflow.result?.status === "failed" || workflow?.workflow.result?.status === "cancelled") {
+		if (
+			session.workflowClarificationPending ||
+			workflow?.workflow.status === "awaiting_approval" ||
+			workflow?.workflow.status === "blocked" ||
+			workflow?.workflow.result?.status === "failed" ||
+			workflow?.workflow.result?.status === "cancelled"
+		) {
 			exitCode = 1;
 		}
 

@@ -12,6 +12,8 @@ import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
+import type { WorkflowAutomationResult } from "../../core/workflow/autonomous-workflow-types.ts";
+import type { ExecutionMode } from "../../core/workflow/types.ts";
 import type { WorkflowView } from "../../core/workflow/view.ts";
 
 // ============================================================================
@@ -29,6 +31,16 @@ export type RpcCommand =
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_workflow" }
+	| { id?: string; type: "set_workflow_mode"; mode: ExecutionMode }
+	| { id?: string; type: "set_workflow_automation"; enabled: boolean }
+	| { id?: string; type: "pump_workflow" }
+	| {
+			id?: string;
+			type: "decide_workflow_plan";
+			action: "approve" | "reject" | "revise";
+			comment: string;
+	  }
+	| { id?: string; type: "submit_workflow_clarification"; answer: string }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -107,6 +119,9 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	messageCount: number;
 	pendingMessageCount: number;
+	workflowMode: ExecutionMode;
+	workflowAutomationEnabled: boolean;
+	workflowClarificationPending: boolean;
 	workflow?: WorkflowView;
 }
 
@@ -129,6 +144,23 @@ export type RpcResponse =
 			id?: string;
 			type: "response";
 			command: "get_workflow";
+			success: true;
+			data: { workflow: WorkflowView | null };
+	  }
+	| { id?: string; type: "response"; command: "set_workflow_mode"; success: true }
+	| { id?: string; type: "response"; command: "set_workflow_automation"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "pump_workflow";
+			success: true;
+			data: { result: WorkflowAutomationResult | null };
+	  }
+	| { id?: string; type: "response"; command: "decide_workflow_plan"; success: true; data: { workflow: WorkflowView } }
+	| {
+			id?: string;
+			type: "response";
+			command: "submit_workflow_clarification";
 			success: true;
 			data: { workflow: WorkflowView | null };
 	  }
