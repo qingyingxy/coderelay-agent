@@ -108,6 +108,21 @@ function validatePlanStep(
 	if (!step.title.trim() || !step.description.trim()) {
 		violations.push(violation("plan.step_content_required", `Plan step ${step.id} requires a title and description`));
 	}
+	const stepKind = step.kind ?? "agent";
+	if (stepKind !== "agent" && stepKind !== "command") {
+		violations.push(violation("plan.step_kind_invalid", `Plan step ${step.id} has an invalid kind`));
+	}
+	if (stepKind === "command" && !step.command?.trim()) {
+		violations.push(violation("plan.step_command_required", `Command Plan step ${step.id} requires a command`));
+	}
+	if (stepKind === "command" && step.verificationRequirementIds.length === 0) {
+		violations.push(
+			violation("plan.step_verification_required", `Command Plan step ${step.id} requires verification`),
+		);
+	}
+	if (stepKind !== "command" && step.command !== undefined) {
+		violations.push(violation("plan.step_unexpected_command", `Agent Plan step ${step.id} cannot define a command`));
+	}
 	if (hasDuplicates(step.dependsOn)) {
 		violations.push(violation("plan.duplicate_step_dependency", `Plan step ${step.id} dependencies must be unique`));
 	}
@@ -404,6 +419,12 @@ export function validateTask(task: Task): readonly DomainViolation[] {
 	}
 	if (task.kind === "control" && task.assignment) {
 		violations.push(violation("task.control_assignment", "Control task cannot have an executor assignment"));
+	}
+	if (task.kind === "command" && !task.command?.trim()) {
+		violations.push(violation("task.command_required", "Command Task requires a command"));
+	}
+	if (task.kind !== "command" && task.command !== undefined) {
+		violations.push(violation("task.unexpected_command", "Only a Command Task can define a command"));
 	}
 	if (
 		task.assignment?.agentDepth !== undefined &&

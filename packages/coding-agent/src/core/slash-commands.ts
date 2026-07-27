@@ -48,6 +48,16 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Spawn, inspect, steer, wait for, interrupt, or retry a Subagent",
 		argumentHint: "<spawn|show|send|wait|interrupt|retry> <id> [details]",
 	},
+	{
+		name: "jobs",
+		description: "List background Jobs or dispatch ready Command Tasks",
+		argumentHint: "[dispatch [max-concurrency]]",
+	},
+	{
+		name: "job",
+		description: "Run, inspect, stream, wait for, or kill a background Job",
+		argumentHint: "<run|show|logs|wait|kill> <id> [details]",
+	},
 	{ name: "changelog", description: "Show changelog entries" },
 	{ name: "hotkeys", description: "Show all keyboard shortcuts" },
 	{ name: "fork", description: "Create a new fork from a previous user message" },

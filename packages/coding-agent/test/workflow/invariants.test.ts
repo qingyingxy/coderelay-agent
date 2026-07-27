@@ -246,6 +246,12 @@ describe("task invariants", () => {
 		).toEqual(["task.control_assignment"]);
 	});
 
+	it("requires commands only on Command Tasks", () => {
+		expect(codes(validateTask(createTask({ kind: "command" })))).toEqual(["task.command_required"]);
+		expect(codes(validateTask(createTask({ command: "npm run check" })))).toEqual(["task.unexpected_command"]);
+		expect(validateTask(createTask({ kind: "command", command: "npm run check" }))).toEqual([]);
+	});
+
 	it("requires exactly succeeded tasks to carry a result", () => {
 		expect(codes(validateTask(createTask({ status: "succeeded" })))).toEqual(["task.result_required"]);
 		expect(

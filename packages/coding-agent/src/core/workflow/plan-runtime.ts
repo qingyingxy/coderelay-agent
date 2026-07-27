@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import type { JobRuntime } from "../jobs/job-runtime.ts";
+import type { Job } from "../jobs/types.ts";
 import type { SessionManager } from "../session-manager.ts";
 import { aggregateHandoffs } from "../subagents/handoff.ts";
 import type { SubagentRuntime } from "../subagents/subagent-runtime.ts";
@@ -40,6 +42,11 @@ export interface StartSubagentTaskInput {
 export interface SubagentTaskExecution {
 	readonly agent: AgentInstance;
 	readonly completion: Promise<AgentRunResult>;
+}
+
+export interface JobTaskExecution {
+	readonly job: Job;
+	readonly completion: Promise<Job>;
 }
 
 export class PlanWorkflowRuntime {
@@ -189,6 +196,101 @@ export class PlanWorkflowRuntime {
 		}).select(this.tasks);
 	}
 
+	selectJobDispatches(maxConcurrency: number): readonly TaskDispatch[] {
+		const budget = this.workflow.budget;
+		return new TaskScheduler({
+			maxConcurrency,
+			maxConcurrentAgents: 0,
+			maxConcurrentJobs: budget.maxConcurrentJobs,
+			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+		})
+			.select(this.tasks)
+			.filter(({ executorKind }) => executorKind === "job");
+	}
+
+	async startJobTask(runtime: JobRuntime, taskId: string): Promise<JobTaskExecution> {
+		const workflow = this.workflow;
+		const task = this.#controller.getTask(taskId);
+		if (!task || task.workflowId !== workflow.id) {
+			throw new Error(`Task ${taskId} does not exist in workflow ${workflow.id}`);
+		}
+		if (workflow.status !== "executing" || task.status !== "ready") {
+			throw new Error(
+				`Task ${task.id} cannot start while Workflow is ${workflow.status} and Task is ${task.status}`,
+			);
+		}
+		if (task.kind !== "command" || !task.command) {
+			throw new Error(`Task ${task.id} is not a Command Task`);
+		}
+		if (runtime.availableSlots === 0) {
+			throw new Error("Job Runtime has no available execution slots");
+		}
+		const attemptId = `attempt-${randomUUID()}`;
+		const job = runtime.queue({
+			workflowId: workflow.id,
+			taskId: task.id,
+			attemptId,
+			command: task.command,
+			cwd: workflow.request.cwd,
+			timeoutMs: task.budget.maxDurationMs,
+		});
+		const writerLease =
+			task.accessMode === "writer"
+				? DEFAULT_WRITER_LEASE_REGISTRY.acquire({
+						workspace: workflow.request.cwd,
+						workflowId: workflow.id,
+						taskId: task.id,
+						attemptId,
+						ttlMs: Math.max(task.budget.maxDurationMs ?? 10 * 60_000, 1_000),
+					})
+				: undefined;
+		try {
+			this.#controller.prepareTaskAttempt({
+				commandId: this.#createId("command"),
+				workflowId: workflow.id,
+				taskId: task.id,
+				attemptId,
+				assignment: {
+					executorKind: "job",
+					jobId: job.id,
+				},
+				writerLeaseId: writerLease?.id,
+			});
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_started",
+				commandId: this.#createId("command"),
+				workflowId: workflow.id,
+				taskId: task.id,
+				attemptId,
+			});
+			const completion = runtime
+				.start(job.id)
+				.then((result) => this.#finishJobTask(task.id, attemptId, result))
+				.finally(() => {
+					if (writerLease) {
+						DEFAULT_WRITER_LEASE_REGISTRY.release(writerLease.id);
+					}
+				});
+			return { job: runtime.registry.get(job.id) ?? job, completion };
+		} catch (error) {
+			if (writerLease) {
+				DEFAULT_WRITER_LEASE_REGISTRY.release(writerLease.id);
+			}
+			await runtime.kill(job.id, "Task dispatch failed").catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async startReadyJobs(runtime: JobRuntime, maxConcurrency: number): Promise<readonly JobTaskExecution[]> {
+		this.refreshTaskReadiness();
+		const available = Math.min(maxConcurrency, runtime.availableSlots);
+		if (available < 1) {
+			return [];
+		}
+		const dispatches = this.selectJobDispatches(available);
+		return Promise.all(dispatches.map(({ taskId }) => this.startJobTask(runtime, taskId)));
+	}
+
 	async startSubagentTask(
 		runtime: SubagentRuntime,
 		taskId: string,
@@ -326,7 +428,11 @@ export class PlanWorkflowRuntime {
 		});
 	}
 
-	async cancel(reason = "User cancelled the workflow", subagentRuntime?: SubagentRuntime): Promise<void> {
+	async cancel(
+		reason = "User cancelled the workflow",
+		subagentRuntime?: SubagentRuntime,
+		jobRuntime?: JobRuntime,
+	): Promise<void> {
 		const workflow = this.workflow;
 		if (isWorkflowTerminalStatus(workflow.status)) {
 			return;
@@ -337,6 +443,7 @@ export class PlanWorkflowRuntime {
 			reason,
 		});
 		await subagentRuntime?.cancelWorkflow(this.#workflowId, reason);
+		await jobRuntime?.cancelWorkflow(this.#workflowId, reason);
 		const cancellation = await DEFAULT_WORKFLOW_RUNTIME_REGISTRY.cancelWorkflow(this.#workflowId, reason);
 		if (cancellation.failures.length > 0) {
 			throw new Error(`Failed to stop Workflow resources: ${cancellation.failures.map(({ id }) => id).join(", ")}`);
@@ -479,6 +586,92 @@ export class PlanWorkflowRuntime {
 			failure: {
 				code: result.status === "interrupted" ? "subagent_interrupted" : "subagent_failed",
 				message: result.error ?? `Subagent ${result.agentId} failed`,
+			},
+		});
+		return result;
+	}
+
+	async #finishJobTask(taskId: string, attemptId: string, result: Job): Promise<Job> {
+		const workflow = this.workflow;
+		if (workflow.status !== "executing") {
+			return result;
+		}
+		const task = this.#controller.getTask(taskId);
+		if (!task || task.currentAttemptId !== attemptId || task.status !== "running") {
+			return result;
+		}
+		const durationMs =
+			result.startedAt && result.endedAt
+				? Math.max(0, Date.parse(result.endedAt) - Date.parse(result.startedAt))
+				: 0;
+		const usage = {
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			cost: 0,
+			turns: 0,
+			durationMs,
+		};
+		if (result.status === "succeeded") {
+			const requirement = task.verificationRequirements.find(({ required }) => required);
+			if (!requirement) {
+				throw new Error(`Task ${task.id} has no required verification`);
+			}
+			const verificationId = `verification-${randomUUID()}`;
+			const evidenceRefs = [result.stdoutRef, result.stderrRef];
+			const summary = `Command completed with exit code ${result.exitCode ?? 0}`;
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_succeeded",
+				commandId: this.#createId("command"),
+				workflowId: workflow.id,
+				taskId,
+				attemptId,
+				verificationId,
+				requirementId: requirement.id,
+				usage,
+				summary,
+				evidenceRefs,
+			});
+			this.#controller.completeTask({
+				commandId: this.#createId("command"),
+				workflowId: workflow.id,
+				taskId,
+				verificationId,
+				summary,
+				changedFiles: [],
+				evidenceRefs,
+			});
+			this.refreshTaskReadiness();
+			return result;
+		}
+		const attempts = this.#controller.listAttempts(task.id);
+		const maximumRetries = task.budget.maxRetries ?? 0;
+		const willRetry = attempts.length - 1 < maximumRetries;
+		if (result.status === "timed_out") {
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_timed_out",
+				commandId: this.#createId("command"),
+				workflowId: workflow.id,
+				taskId,
+				attemptId,
+				usage,
+				willRetry,
+				timeoutMs: result.timeoutMs,
+			});
+			return result;
+		}
+		this.#controller.handleRuntimeEvent({
+			type: "attempt_failed",
+			commandId: this.#createId("command"),
+			workflowId: workflow.id,
+			taskId,
+			attemptId,
+			usage,
+			willRetry,
+			failure: {
+				code: `job_${result.status}`,
+				message: result.reason ?? `Job ${result.id} ${result.status}`,
 			},
 		});
 		return result;

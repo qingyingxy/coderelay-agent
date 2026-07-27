@@ -206,6 +206,8 @@ export interface PlanRisk {
 
 export interface PlanStep {
 	readonly id: PlanStepId;
+	readonly kind?: Extract<TaskKind, "agent" | "command">;
+	readonly command?: string;
 	readonly title: string;
 	readonly description: string;
 	readonly dependsOn: readonly PlanStepId[];
@@ -283,6 +285,7 @@ export interface Task extends EntityMetadata {
 	readonly sourcePlanId?: PlanId;
 	readonly sourcePlanStepId?: PlanStepId;
 	readonly kind: TaskKind;
+	readonly command?: string;
 	readonly accessMode: TaskAccessMode;
 	readonly title: string;
 	readonly description: string;

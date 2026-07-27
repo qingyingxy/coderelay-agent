@@ -93,6 +93,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { formatJob, formatJobLogs, formatJobs, type Job, JobRuntime, LocalJobProcessFactory } from "./jobs/index.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
@@ -118,7 +119,7 @@ import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
-import { PlanWorkflowRuntime, type SubagentTaskExecution } from "./workflow/plan-runtime.ts";
+import { type JobTaskExecution, PlanWorkflowRuntime, type SubagentTaskExecution } from "./workflow/plan-runtime.ts";
 import {
 	createPlannerPromptEnvelope,
 	executePlannerPrompt,
@@ -243,6 +244,8 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** Optional Subagent Runtime override used by tests and embedders. */
 	subagentRuntime?: SubagentRuntime;
+	/** Optional background Job Runtime override used by tests and embedders. */
+	jobRuntime?: JobRuntime;
 }
 
 export interface ExtensionBindings {
@@ -340,6 +343,8 @@ export class AgentSession {
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
 	private _subagentRuntime: SubagentRuntime | undefined;
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
+	private _jobRuntime: JobRuntime | undefined;
+	private _jobTaskCompletions = new Map<string, Promise<Job>>();
 	private _nextWorkflowMode: "direct" | "plan" = "direct";
 	private _pendingPlanRevisionRequest: string | undefined;
 
@@ -417,6 +422,7 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._subagentRuntime = config.subagentRuntime;
+		this._jobRuntime = config.jobRuntime;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -882,6 +888,11 @@ export class AgentSession {
 		this._eventListeners = [];
 		void this._subagentRuntime?.dispose();
 		this._subagentTaskCompletions.clear();
+		const planWorkflowId = this._planWorkflowRuntime?.workflow.id;
+		if (planWorkflowId) {
+			void this._jobRuntime?.cancelWorkflow(planWorkflowId, "AgentSession disposed");
+		}
+		this._jobTaskCompletions.clear();
 		cleanupSessionResources(this.sessionId);
 	}
 
@@ -1115,7 +1126,7 @@ export class AgentSession {
 		}
 		const planRuntime = this._planWorkflowRuntime;
 		if (planRuntime && !planRuntime.isTerminal) {
-			await planRuntime.cancel(reason, this._subagentRuntime);
+			await planRuntime.cancel(reason, this._subagentRuntime, this._jobRuntime);
 			return true;
 		}
 		return false;
@@ -1153,6 +1164,21 @@ export class AgentSession {
 
 	private _trackSubagentExecution(execution: SubagentTaskExecution): void {
 		this._subagentTaskCompletions.set(execution.agent.id, execution.completion);
+		void execution.completion.catch(() => undefined);
+	}
+
+	private _getJobRuntime(): JobRuntime {
+		this._jobRuntime ??= new JobRuntime({
+			processFactory: new LocalJobProcessFactory({
+				shellPath: this.settingsManager.getShellPath(),
+			}),
+			maxConcurrentJobs: this._planWorkflowRuntime?.workflow.budget.maxConcurrentJobs ?? 4,
+		});
+		return this._jobRuntime;
+	}
+
+	private _trackJobExecution(execution: JobTaskExecution): void {
+		this._jobTaskCompletions.set(execution.job.id, execution.completion);
 		void execution.completion.catch(() => undefined);
 	}
 
@@ -1461,7 +1487,9 @@ export class AgentSession {
 			commandName !== "/tasks" &&
 			commandName !== "/task" &&
 			commandName !== "/agents" &&
-			commandName !== "/agent"
+			commandName !== "/agent" &&
+			commandName !== "/jobs" &&
+			commandName !== "/job"
 		) {
 			return false;
 		}
@@ -1641,6 +1669,74 @@ export class AgentSession {
 				} else {
 					lines = [
 						"Usage: /agent spawn <task-id> [explorer|worker|reviewer] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>",
+					];
+				}
+			}
+		} else if (commandName === "/jobs") {
+			const planRuntime = this._planWorkflowRuntime;
+			if (!planRuntime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (args.length === 0) {
+				lines = formatJobs(this._jobRuntime?.jobs(planRuntime.workflow.id) ?? []);
+			} else if (planRuntime.workflow.status !== "executing") {
+				lines = [`Plan Workflow is ${planRuntime.workflow.status}; Job dispatch is unavailable.`];
+			} else if (args[0] === "dispatch" && args.length <= 2) {
+				const fallback = Math.max(1, planRuntime.workflow.budget.maxConcurrentJobs ?? 4);
+				const requested = args[1] === undefined ? fallback : Number(args[1]);
+				if (!Number.isInteger(requested) || requested < 1) {
+					lines = ["Usage: /jobs dispatch [max-concurrency]"];
+				} else {
+					const jobRuntime = this._getJobRuntime();
+					const executions = await planRuntime.startReadyJobs(jobRuntime, requested);
+					for (const execution of executions) {
+						this._trackJobExecution(execution);
+					}
+					lines = [
+						`Dispatched ${executions.length} Job${executions.length === 1 ? "" : "s"}.`,
+						...formatJobs(jobRuntime.jobs(planRuntime.workflow.id)),
+					];
+				}
+			} else {
+				lines = ["Usage: /jobs | /jobs dispatch [max-concurrency]"];
+			}
+		} else if (commandName === "/job") {
+			const [action, jobOrTaskId, ...detailParts] = args;
+			const planRuntime = this._planWorkflowRuntime;
+			if (!planRuntime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (!action || !jobOrTaskId) {
+				lines = [
+					"Usage: /job run <task-id> | /job show <job-id> | /job logs <job-id> [after-sequence] | /job wait <job-id> | /job kill <job-id> [reason]",
+				];
+			} else {
+				const jobRuntime = this._getJobRuntime();
+				const existingJob = action === "run" ? undefined : jobRuntime.registry.get(jobOrTaskId);
+				if (action === "run" && detailParts.length === 0) {
+					const execution = await planRuntime.startJobTask(jobRuntime, jobOrTaskId);
+					this._trackJobExecution(execution);
+					lines = [formatJob(execution.job)];
+				} else if (action !== "run" && !existingJob) {
+					lines = [`Job ${jobOrTaskId} does not exist.`];
+				} else if (action === "show" && detailParts.length === 0) {
+					lines = existingJob ? [formatJob(existingJob)] : [`Job ${jobOrTaskId} does not exist.`];
+				} else if (action === "logs" && detailParts.length <= 1) {
+					const afterSequence = detailParts[0] === undefined ? 0 : Number(detailParts[0]);
+					lines =
+						!Number.isInteger(afterSequence) || afterSequence < 0
+							? ["Usage: /job logs <job-id> [after-sequence]"]
+							: formatJobLogs(jobRuntime.logs(jobOrTaskId, afterSequence));
+				} else if (action === "wait" && detailParts.length === 0) {
+					const completion = this._jobTaskCompletions.get(jobOrTaskId);
+					lines = [formatJob(completion ? await completion : await jobRuntime.wait(jobOrTaskId))];
+				} else if (action === "kill") {
+					await jobRuntime.kill(jobOrTaskId, detailParts.join(" ") || "Killed by user");
+					const completion = this._jobTaskCompletions.get(jobOrTaskId);
+					const job = completion ? await completion : jobRuntime.registry.get(jobOrTaskId);
+					const finalJob = job ?? existingJob;
+					lines = finalJob ? [formatJob(finalJob)] : [`Job ${jobOrTaskId} does not exist.`];
+				} else {
+					lines = [
+						"Usage: /job run <task-id> | /job show <job-id> | /job logs <job-id> [after-sequence] | /job wait <job-id> | /job kill <job-id> [reason]",
 					];
 				}
 			}

@@ -98,7 +98,8 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 			{
 				id: "planner-structured-output",
 				kind: "output",
-				description: "Return only one JSON object matching the requested PlanContent schema.",
+				description:
+					"Return only one JSON object matching PlanContent. Use step kind 'command' with a non-empty command for deterministic test/build commands; otherwise omit kind and command.",
 			},
 		],
 		outputSchema: {

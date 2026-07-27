@@ -3,7 +3,16 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PlanContent } from "../../src/core/workflow/index.ts";
 import { SessionWorkflowEventLog, WorkflowStore } from "../../src/core/workflow/index.ts";
-import { SubagentRuntime, WorkflowRuntimeRegistry, WriterLeaseRegistry } from "../../src/index.ts";
+import {
+	type JobProcess,
+	type JobProcessExit,
+	type JobProcessFactory,
+	JobRuntime,
+	type StartJobProcessInput,
+	SubagentRuntime,
+	WorkflowRuntimeRegistry,
+	WriterLeaseRegistry,
+} from "../../src/index.ts";
 import { FakeSubagentSessionFactory, subagentHandoff } from "../workflow/subagent-fixtures.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -103,6 +112,57 @@ function subagentPlanContent(): PlanContent {
 			},
 		],
 	};
+}
+
+function jobPlanContent(): PlanContent {
+	return {
+		goal: "Run CLI verification",
+		assumptions: [],
+		steps: [
+			{
+				id: "check-step",
+				kind: "command",
+				command: "npm run check",
+				title: "Run checks",
+				description: "Run deterministic repository checks",
+				dependsOn: [],
+				fileIntents: [],
+				verificationRequirementIds: ["check"],
+			},
+		],
+		risks: [],
+		verificationRequirements: [
+			{
+				id: "check",
+				kind: "test",
+				description: "Checks pass",
+				command: "npm run check",
+				required: true,
+			},
+		],
+	};
+}
+
+class CliJobProcess implements JobProcess {
+	readonly pid = 9001;
+	readonly #input: StartJobProcessInput;
+
+	constructor(input: StartJobProcessInput) {
+		this.#input = input;
+	}
+
+	async wait(): Promise<JobProcessExit> {
+		this.#input.onStdout("check passed\n");
+		return { exitCode: 0 };
+	}
+
+	async terminate(): Promise<void> {}
+}
+
+class CliJobProcessFactory implements JobProcessFactory {
+	start(input: StartJobProcessInput): JobProcess {
+		return new CliJobProcess(input);
+	}
 }
 
 function replay(harness: Harness): {
@@ -357,6 +417,50 @@ describe("Plan Workflow AgentSession integration", () => {
 		expect(workflowOutput).toContain("agent-1 | idle | explorer");
 		expect(workflowOutput).toContain("agent-3 | idle | explorer");
 		expect(workflowOutput).toContain("handoff-2 | CLI Workflow inspected");
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("dispatches a Command Task and exposes Job status and incremental logs", async () => {
+		const jobRuntime = new JobRuntime({
+			processFactory: new CliJobProcessFactory(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const harness = await createHarness({ jobRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(jobPlanContent()))]);
+
+		await harness.session.prompt("/plan");
+		await harness.session.prompt("Run CLI verification");
+		await harness.session.prompt("/approve");
+		await harness.session.prompt("/jobs dispatch 1");
+		const job = jobRuntime.jobs()[0];
+		if (!job) {
+			throw new Error("Expected a dispatched Job");
+		}
+		await harness.session.prompt(`/job wait ${job.id}`);
+		await harness.session.prompt(`/job logs ${job.id}`);
+		await harness.session.prompt(`/job show ${job.id}`);
+		await harness.session.prompt("/jobs");
+
+		const output = harness
+			.eventsOfType("message_end")
+			.map(({ message }) => message)
+			.filter((message) => message.role === "custom" && message.customType === "workflow")
+			.map(getMessageText)
+			.join("\n");
+		expect(output).toContain("Dispatched 1 Job.");
+		expect(output).toContain(`${job.id} | succeeded`);
+		expect(output).toContain("stdout: check passed");
+		expect(replay(harness).store.listTasks(replay(harness).workflowId)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					kind: "command",
+					status: "succeeded",
+					assignment: expect.objectContaining({ executorKind: "job", jobId: job.id }),
+				}),
+			]),
+		);
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

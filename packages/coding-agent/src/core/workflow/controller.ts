@@ -155,6 +155,13 @@ export type DirectRuntimeEvent =
 			readonly workflowUsage?: ResourceUsage;
 			readonly willRetry: boolean;
 			readonly failure: Omit<FailureRecord, "retryable">;
+	  })
+	| (RuntimeEventBase & {
+			readonly type: "attempt_timed_out";
+			readonly usage: ResourceUsage;
+			readonly workflowUsage?: ResourceUsage;
+			readonly willRetry: boolean;
+			readonly timeoutMs: number;
 	  });
 
 export interface CompleteWorkflowCommand extends WorkflowCommandBase {
@@ -989,6 +996,8 @@ export class WorkflowController {
 				return this.#recordAttemptSucceeded(event);
 			case "attempt_failed":
 				return this.#recordAttemptFailed(event);
+			case "attempt_timed_out":
+				return this.#recordAttemptTimedOut(event);
 		}
 	}
 
@@ -1405,8 +1414,12 @@ export class WorkflowController {
 				parentTaskId: rootTask.id,
 				sourcePlanId: plan.id,
 				sourcePlanStepId: step.id,
-				kind: "agent",
-				accessMode: step.fileIntents.some(({ action }) => action !== "inspect") ? "writer" : "read_only",
+				kind: step.kind ?? "agent",
+				command: step.command,
+				accessMode:
+					step.kind === "command" || step.fileIntents.some(({ action }) => action !== "inspect")
+						? "writer"
+						: "read_only",
 				title: step.title,
 				description: step.description,
 				status: "pending",
@@ -2252,6 +2265,122 @@ export class WorkflowController {
 							usage: structuredClone(workflowUsage),
 							durationMs: workflowUsage.durationMs,
 							reason: event.failure.message,
+						},
+					},
+				},
+			);
+		}
+		return this.#commit(event, events);
+	}
+
+	#recordAttemptTimedOut(event: Extract<DirectRuntimeEvent, { type: "attempt_timed_out" }>): WorkflowCommandResult {
+		const workflow = this.#requireWorkflow(event.workflowId);
+		const task = this.#requireTask(event.taskId, event.workflowId);
+		const attempt = this.#requireAttempt(event.attemptId, event.taskId, event.workflowId);
+		if (workflow.status !== "executing" || task.status !== "running" || attempt.status !== "running") {
+			fail(
+				"controller.attempt_not_running",
+				`Attempt ${attempt.id} cannot time out while workflow is ${workflow.status}, task is ${task.status}, and attempt is ${attempt.status}`,
+			);
+		}
+		assertValidUsage(event.usage);
+		if (event.workflowUsage) {
+			assertValidUsage(event.workflowUsage);
+		}
+		if (!Number.isInteger(event.timeoutMs) || event.timeoutMs < 1) {
+			fail("controller.invalid_timeout", "Attempt timeout must be a positive integer");
+		}
+		const workflowUsage = event.workflowUsage ?? event.usage;
+		const occurredAt = this.#now();
+		const reason = `Command timed out after ${event.timeoutMs}ms`;
+		const attemptTimedOutId = this.#eventId();
+		const events: WorkflowEventDraft[] = [
+			{
+				eventId: attemptTimedOutId,
+				entityId: attempt.id,
+				entityRevision: attempt.revision + 1,
+				eventType: "attempt.timed_out",
+				occurredAt,
+				actor: { kind: "job", id: attempt.jobId },
+				payload: {
+					fromStatus: attempt.status,
+					toStatus: "timed_out",
+					endedAt: occurredAt,
+					usage: structuredClone(event.usage),
+					timeoutMs: event.timeoutMs,
+				},
+			},
+		];
+		if (event.willRetry) {
+			const dependenciesSucceeded = task.dependencyIds.every(
+				(dependencyId) => this.#store.getTask(dependencyId)?.status === "succeeded",
+			);
+			events.push({
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.ready",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: attemptTimedOutId,
+				payload: {
+					fromStatus: task.status,
+					toStatus: "ready",
+					facts: {
+						workflowExecuting: workflow.status === "executing",
+						dependenciesSucceeded,
+						retryAllowed: true,
+					},
+				},
+			});
+		} else {
+			const taskFailedId = this.#eventId();
+			events.push(
+				{
+					eventId: taskFailedId,
+					entityId: task.id,
+					entityRevision: task.revision + 1,
+					eventType: "task.failed",
+					occurredAt,
+					actor: { kind: "controller" },
+					causationId: attemptTimedOutId,
+					payload: {
+						fromStatus: task.status,
+						toStatus: "failed",
+						facts: {
+							failureTerminalCondition: true,
+							activeAttemptStopped: true,
+						},
+						reason,
+					},
+				},
+				{
+					eventId: this.#eventId(),
+					entityId: workflow.id,
+					entityRevision: workflow.revision + 1,
+					eventType: "workflow.failed",
+					occurredAt,
+					actor: { kind: "controller" },
+					causationId: taskFailedId,
+					payload: {
+						fromStatus: workflow.status,
+						toStatus: "failed",
+						facts: {
+							failureTerminalCondition: true,
+							runtimeResourcesStopped: true,
+						},
+						result: {
+							status: "failed",
+							summary: reason,
+							completedTaskIds: [],
+							failedTaskIds: [task.id],
+							changedFiles: [],
+							verificationIds: [],
+							risks: [],
+							unfinishedItems: [reason],
+							usage: structuredClone(workflowUsage),
+							durationMs: workflowUsage.durationMs,
+							reason,
 						},
 					},
 				},

@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M3 实现中（R7-R8 已完成）
+> 状态：M3 已完成（R7-R9）
 > 最后更新：2026-07-27
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -36,6 +36,7 @@ M3 实施计划：
 
 - [`M3 运行保障能力实施记录`](./design/m3-runtime-guardrails-implementation-plan.md)
 - [`M3 Subagent Runtime 实施记录`](./design/m3-subagent-runtime-implementation-plan.md)
+- [`M3 Background Job Runtime 实施记录`](./design/m3-background-job-runtime-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -300,15 +301,15 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R9.1 | `TODO` | 定义 Job 模型 | 包含 Task、命令、cwd、状态、PID、日志、退出码和超时 | R1.7 |
-| R9.2 | `TODO` | 实现 JobRegistry | 保存 Job 生命周期、Task 归属和资源使用 | R9.1 |
-| R9.3 | `TODO` | 实现 Job API | `jobs`、`logs`、`wait`、`kill` | R9.2 |
-| R9.4 | `TODO` | 实现增量日志 | 分离 stdout/stderr，限制总量并保留尾部 | R9.3 |
-| R9.5 | `TODO` | 实现超时和进程树清理 | 先正常终止，再强制终止完整进程树 | R7.9、R9.3 |
-| R9.6 | `TODO` | 实现完成通知 | Job 事件唤醒所属 Workflow 和 Task | R2.6、R9.2 |
-| R9.7 | `TODO` | 接入 Scheduler | Command Task 可以进入后台 Job Runtime | R6.5、R9.3 |
-| R9.8 | `TODO` | 提供 Job CLI | 展示命令、状态、增量日志、退出码和超时 | R9.3-R9.6 |
-| R9.9 | `TODO` | 编写 Job 测试 | 覆盖输出、超时、kill、进程树、取消和完成通知 | R9.3-R9.8 |
+| R9.1 | `DONE` | 定义 Job 模型 | 包含 Task、命令、cwd、状态、PID、日志、退出码和超时 | R1.7 |
+| R9.2 | `DONE` | 实现 JobRegistry | 保存 Job 生命周期、Task 归属和资源使用 | R9.1 |
+| R9.3 | `DONE` | 实现 Job API | `jobs`、`logs`、`wait`、`kill` | R9.2 |
+| R9.4 | `DONE` | 实现增量日志 | 分离 stdout/stderr，限制总量并保留尾部 | R9.3 |
+| R9.5 | `DONE` | 实现超时和进程树清理 | 先正常终止，再强制终止完整进程树 | R7.9、R9.3 |
+| R9.6 | `DONE` | 实现完成通知 | Job 事件唤醒所属 Workflow 和 Task | R2.6、R9.2 |
+| R9.7 | `DONE` | 接入 Scheduler | Command Task 可以进入后台 Job Runtime | R6.5、R9.3 |
+| R9.8 | `DONE` | 提供 Job CLI | 展示命令、状态、增量日志、退出码和超时 | R9.3-R9.6 |
+| R9.9 | `DONE` | 编写 Job 测试 | 覆盖输出、超时、kill、进程树、取消和完成通知 | R9.3-R9.8 |
 
 ### R10：交付闭环与恢复
 
@@ -352,7 +353,7 @@ flowchart TB
 | M0：设计基线 | `DONE` | R0-R2 的设计与协议 | 能完整解释模型、状态机、事件和数据流 |
 | M1：Direct MVP | `DONE` | R3 | 单 Agent Direct 请求可以执行、取消、验证和报告 |
 | M2：Plan 与 Task | `DONE` | R4-R6 | 自动模式、Plan 审批、Task Graph 和调度可演示 |
-| M3：受控 Runtime | `IMPLEMENTING` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
+| M3：受控 Runtime | `DONE` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
 | M4：交付与恢复 | `TODO` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
 | M5：作品版本 | `TODO` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 
@@ -482,12 +483,12 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | M2 Plan 与 Task 完成 | R4-R6 全部完成；自动模式、正式 Plan、Task Graph 和确定性 Scheduler 均有测试与离线演示 |
 | 2026-07-26 | R7 运行保障能力完成 | 权限交集、只读角色、跨进程 Writer Lease、修改归属、预算限制和级联取消已接入 Core、CLI；34 个文件、224 个 Workflow 用例和离线演示通过 |
 | 2026-07-27 | R8 Subagent 与结构化 Handoff 完成 | 独立 RPC Session、AgentRegistry、控制 API、父子层级、继承守卫、事件、Handoff、Scheduler 和 Agent CLI 已接入 Core；36 个文件、227 个 Workflow 用例，以及 Faux Provider、伪子进程与离线演示通过 |
+| 2026-07-27 | R9 Background Job Runtime 完成 | JobRegistry、后台进程、增量日志、超时与进程树清理、完成通知、Command Task 调度和 Job CLI 已接入 Core，并有本地进程、Faux Provider 与离线演示覆盖 |
 
 ## 12. 下一步
 
-M0-M2、R7 和 R8 已完成并验证。下一步继续 M3：
+M0-M3 已完成并验证。下一步进入 M4：
 
-1. 完成 R9.1-R9.3：定义 Job、JobRegistry 和后台控制 API。
-2. 完成 R9.4-R9.7：实现增量日志、超时、进程树清理、通知和 Scheduler 接入。
-3. 完成 R9.8-R9.9：提供 Job CLI、回归测试和离线演示。
-4. R9 验收后结束 M3，再进入 M4 交付与恢复。
+1. 完成 R10.1-R10.4：收集 Diff 与修改归属，接入 Reviewer、Test/Build 和统一 VerificationResult。
+2. 完成 R10.5-R10.8：实现 Completion Gate、Repair 循环和完整最终报告。
+3. 完成 R10.9-R10.13：实现 Snapshot、运行资源中断恢复、Writer Lease 恢复和 Resume CLI。
