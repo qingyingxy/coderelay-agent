@@ -426,6 +426,14 @@ export function validateTask(task: Task): readonly DomainViolation[] {
 	if (task.kind !== "command" && task.command !== undefined) {
 		violations.push(violation("task.unexpected_command", "Only a Command Task can define a command"));
 	}
+	if (task.kind === "repair") {
+		const repairIteration = task.repairIteration;
+		if (!task.repairForVerificationId?.trim() || !Number.isInteger(repairIteration) || (repairIteration ?? 0) < 1) {
+			violations.push(violation("task.invalid_repair", "Repair Task requires a Verification and iteration"));
+		}
+	} else if (task.repairForVerificationId !== undefined || task.repairIteration !== undefined) {
+		violations.push(violation("task.unexpected_repair", "Only a Repair Task can carry repair metadata"));
+	}
 	if (
 		task.assignment?.agentDepth !== undefined &&
 		(!Number.isInteger(task.assignment.agentDepth) || task.assignment.agentDepth < 0)

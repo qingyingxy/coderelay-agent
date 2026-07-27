@@ -1,10 +1,13 @@
 import type { CustomEntry, SessionManager } from "../session-manager.ts";
 import type { AnyWorkflowEvent, WorkflowEventActorKind, WorkflowEventBatch } from "./events.ts";
 import { isWorkflowEventType, validateWorkflowEventBatch } from "./events.ts";
+import type { WorkflowSnapshot } from "./stores.ts";
 import type { DomainViolation } from "./transitions.ts";
 import type { CommandId, WorkflowId } from "./types.ts";
+import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
 
 export const WORKFLOW_EVENT_BATCH_CUSTOM_TYPE = "workflow-event-batch";
+export const WORKFLOW_SNAPSHOT_CUSTOM_TYPE = "workflow-snapshot";
 
 const PERSISTED_BATCH = Symbol("persisted-workflow-event-batch");
 const ISSUED_PERSISTED_BATCHES = new WeakSet<object>();
@@ -282,5 +285,58 @@ export class SessionWorkflowEventLog {
 		const storedBatch = structuredClone(batch);
 		const sessionEntryId = this.#session.appendCustomEntry(WORKFLOW_EVENT_BATCH_CUSTOM_TYPE, storedBatch);
 		return markPersisted(sessionEntryId, storedBatch);
+	}
+}
+
+function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
+	return (
+		isRecord(value) &&
+		value.schemaVersion === WORKFLOW_SCHEMA_VERSION &&
+		typeof value.workflowId === "string" &&
+		typeof value.lastSequence === "number" &&
+		isRecord(value.workflow) &&
+		Array.isArray(value.plans) &&
+		Array.isArray(value.tasks) &&
+		Array.isArray(value.attempts) &&
+		Array.isArray(value.verifications) &&
+		Array.isArray(value.processedCommands) &&
+		Array.isArray(value.eventIds) &&
+		typeof value.createdAt === "string"
+	);
+}
+
+export class SessionWorkflowSnapshotStore {
+	readonly #session: WorkflowEventLogSession;
+
+	constructor(session: WorkflowEventLogSession) {
+		this.#session = session;
+	}
+
+	append(snapshot: WorkflowSnapshot): string {
+		if (!isWorkflowSnapshot(snapshot)) {
+			throw new WorkflowEventLogError("Cannot append an invalid Workflow Snapshot", [
+				violation("snapshot.invalid", "Workflow Snapshot envelope is invalid"),
+			]);
+		}
+		return this.#session.appendCustomEntry(WORKFLOW_SNAPSHOT_CUSTOM_TYPE, structuredClone(snapshot));
+	}
+
+	readLatest(workflowId?: WorkflowId): WorkflowSnapshot | undefined {
+		const entries = this.#session
+			.getBranch()
+			.filter(
+				(entry): entry is CustomEntry<unknown> =>
+					entry.type === "custom" && entry.customType === WORKFLOW_SNAPSHOT_CUSTOM_TYPE,
+			);
+		const malformed = entries.find((entry) => !isWorkflowSnapshot(entry.data));
+		if (malformed) {
+			throw new WorkflowEventLogError("Cannot recover an invalid Workflow Snapshot", [
+				violation("snapshot.invalid", `Workflow Snapshot ${malformed.id} envelope is invalid`),
+			]);
+		}
+		const snapshots = entries
+			.map((entry) => structuredClone(entry.data as WorkflowSnapshot))
+			.filter((snapshot) => workflowId === undefined || snapshot.workflowId === workflowId);
+		return snapshots.at(-1);
 	}
 }

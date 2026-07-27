@@ -19,10 +19,25 @@ import type {
 	Workflow,
 	WorkflowId,
 } from "./types.ts";
+import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
 
-interface VerificationProjection {
+export interface VerificationProjection {
 	readonly revision: number;
 	readonly result: VerificationResult;
+}
+
+export interface WorkflowSnapshot {
+	readonly schemaVersion: number;
+	readonly workflowId: WorkflowId;
+	readonly lastSequence: number;
+	readonly workflow: Workflow;
+	readonly plans: readonly Plan[];
+	readonly tasks: readonly Task[];
+	readonly attempts: readonly Attempt[];
+	readonly verifications: readonly VerificationProjection[];
+	readonly processedCommands: readonly { readonly commandId: CommandId; readonly batchId: string }[];
+	readonly eventIds: readonly string[];
+	readonly createdAt: string;
 }
 
 interface MutableStoreState {
@@ -751,6 +766,7 @@ export class WorkflowStore {
 	readonly #lastSequences = new Map<WorkflowId, number>();
 	readonly #processedCommands = new Map<string, string>();
 	readonly #eventIds = new Set<string>();
+	readonly #eventWorkflowIds = new Map<string, WorkflowId>();
 
 	apply(persisted: PersistedWorkflowEventBatch): boolean {
 		if (!isPersistedWorkflowEventBatch(persisted)) {
@@ -801,6 +817,7 @@ export class WorkflowStore {
 		this.#processedCommands.set(commandKey, batch.batchId);
 		for (const event of batch.events) {
 			this.#eventIds.add(event.eventId);
+			this.#eventWorkflowIds.set(event.eventId, batch.workflowId);
 		}
 		const lastEvent = batch.events.at(-1);
 		if (lastEvent) {
@@ -812,6 +829,138 @@ export class WorkflowStore {
 	replay(batches: readonly PersistedWorkflowEventBatch[]): void {
 		for (const batch of batches) {
 			this.apply(batch);
+		}
+	}
+
+	createSnapshot(workflowId: WorkflowId, createdAt = new Date().toISOString()): WorkflowSnapshot {
+		const workflow = this.getWorkflow(workflowId);
+		if (!workflow) {
+			fail("store.workflow_missing", `Workflow ${workflowId} does not exist`);
+		}
+		const taskIds = new Set(this.listTasks(workflowId).map(({ id }) => id));
+		return {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			workflowId,
+			lastSequence: this.getLastSequence(workflowId),
+			workflow,
+			plans: this.listPlans(workflowId),
+			tasks: this.listTasks(workflowId),
+			attempts: [...this.#state.attempts.values()]
+				.filter(({ taskId }) => taskIds.has(taskId))
+				.map((attempt) => structuredClone(attempt)),
+			verifications: [...this.#state.verifications.values()]
+				.filter(({ result }) => result.workflowId === workflowId)
+				.map((verification) => structuredClone(verification)),
+			processedCommands: [...this.#processedCommands.entries()]
+				.filter(([key]) => key.startsWith(`${workflowId}:`))
+				.map(([key, batchId]) => ({ commandId: key.slice(workflowId.length + 1), batchId })),
+			eventIds: [...this.#eventWorkflowIds.entries()]
+				.filter(([, eventWorkflowId]) => eventWorkflowId === workflowId)
+				.map(([eventId]) => eventId),
+			createdAt,
+		};
+	}
+
+	restoreSnapshot(snapshot: WorkflowSnapshot): void {
+		if (
+			snapshot.schemaVersion !== WORKFLOW_SCHEMA_VERSION ||
+			snapshot.workflow.id !== snapshot.workflowId ||
+			!Number.isInteger(snapshot.lastSequence) ||
+			snapshot.lastSequence < 0 ||
+			!Number.isFinite(Date.parse(snapshot.createdAt))
+		) {
+			fail("store.invalid_snapshot", "Workflow Snapshot envelope is invalid");
+		}
+		if (this.#state.workflows.has(snapshot.workflowId)) {
+			fail("store.snapshot_workflow_exists", `Workflow ${snapshot.workflowId} already exists`);
+		}
+		if (
+			new Set(snapshot.plans.map(({ id }) => id)).size !== snapshot.plans.length ||
+			new Set(snapshot.tasks.map(({ id }) => id)).size !== snapshot.tasks.length ||
+			new Set(snapshot.attempts.map(({ id }) => id)).size !== snapshot.attempts.length ||
+			new Set(snapshot.verifications.map(({ result }) => result.id)).size !== snapshot.verifications.length
+		) {
+			fail("store.snapshot_duplicate_entity", "Workflow Snapshot contains duplicate entity ids");
+		}
+		if (
+			snapshot.eventIds.length !== snapshot.lastSequence ||
+			new Set(snapshot.eventIds).size !== snapshot.eventIds.length ||
+			snapshot.eventIds.some((eventId) => !eventId.trim())
+		) {
+			fail("store.snapshot_event_history_invalid", "Workflow Snapshot event history is invalid");
+		}
+		if (
+			new Set(snapshot.processedCommands.map(({ commandId }) => commandId)).size !==
+				snapshot.processedCommands.length ||
+			snapshot.processedCommands.some(({ commandId, batchId }) => !commandId.trim() || !batchId.trim())
+		) {
+			fail("store.snapshot_command_history_invalid", "Workflow Snapshot command history is invalid");
+		}
+		assertValidEntity("workflow", validateWorkflow(snapshot.workflow));
+		for (const plan of snapshot.plans) {
+			if (plan.workflowId !== snapshot.workflowId) {
+				fail("store.snapshot_owner_mismatch", `Plan ${plan.id} belongs to another Workflow`);
+			}
+			assertValidEntity("plan", validatePlan(plan));
+		}
+		for (const task of snapshot.tasks) {
+			if (task.workflowId !== snapshot.workflowId) {
+				fail("store.snapshot_owner_mismatch", `Task ${task.id} belongs to another Workflow`);
+			}
+			assertValidEntity("task", validateTask(task));
+		}
+		for (const attempt of snapshot.attempts) {
+			if (attempt.workflowId !== snapshot.workflowId) {
+				fail("store.snapshot_owner_mismatch", `Attempt ${attempt.id} belongs to another Workflow`);
+			}
+			if (!snapshot.tasks.some(({ id }) => id === attempt.taskId)) {
+				fail("store.snapshot_attempt_task_missing", `Attempt ${attempt.id} references a missing Task`);
+			}
+			assertValidEntity("attempt", validateAttempt(attempt));
+		}
+		for (const verification of snapshot.verifications) {
+			if (verification.result.workflowId !== snapshot.workflowId) {
+				fail("store.snapshot_owner_mismatch", `Verification ${verification.result.id} belongs to another Workflow`);
+			}
+			if (
+				!Number.isInteger(verification.revision) ||
+				verification.revision < 0 ||
+				(verification.result.taskId !== undefined &&
+					!snapshot.tasks.some(({ id }) => id === verification.result.taskId))
+			) {
+				fail(
+					"store.snapshot_verification_projection_invalid",
+					`Verification ${verification.result.id} projection is invalid`,
+				);
+			}
+			assertValidEntity("verification", validateVerificationResult(verification.result));
+		}
+		const nextState = cloneState(this.#state);
+		nextState.workflows.set(snapshot.workflow.id, structuredClone(snapshot.workflow));
+		for (const plan of snapshot.plans) {
+			nextState.plans.set(plan.id, structuredClone(plan));
+		}
+		for (const task of snapshot.tasks) {
+			nextState.tasks.set(task.id, structuredClone(task));
+		}
+		for (const attempt of snapshot.attempts) {
+			nextState.attempts.set(attempt.id, structuredClone(attempt));
+		}
+		for (const verification of snapshot.verifications) {
+			nextState.verifications.set(verification.result.id, structuredClone(verification));
+		}
+		const violations = validateRelationships(nextState);
+		if (violations.length > 0) {
+			throw new WorkflowStoreError("Workflow Snapshot relationships are invalid", violations);
+		}
+		this.#state = nextState;
+		this.#lastSequences.set(snapshot.workflowId, snapshot.lastSequence);
+		for (const { commandId, batchId } of snapshot.processedCommands) {
+			this.#processedCommands.set(`${snapshot.workflowId}:${commandId}`, batchId);
+		}
+		for (const eventId of snapshot.eventIds) {
+			this.#eventIds.add(eventId);
+			this.#eventWorkflowIds.set(eventId, snapshot.workflowId);
 		}
 	}
 
@@ -866,6 +1015,12 @@ export class WorkflowStore {
 
 	getVerificationRevision(verificationId: VerificationId): number | undefined {
 		return this.#state.verifications.get(verificationId)?.revision;
+	}
+
+	listVerifications(workflowId: WorkflowId): readonly VerificationResult[] {
+		return [...this.#state.verifications.values()]
+			.filter(({ result }) => result.workflowId === workflowId)
+			.map(({ result }) => structuredClone(result));
 	}
 
 	getLastSequence(workflowId: WorkflowId): number {

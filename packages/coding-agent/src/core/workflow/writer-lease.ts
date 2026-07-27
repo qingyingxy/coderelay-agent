@@ -156,6 +156,16 @@ export class WriterLeaseRegistry {
 		return released;
 	}
 
+	releaseRecovered(workflowId: WorkflowId, workspace: string): boolean {
+		const key = workspaceKey(workspace);
+		const lease = this.#activeLease(key, this.#now());
+		if (!lease || lease.workflowId !== workflowId) {
+			return false;
+		}
+		this.#ownedLeaseIds.delete(lease.id);
+		return this.#deleteLease(key);
+	}
+
 	get(workspace: string): WriterLease | undefined {
 		const lease = this.#activeLease(workspaceKey(workspace), this.#now());
 		return lease ? structuredClone(lease) : undefined;

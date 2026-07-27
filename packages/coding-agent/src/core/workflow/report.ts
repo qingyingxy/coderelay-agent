@@ -63,6 +63,27 @@ export interface WorkflowFinalReport {
 	readonly lines: readonly string[];
 }
 
+export interface DeliveryWorkflowFinalReport {
+	readonly workflowId: string;
+	readonly status: WorkflowTerminalStatus;
+	readonly statusLine: string;
+	readonly summary: string;
+	readonly tasks: readonly {
+		readonly id: string;
+		readonly kind: Task["kind"];
+		readonly title: string;
+		readonly status: Task["status"];
+		readonly attempts: number;
+	}[];
+	readonly changedFiles: readonly string[];
+	readonly verifications: readonly VerificationResult[];
+	readonly risks: readonly string[];
+	readonly unfinishedItems: readonly string[];
+	readonly usage: ResourceUsage;
+	readonly durationMs: number;
+	readonly lines: readonly string[];
+}
+
 export interface BuildWorkflowFinalReportInput {
 	readonly workflow: Workflow;
 	readonly rootTask: Task;
@@ -200,4 +221,59 @@ function dedupeInOrder(paths: readonly string[]): readonly string[] {
 		result.push(path);
 	}
 	return result;
+}
+
+export function buildDeliveryWorkflowFinalReport(input: {
+	readonly workflow: Workflow;
+	readonly tasks: readonly Task[];
+	readonly attempts: readonly Attempt[];
+	readonly verifications: readonly VerificationResult[];
+}): DeliveryWorkflowFinalReport {
+	const { workflow } = input;
+	if (!isWorkflowTerminalStatus(workflow.status) || !workflow.result) {
+		throw new Error(`Workflow ${workflow.id} is not terminal and cannot produce a delivery report`);
+	}
+	const tasks = input.tasks
+		.filter(({ kind }) => kind !== "control")
+		.map((task) => ({
+			id: task.id,
+			kind: task.kind,
+			title: task.title,
+			status: task.status,
+			attempts: input.attempts.filter(({ taskId }) => taskId === task.id).length,
+		}));
+	const verificationLines = input.verifications.map(
+		({ requirementId, status, summary }) => `${requirementId}: ${status} | ${summary}`,
+	);
+	const statusLine = `plan | ${workflow.status} | ${tasks.filter(({ status }) => status === "succeeded").length}/${tasks.length} tasks | ${workflow.result.changedFiles.length} files`;
+	const lines = [
+		statusLine,
+		`Summary: ${workflow.result.summary}`,
+		`Tasks: ${tasks.length}`,
+		...tasks.map(({ kind, title, status, attempts }) => `- ${status} | ${kind} | ${title} | ${attempts} attempts`),
+		`Changed files: ${workflow.result.changedFiles.length}`,
+		...workflow.result.changedFiles.map((path) => `- ${path}`),
+		`Verifications: ${input.verifications.length}`,
+		...verificationLines.map((line) => `- ${line}`),
+		`Risks: ${workflow.result.risks.length}`,
+		...workflow.result.risks.map((risk) => `- ${risk}`),
+		`Unfinished: ${workflow.result.unfinishedItems.length}`,
+		...workflow.result.unfinishedItems.map((item) => `- ${item}`),
+		`Usage: input ${workflow.result.usage.inputTokens} | output ${workflow.result.usage.outputTokens} | turns ${workflow.result.usage.turns} | cost ${workflow.result.usage.cost}`,
+		`Duration: ${workflow.result.durationMs}ms`,
+	];
+	return {
+		workflowId: workflow.id,
+		status: workflow.result.status,
+		statusLine,
+		summary: workflow.result.summary,
+		tasks,
+		changedFiles: [...workflow.result.changedFiles],
+		verifications: structuredClone(input.verifications),
+		risks: [...workflow.result.risks],
+		unfinishedItems: [...workflow.result.unfinishedItems],
+		usage: structuredClone(workflow.result.usage),
+		durationMs: workflow.result.durationMs,
+		lines,
+	};
 }

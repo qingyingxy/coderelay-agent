@@ -284,6 +284,8 @@ export interface Task extends EntityMetadata {
 	readonly parentTaskId?: TaskId;
 	readonly sourcePlanId?: PlanId;
 	readonly sourcePlanStepId?: PlanStepId;
+	readonly repairForVerificationId?: VerificationId;
+	readonly repairIteration?: number;
 	readonly kind: TaskKind;
 	readonly command?: string;
 	readonly accessMode: TaskAccessMode;

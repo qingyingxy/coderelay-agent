@@ -64,6 +64,7 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { DeliveryRuntime, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -246,6 +247,8 @@ export interface AgentSessionConfig {
 	subagentRuntime?: SubagentRuntime;
 	/** Optional background Job Runtime override used by tests and embedders. */
 	jobRuntime?: JobRuntime;
+	/** Optional read-only delivery Reviewer override used by tests and embedders. */
+	deliveryReviewer?: ReadonlyReviewer;
 }
 
 export interface ExtensionBindings {
@@ -345,6 +348,7 @@ export class AgentSession {
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
 	private _jobRuntime: JobRuntime | undefined;
 	private _jobTaskCompletions = new Map<string, Promise<Job>>();
+	private _deliveryReviewer: ReadonlyReviewer | undefined;
 	private _nextWorkflowMode: "direct" | "plan" = "direct";
 	private _pendingPlanRevisionRequest: string | undefined;
 
@@ -423,6 +427,7 @@ export class AgentSession {
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._subagentRuntime = config.subagentRuntime;
 		this._jobRuntime = config.jobRuntime;
+		this._deliveryReviewer = config.deliveryReviewer;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -1177,6 +1182,15 @@ export class AgentSession {
 		return this._jobRuntime;
 	}
 
+	private _getDeliveryRuntime(): DeliveryRuntime {
+		const subagentRuntime = this._getSubagentRuntime();
+		this._deliveryReviewer ??= new SubagentReadonlyReviewer(subagentRuntime);
+		return new DeliveryRuntime({
+			jobRuntime: this._getJobRuntime(),
+			reviewer: this._deliveryReviewer,
+		});
+	}
+
 	private _trackJobExecution(execution: JobTaskExecution): void {
 		this._jobTaskCompletions.set(execution.job.id, execution.completion);
 		void execution.completion.catch(() => undefined);
@@ -1489,7 +1503,9 @@ export class AgentSession {
 			commandName !== "/agents" &&
 			commandName !== "/agent" &&
 			commandName !== "/jobs" &&
-			commandName !== "/job"
+			commandName !== "/job" &&
+			commandName !== "/verify" &&
+			commandName !== "/workflow-resume"
 		) {
 			return false;
 		}
@@ -1739,6 +1755,84 @@ export class AgentSession {
 						"Usage: /job run <task-id> | /job show <job-id> | /job logs <job-id> [after-sequence] | /job wait <job-id> | /job kill <job-id> [reason]",
 					];
 				}
+			}
+		} else if (commandName === "/verify") {
+			const runtime = this._planWorkflowRuntime;
+			const hasIncompleteTasks = runtime?.tasks.some(
+				({ kind, status }) => kind !== "control" && status !== "succeeded",
+			);
+			if (args.length > 0) {
+				lines = ["Usage: /verify"];
+			} else if (!runtime || (runtime.workflow.status !== "executing" && runtime.workflow.status !== "verifying")) {
+				lines = ["No Plan Workflow is ready for delivery verification."];
+			} else if (hasIncompleteTasks) {
+				lines = ["Delivery verification requires every executable Task to succeed first."];
+			} else {
+				const result = await this._getDeliveryRuntime().run(runtime);
+				lines =
+					result.status === "repair_created" && result.repairTask
+						? [
+								`Delivery verification failed; Repair Task ${result.repairTask.id} created.`,
+								...runtime.taskDetails(result.repairTask.id),
+							]
+						: runtime.statusLines;
+			}
+		} else if (commandName === "/workflow-resume") {
+			const [action, id, ...detailParts] = args;
+			if (!action || action === "list") {
+				const workflows = PlanWorkflowRuntime.list(this.sessionManager).filter(
+					({ modeDecision }) => modeDecision?.mode === "plan",
+				);
+				lines =
+					workflows.length === 0
+						? ["No persisted Plan Workflows."]
+						: workflows.map(
+								({ id: workflowId, status, updatedAt }) => `${workflowId} | ${status} | ${updatedAt}`,
+							);
+			} else if (action === "continue" && detailParts.length === 0) {
+				const current = this._planWorkflowRuntime;
+				if (current && !current.isTerminal && (!id || id === current.workflow.id)) {
+					lines = current.statusLines;
+				} else if (current && !current.isTerminal) {
+					lines = [`Workflow ${current.workflow.id} is active; cancel it before resuming another Workflow.`];
+				} else {
+					const recovered = PlanWorkflowRuntime.recoverLatest(this.sessionManager, {}, id);
+					if (!recovered) {
+						lines = [id ? `Workflow ${id} does not exist.` : "No Plan Workflow can be resumed."];
+					} else {
+						this._planWorkflowRuntime = recovered;
+						lines = recovered.statusLines;
+					}
+				}
+			} else if (action === "retry" && id && detailParts.length === 0) {
+				const runtime = this._planWorkflowRuntime;
+				if (!runtime || runtime.workflow.status !== "executing") {
+					lines = ["No resumed Plan Workflow is executing."];
+				} else {
+					runtime.retryTask(id);
+					lines = runtime.taskDetails(id);
+				}
+			} else if (action === "cancel" && detailParts.length === 0) {
+				const current = this._planWorkflowRuntime;
+				const runtime =
+					current && (!id || current.workflow.id === id)
+						? current
+						: current && !current.isTerminal
+							? undefined
+							: PlanWorkflowRuntime.recoverLatest(this.sessionManager, {}, id);
+				if (current && !current.isTerminal && id && current.workflow.id !== id) {
+					lines = [`Workflow ${current.workflow.id} is active; cancel it before cancelling another Workflow.`];
+				} else if (!runtime || runtime.isTerminal) {
+					lines = ["No resumable Plan Workflow can be cancelled."];
+				} else {
+					this._planWorkflowRuntime = runtime;
+					await runtime.cancel("Cancelled during Workflow recovery", this._subagentRuntime, this._jobRuntime);
+					lines = runtime.statusLines;
+				}
+			} else {
+				lines = [
+					"Usage: /workflow-resume list | /workflow-resume continue [workflow-id] | /workflow-resume retry <task-id> | /workflow-resume cancel [workflow-id]",
+				];
 			}
 		} else {
 			lines = this.getWorkflowReportLines() ?? ["No Workflow has been created in this session."];

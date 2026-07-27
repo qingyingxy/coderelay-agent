@@ -8,6 +8,8 @@ import {
 	type JobProcessExit,
 	type JobProcessFactory,
 	JobRuntime,
+	type ReadonlyReviewer,
+	type ReviewResult,
 	type StartJobProcessInput,
 	SubagentRuntime,
 	WorkflowRuntimeRegistry,
@@ -162,6 +164,18 @@ class CliJobProcess implements JobProcess {
 class CliJobProcessFactory implements JobProcessFactory {
 	start(input: StartJobProcessInput): JobProcess {
 		return new CliJobProcess(input);
+	}
+}
+
+class CliPassingReviewer implements ReadonlyReviewer {
+	async review(): Promise<ReviewResult> {
+		return {
+			status: "passed",
+			summary: "Readonly review passed",
+			evidenceRefs: ["src/core/agent-session.ts:1763"],
+			risks: [],
+			unfinishedItems: [],
+		};
 	}
 }
 
@@ -461,6 +475,56 @@ describe("Plan Workflow AgentSession integration", () => {
 				}),
 			]),
 		);
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("runs the delivery gate and resumes its persisted terminal report without provider calls", async () => {
+		const jobRuntime = new JobRuntime({
+			processFactory: new CliJobProcessFactory(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const harness = await createHarness({
+			jobRuntime,
+			deliveryReviewer: new CliPassingReviewer(),
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(jobPlanContent()))]);
+
+		await harness.session.prompt("/plan");
+		await harness.session.prompt("Run and verify the CLI workflow");
+		await harness.session.prompt("/approve");
+		await harness.session.prompt("/jobs dispatch 1");
+		const implementationJob = jobRuntime.jobs()[0];
+		if (!implementationJob) {
+			throw new Error("Expected an implementation Job");
+		}
+		await harness.session.prompt(`/job wait ${implementationJob.id}`);
+		await harness.session.prompt("/verify");
+
+		const { store, workflowId } = replay(harness);
+		expect(store.getWorkflow(workflowId)?.status).toBe("completed");
+		expect(store.listVerifications(workflowId)).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					requirementId: "check",
+					status: "passed",
+				}),
+			]),
+		);
+
+		await harness.session.prompt("/workflow-resume list");
+		await harness.session.prompt(`/workflow-resume continue ${workflowId}`);
+
+		const output = harness
+			.eventsOfType("message_end")
+			.map(({ message }) => message)
+			.filter((message) => message.role === "custom" && message.customType === "workflow")
+			.map(getMessageText)
+			.join("\n");
+		expect(output).toContain("plan | completed | 1/1 tasks");
+		expect(output).toContain(`${workflowId} | completed`);
+		expect(output).toContain("Verifications:");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

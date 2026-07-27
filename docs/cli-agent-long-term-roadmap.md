@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M3 已完成（R7-R9）
+> 状态：M4 已完成（R10）
 > 最后更新：2026-07-27
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -37,6 +37,10 @@ M3 实施计划：
 - [`M3 运行保障能力实施记录`](./design/m3-runtime-guardrails-implementation-plan.md)
 - [`M3 Subagent Runtime 实施记录`](./design/m3-subagent-runtime-implementation-plan.md)
 - [`M3 Background Job Runtime 实施记录`](./design/m3-background-job-runtime-implementation-plan.md)
+
+M4 实施计划：
+
+- [`M4 交付闭环与恢复实施记录`](./design/m4-delivery-recovery-implementation-plan.md)
 
 ## 2. 状态约定
 
@@ -315,19 +319,19 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R10.1 | `TODO` | 收集 Diff 与修改归属 | 汇总实际修改文件、Diff、Task、Agent 和 Attempt | R7.5 |
-| R10.2 | `TODO` | 实现只读 Reviewer | 检查正确性、风险、遗漏和不必要修改 | R7.2、R8.9、R10.1 |
-| R10.3 | `TODO` | 执行 Test/Build | 通过 Job Runtime 运行明确验证命令 | R9.7 |
-| R10.4 | `TODO` | 统一 VerificationResult | passed、failed、skipped；skipped 必须记录原因 | R1.6、R10.2、R10.3 |
-| R10.5 | `TODO` | 实现 Completion Gate | 必要 Task 均为 Succeeded 且要求的验证通过后，Workflow 才能进入 Completed | R2.1、R2.2、R10.4 |
-| R10.6 | `TODO` | 实现 Repair Task | 验证失败后创建修复任务，不盲目重复原命令 | R6.3、R10.4 |
-| R10.7 | `TODO` | 实现受限修复循环 | 修复次数受预算和重试上限控制 | R7.10、R10.6 |
-| R10.8 | `TODO` | 生成完整最终报告 | 包含状态、任务、修改、测试、风险、未完成项和资源用量 | R1.6、R10.5 |
-| R10.9 | `TODO` | 实现 Snapshot 与事件重放 | Snapshot 加后续 Event 可以重建聚合状态 | R2.7 |
-| R10.10 | `TODO` | 处理中断运行资源 | 重启后将不确定的 Agent 和 Job 标记为 Interrupted | R8.2、R9.2、R10.9 |
-| R10.11 | `TODO` | 恢复 Writer Lease | 检查并释放失效 Lease，不把旧租约当作有效 | R7.4、R10.9 |
-| R10.12 | `TODO` | 提供 Resume CLI | 列出、继续、重试或取消中断 Workflow | R10.9-R10.11 |
-| R10.13 | `TODO` | 编写交付与恢复测试 | 覆盖验证、Repair、上限、崩溃、重放和 Lease 恢复 | R10.1-R10.12 |
+| R10.1 | `DONE` | 收集 Diff 与修改归属 | 汇总实际修改文件、Diff、Task、Agent 和 Attempt | R7.5 |
+| R10.2 | `DONE` | 实现只读 Reviewer | 检查正确性、风险、遗漏和不必要修改 | R7.2、R8.9、R10.1 |
+| R10.3 | `DONE` | 执行 Test/Build | 通过 Job Runtime 运行明确验证命令 | R9.7 |
+| R10.4 | `DONE` | 统一 VerificationResult | passed、failed、skipped；skipped 必须记录原因 | R1.6、R10.2、R10.3 |
+| R10.5 | `DONE` | 实现 Completion Gate | 必要 Task 均为 Succeeded 且要求的验证通过后，Workflow 才能进入 Completed | R2.1、R2.2、R10.4 |
+| R10.6 | `DONE` | 实现 Repair Task | 验证失败后创建修复任务，不盲目重复原命令 | R6.3、R10.4 |
+| R10.7 | `DONE` | 实现受限修复循环 | 修复次数受预算和重试上限控制 | R7.10、R10.6 |
+| R10.8 | `DONE` | 生成完整最终报告 | 包含状态、任务、修改、测试、风险、未完成项和资源用量 | R1.6、R10.5 |
+| R10.9 | `DONE` | 实现 Snapshot 与事件重放 | Snapshot 加后续 Event 可以重建聚合状态 | R2.7 |
+| R10.10 | `DONE` | 处理中断运行资源 | 重启后将不确定的 Agent 和 Job 标记为 Interrupted | R8.2、R9.2、R10.9 |
+| R10.11 | `DONE` | 恢复 Writer Lease | 检查并释放失效 Lease，不把旧租约当作有效 | R7.4、R10.9 |
+| R10.12 | `DONE` | 提供 Resume CLI | 列出、继续、重试或取消中断 Workflow | R10.9-R10.11 |
+| R10.13 | `DONE` | 编写交付与恢复测试 | 覆盖验证、Repair、上限、崩溃、重放和 Lease 恢复 | R10.1-R10.12 |
 
 ### R11：CLI 打磨、评测与作品材料
 
@@ -354,7 +358,7 @@ flowchart TB
 | M1：Direct MVP | `DONE` | R3 | 单 Agent Direct 请求可以执行、取消、验证和报告 |
 | M2：Plan 与 Task | `DONE` | R4-R6 | 自动模式、Plan 审批、Task Graph 和调度可演示 |
 | M3：受控 Runtime | `DONE` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
-| M4：交付与恢复 | `TODO` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
+| M4：交付与恢复 | `DONE` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
 | M5：作品版本 | `TODO` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 
 ## 8. Core 与 Extension 实现策略
@@ -484,11 +488,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-26 | R7 运行保障能力完成 | 权限交集、只读角色、跨进程 Writer Lease、修改归属、预算限制和级联取消已接入 Core、CLI；34 个文件、224 个 Workflow 用例和离线演示通过 |
 | 2026-07-27 | R8 Subagent 与结构化 Handoff 完成 | 独立 RPC Session、AgentRegistry、控制 API、父子层级、继承守卫、事件、Handoff、Scheduler 和 Agent CLI 已接入 Core；36 个文件、227 个 Workflow 用例，以及 Faux Provider、伪子进程与离线演示通过 |
 | 2026-07-27 | R9 Background Job Runtime 完成 | JobRegistry、后台进程、增量日志、超时与进程树清理、完成通知、Command Task 调度和 Job CLI 已接入 Core，并有本地进程、Faux Provider 与离线演示覆盖 |
+| 2026-07-27 | R10 交付闭环与恢复完成 | Diff 归属、只读 Review、Job 验证、Completion Gate、受限 Repair、终态报告、Snapshot 重放、中断与 Lease 恢复和 Resume CLI 已接入 Core，并有聚焦测试、Faux Provider 集成测试和离线演示覆盖 |
+| 2026-07-27 | M4 交付与恢复完成 | R10.1-R10.13 全部完成；Event Log 保持事实来源，Snapshot 仅用于加速恢复，不确定运行资源统一标记为 interrupted |
 
 ## 12. 下一步
 
-M0-M3 已完成并验证。下一步进入 M4：
+M0-M4 已完成并验证。下一步进入 M5：
 
-1. 完成 R10.1-R10.4：收集 Diff 与修改归属，接入 Reviewer、Test/Build 和统一 VerificationResult。
-2. 完成 R10.5-R10.8：实现 Completion Gate、Repair 循环和完整最终报告。
-3. 完成 R10.9-R10.13：实现 Snapshot、运行资源中断恢复、Writer Lease 恢复和 Resume CLI。
+1. 完成 R11.1-R11.4：统一 Workflow、Task、Plan、Agent 和 Job 的 CLI 状态与控制体验。
+2. 完成 R11.5-R11.8：补齐非交互输出、端到端回归和可重复评测集。
+3. 完成 R11.9-R11.12：整理 README、架构文档、完整演示和简历证据。

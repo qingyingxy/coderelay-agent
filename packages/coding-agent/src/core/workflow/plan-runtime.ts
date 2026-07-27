@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { DeliveryWorkflowPort } from "../delivery/types.ts";
 import type { JobRuntime } from "../jobs/job-runtime.ts";
 import type { Job } from "../jobs/types.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -7,8 +8,9 @@ import type { SubagentRuntime } from "../subagents/subagent-runtime.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
 import { type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
-import { SessionWorkflowEventLog } from "./event-log.ts";
+import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
 import { derivePlanProgress } from "./plan-progress.ts";
+import { buildDeliveryWorkflowFinalReport, type DeliveryWorkflowFinalReport } from "./report.ts";
 import {
 	evaluateBudget,
 	FULL_PERMISSION_SET,
@@ -21,7 +23,7 @@ import { type TaskDispatch, TaskScheduler } from "./scheduler.ts";
 import { WorkflowStore } from "./stores.ts";
 import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
-import type { Plan, PlanContent, PlanProgress, Task, UserRequest, Workflow } from "./types.ts";
+import type { Plan, PlanContent, PlanProgress, Task, UserRequest, VerificationResult, Workflow } from "./types.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY } from "./writer-lease.ts";
 
 export interface StartPlanRuntimeInput {
@@ -29,6 +31,7 @@ export interface StartPlanRuntimeInput {
 	readonly workflowId?: string;
 	readonly rootTaskId?: string;
 	readonly planId?: string;
+	readonly budget?: Workflow["budget"];
 }
 
 export interface StartSubagentTaskInput {
@@ -49,19 +52,22 @@ export interface JobTaskExecution {
 	readonly completion: Promise<Job>;
 }
 
-export class PlanWorkflowRuntime {
+export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 	readonly #controller: WorkflowController;
 	readonly #workflowId: string;
 	readonly #createId: (kind: "command" | "plan") => string;
+	readonly #snapshotStore: SessionWorkflowSnapshotStore;
 
 	private constructor(
 		controller: WorkflowController,
 		workflowId: string,
 		createId: (kind: "command" | "plan") => string,
+		snapshotStore: SessionWorkflowSnapshotStore,
 	) {
 		this.#controller = controller;
 		this.#workflowId = workflowId;
 		this.#createId = createId;
+		this.#snapshotStore = snapshotStore;
 	}
 
 	static start(
@@ -82,25 +88,50 @@ export class PlanWorkflowRuntime {
 			rootTaskId: input.rootTaskId ?? `task-${randomUUID()}`,
 			planId: input.planId ?? createId("plan"),
 			request: input.request,
+			budget: input.budget,
 		});
-		return new PlanWorkflowRuntime(controller, workflowId, createId);
+		const snapshotStore = new SessionWorkflowSnapshotStore(sessionManager);
+		const runtime = new PlanWorkflowRuntime(controller, workflowId, createId, snapshotStore);
+		runtime.#checkpoint();
+		return runtime;
 	}
 
 	static recoverLatest(
 		sessionManager: SessionManager,
 		controllerOptions: WorkflowControllerOptions = {},
+		workflowId?: string,
 	): PlanWorkflowRuntime | undefined {
+		const snapshotStore = new SessionWorkflowSnapshotStore(sessionManager);
+		const snapshot = snapshotStore.readLatest(workflowId);
 		const store = new WorkflowStore();
-		const controller = new WorkflowController(new SessionWorkflowEventLog(sessionManager), store, controllerOptions);
-		const workflow = store
+		const controller = new WorkflowController(new SessionWorkflowEventLog(sessionManager), store, {
+			...controllerOptions,
+			snapshot,
+		});
+		const targetWorkflowId = workflowId ?? snapshot?.workflowId;
+		const workflow = controller
 			.listWorkflows()
 			.filter((candidate) => candidate.modeDecision?.mode === "plan")
+			.filter((candidate) => targetWorkflowId === undefined || candidate.id === targetWorkflowId)
 			.at(-1);
 		if (!workflow) {
 			return undefined;
 		}
 		const createId = (kind: "command" | "plan"): string => `${kind}-${randomUUID()}`;
-		return new PlanWorkflowRuntime(controller, workflow.id, createId);
+		const runtime = new PlanWorkflowRuntime(controller, workflow.id, createId, snapshotStore);
+		controller.recoverInterrupted({
+			commandId: createId("command"),
+			workflowId: workflow.id,
+			reason: "CLI restarted before the runtime resource reported a terminal state",
+		});
+		DEFAULT_WRITER_LEASE_REGISTRY.releaseRecovered(workflow.id, workflow.request.cwd);
+		runtime.#checkpoint();
+		return runtime;
+	}
+
+	static list(sessionManager: SessionManager): readonly Workflow[] {
+		const controller = new WorkflowController(new SessionWorkflowEventLog(sessionManager), new WorkflowStore());
+		return controller.listWorkflows();
 	}
 
 	get workflow(): Workflow {
@@ -124,6 +155,10 @@ export class PlanWorkflowRuntime {
 		return this.#controller.listTasks(this.#workflowId);
 	}
 
+	get verifications(): readonly VerificationResult[] {
+		return this.#controller.listVerifications(this.#workflowId);
+	}
+
 	get progress(): PlanProgress {
 		return derivePlanProgress(this.currentPlan, this.tasks);
 	}
@@ -135,6 +170,9 @@ export class PlanWorkflowRuntime {
 	get statusLines(): readonly string[] {
 		const workflow = this.workflow;
 		const plan = this.currentPlan;
+		if (isWorkflowTerminalStatus(workflow.status) && workflow.result && plan.status === "approved") {
+			return this.finalReport?.lines ?? [];
+		}
 		const progress = this.progress;
 		return [
 			`plan | ${workflow.status} | Plan v${plan.version}: ${plan.status} | ${progress.succeededSteps}/${progress.totalSteps} steps`,
@@ -143,6 +181,19 @@ export class PlanWorkflowRuntime {
 			`Goal: ${plan.goal || "(draft)"}`,
 			...plan.steps.map((step, index) => `${index + 1}. ${step.title}`),
 		];
+	}
+
+	get finalReport(): DeliveryWorkflowFinalReport | undefined {
+		const workflow = this.workflow;
+		if (!isWorkflowTerminalStatus(workflow.status) || !workflow.result) {
+			return undefined;
+		}
+		return buildDeliveryWorkflowFinalReport({
+			workflow,
+			tasks: this.tasks,
+			attempts: this.tasks.flatMap(({ id }) => this.#controller.listAttempts(id)),
+			verifications: this.verifications,
+		});
 	}
 
 	get taskTreeLines(): readonly string[] {
@@ -270,6 +321,7 @@ export class PlanWorkflowRuntime {
 					if (writerLease) {
 						DEFAULT_WRITER_LEASE_REGISTRY.release(writerLease.id);
 					}
+					this.#checkpoint();
 				});
 			return { job: runtime.registry.get(job.id) ?? job, completion };
 		} catch (error) {
@@ -383,7 +435,10 @@ export class PlanWorkflowRuntime {
 			await runtime.interrupt(agent.id, "Task dispatch failed").catch(() => undefined);
 			throw error;
 		}
-		const completion = runtime.wait(agent.id).then((result) => this.#finishSubagentTask(task.id, attemptId, result));
+		const completion = runtime
+			.wait(agent.id)
+			.then((result) => this.#finishSubagentTask(task.id, attemptId, result))
+			.finally(() => this.#checkpoint());
 		return { agent: runtime.registry.get(agent.id) ?? agent, completion };
 	}
 
@@ -409,6 +464,7 @@ export class PlanWorkflowRuntime {
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 		});
+		this.#checkpoint();
 	}
 
 	retryTask(taskId: string): void {
@@ -417,6 +473,7 @@ export class PlanWorkflowRuntime {
 			workflowId: this.#workflowId,
 			taskId,
 		});
+		this.#checkpoint();
 	}
 
 	cancelTask(taskId: string, reason: string): void {
@@ -426,6 +483,7 @@ export class PlanWorkflowRuntime {
 			taskId,
 			reason,
 		});
+		this.#checkpoint();
 	}
 
 	async cancel(
@@ -471,6 +529,7 @@ export class PlanWorkflowRuntime {
 			runtimeResourcesStopped: true,
 			writerLeaseReleased: true,
 		});
+		this.#checkpoint();
 	}
 
 	submit(content: PlanContent): void {
@@ -482,6 +541,7 @@ export class PlanWorkflowRuntime {
 			content,
 			plannerReadOnly: true,
 		});
+		this.#checkpoint();
 	}
 
 	approve(comment = "Approved by user"): void {
@@ -492,6 +552,7 @@ export class PlanWorkflowRuntime {
 			planId: plan.id,
 			comment,
 		});
+		this.#checkpoint();
 	}
 
 	reject(comment: string): void {
@@ -502,6 +563,7 @@ export class PlanWorkflowRuntime {
 			planId: plan.id,
 			comment,
 		});
+		this.#checkpoint();
 	}
 
 	revise(comment: string): void {
@@ -513,6 +575,89 @@ export class PlanWorkflowRuntime {
 			replacementPlanId: this.#createId("plan"),
 			comment,
 		});
+		this.#checkpoint();
+	}
+
+	beginVerification(): void {
+		this.#controller.beginDeliveryVerification({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+		});
+		this.#checkpoint();
+	}
+
+	recordVerification(input: {
+		readonly verificationId: string;
+		readonly requirementId: string;
+		readonly actor?: {
+			readonly kind: "controller" | "agent" | "job";
+			readonly id?: string;
+		};
+		readonly status: Extract<VerificationResult["status"], "passed" | "failed" | "skipped">;
+		readonly summary: string;
+		readonly evidenceRefs?: readonly string[];
+		readonly command?: string;
+		readonly exitCode?: number;
+		readonly skipReason?: string;
+	}): void {
+		this.#controller.recordDeliveryVerification({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			...input,
+		});
+		this.#checkpoint();
+	}
+
+	createRepair(failedVerificationId: string): Task {
+		const taskId = `task-${randomUUID()}`;
+		this.#controller.createRepairTask({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId,
+			failedVerificationId,
+		});
+		this.#checkpoint();
+		const task = this.#controller.getTask(taskId);
+		if (!task) {
+			throw new Error(`Repair Task ${taskId} was not created`);
+		}
+		return task;
+	}
+
+	completeDelivery(input: {
+		readonly summary: string;
+		readonly risks: readonly string[];
+		readonly unfinishedItems: readonly string[];
+	}): void {
+		this.#controller.completeDelivery({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			...input,
+		});
+		this.#checkpoint();
+	}
+
+	failDelivery(reason: string): void {
+		const workflow = this.workflow;
+		const rootTaskId = workflow.rootTaskId;
+		if (!rootTaskId) {
+			throw new Error(`Workflow ${workflow.id} has no root Task`);
+		}
+		const usage = sumResourceUsage(
+			this.tasks
+				.flatMap(({ id }) => this.#controller.listAttempts(id))
+				.map(({ usage: attemptUsage }) => attemptUsage),
+		);
+		this.#controller.fail({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: rootTaskId,
+			reason,
+			usage,
+			durationMs: Math.max(0, Date.now() - Date.parse(workflow.createdAt)),
+			runtimeResourcesStopped: true,
+		});
+		this.#checkpoint();
 	}
 
 	async #finishSubagentTask(taskId: string, attemptId: string, result: AgentRunResult): Promise<AgentRunResult> {
@@ -589,6 +734,10 @@ export class PlanWorkflowRuntime {
 			},
 		});
 		return result;
+	}
+
+	#checkpoint(): void {
+		this.#snapshotStore.append(this.#controller.createSnapshot(this.#workflowId));
 	}
 
 	async #finishJobTask(taskId: string, attemptId: string, result: Job): Promise<Job> {

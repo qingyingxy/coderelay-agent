@@ -34,6 +34,7 @@
 		"demo:runtime-guardrails": "tsx packages/coding-agent/examples/sdk/17-runtime-guardrails-demo.ts",
 		"demo:subagent-runtime": "tsx packages/coding-agent/examples/sdk/18-subagent-runtime-demo.ts",
 		"demo:job-runtime": "tsx packages/coding-agent/examples/sdk/19-background-job-runtime-demo.ts",
+		"demo:delivery-recovery": "tsx packages/coding-agent/examples/sdk/20-delivery-recovery-demo.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run test:scripts && npm run test --workspaces --if-present",
