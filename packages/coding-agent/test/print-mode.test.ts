@@ -1,7 +1,9 @@
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { WorkflowView } from "../src/core/workflow/view.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+import { ZERO_USAGE } from "./workflow/fixtures.ts";
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -19,6 +21,7 @@ type FakeSession = {
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
+	getWorkflowView: ReturnType<typeof vi.fn>;
 };
 
 type FakeRuntimeHost = {
@@ -55,7 +58,66 @@ function createAssistantMessage(options?: {
 	};
 }
 
-function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost {
+function createWorkflowView(): WorkflowView {
+	const task: WorkflowView["tasks"][number] = {
+		schemaVersion: 1,
+		revision: 1,
+		createdAt: "2026-07-27T00:00:00.000Z",
+		updatedAt: "2026-07-27T00:00:01.000Z",
+		id: "task-print",
+		workflowId: "workflow-print",
+		kind: "agent",
+		accessMode: "writer",
+		title: "Print Workflow",
+		description: "Print Workflow",
+		status: "succeeded",
+		dependencyIds: [],
+		budget: {},
+		usage: ZERO_USAGE,
+		attemptIds: [],
+		verificationRequirements: [],
+		modifications: [],
+	};
+	return {
+		schemaVersion: 1,
+		workflow: {
+			schemaVersion: 1,
+			revision: 2,
+			createdAt: "2026-07-27T00:00:00.000Z",
+			updatedAt: "2026-07-27T00:00:01.000Z",
+			id: "workflow-print",
+			status: "completed",
+			rootTaskId: task.id,
+			request: { text: "Print Workflow", cwd: "C:/repo", attachments: [] },
+			budget: {},
+			usage: ZERO_USAGE,
+			result: {
+				status: "completed",
+				summary: "Print Workflow completed",
+				completedTaskIds: [task.id],
+				failedTaskIds: [],
+				changedFiles: [],
+				verificationIds: [],
+				risks: [],
+				unfinishedItems: [],
+				usage: ZERO_USAGE,
+				durationMs: 1,
+			},
+		},
+		rootTask: task,
+		tasks: [task],
+		attempts: [],
+		verifications: [],
+		agents: [],
+		jobs: [],
+		statusLine: "direct | completed | root: task-print",
+		reportLines: ["direct | completed | root: task-print", "Summary: Print Workflow completed"],
+		budgetStatus: "Budget: within limits",
+		availableActions: ["resume"],
+	};
+}
+
+function createRuntimeHost(assistantMessage: AssistantMessage, workflow?: WorkflowView): FakeRuntimeHost {
 	const extensionRunner: FakeExtensionRunner = {
 		hasHandlers: (eventType: string) => eventType === "session_shutdown",
 		emit: vi.fn(async () => {}),
@@ -72,6 +134,7 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
+		getWorkflowView: vi.fn(() => workflow),
 	};
 
 	return {
@@ -138,5 +201,42 @@ describe("runPrintMode", () => {
 		expect(errorSpy).toHaveBeenCalledWith("provider failure");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("prints the authoritative Workflow report when requested", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }), createWorkflowView());
+		const chunks: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk, encodingOrCallback, callback) => {
+			chunks.push(String(chunk));
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			done?.();
+			return true;
+		}) as typeof process.stdout.write);
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			includeWorkflowReport: true,
+		});
+
+		expect(exitCode).toBe(0);
+		expect(chunks.join("")).toContain("[workflow]\ndirect | completed | root: task-print");
+	});
+
+	it("emits a structured workflow_result in JSON mode", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }), createWorkflowView());
+		const chunks: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk, encodingOrCallback, callback) => {
+			chunks.push(String(chunk));
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			done?.();
+			return true;
+		}) as typeof process.stdout.write);
+
+		await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "json",
+		});
+
+		expect(chunks.join("")).toContain('"type":"workflow_result"');
+		expect(chunks.join("")).toContain('"id":"workflow-print"');
 	});
 });

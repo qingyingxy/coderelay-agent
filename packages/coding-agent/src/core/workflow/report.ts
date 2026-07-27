@@ -129,14 +129,15 @@ export function formatWorkflowStatusLine(input: FormatWorkflowStatusLineInput): 
 	const mode = workflow.modeDecision?.mode ?? "direct";
 	if (isWorkflowTerminalStatus(workflow.status) && workflow.result) {
 		const fileCount = workflow.result.changedFiles.length;
-		return `${mode} | ${workflow.status} | 1 task | ${fileCount} ${fileCount === 1 ? "file" : "files"} | tests: not configured`;
+		const stopReason = workflow.result.reason ? ` | stop: ${workflow.result.reason}` : "";
+		return `${mode} | ${workflow.status} | root: ${rootTask.id} | 1 task | ${fileCount} ${fileCount === 1 ? "file" : "files"} | tests: not configured${stopReason}`;
 	}
 
 	const latestAttempt = input.attempts.reduce(
 		(latest, attempt) => (latest === undefined || attempt.number > latest.number ? attempt : latest),
 		undefined as Attempt | undefined,
 	);
-	return `${mode} | ${workflow.status} | task: ${rootTask.status} | attempt: ${latestAttempt?.number ?? 0}`;
+	return `${mode} | ${workflow.status} | root: ${rootTask.id} (${rootTask.status}) | attempt: ${latestAttempt?.number ?? 0}`;
 }
 
 /** Build the structured M1 terminal report consumed by the later CLI presentation layer. */
@@ -245,7 +246,8 @@ export function buildDeliveryWorkflowFinalReport(input: {
 	const verificationLines = input.verifications.map(
 		({ requirementId, status, summary }) => `${requirementId}: ${status} | ${summary}`,
 	);
-	const statusLine = `plan | ${workflow.status} | ${tasks.filter(({ status }) => status === "succeeded").length}/${tasks.length} tasks | ${workflow.result.changedFiles.length} files`;
+	const stopReason = workflow.result.reason ? ` | stop: ${workflow.result.reason}` : "";
+	const statusLine = `plan | ${workflow.status} | root: ${workflow.rootTaskId ?? "(none)"} | ${tasks.filter(({ status }) => status === "succeeded").length}/${tasks.length} tasks | ${workflow.result.changedFiles.length} files${stopReason}`;
 	const lines = [
 		statusLine,
 		`Summary: ${workflow.result.summary}`,

@@ -26,4 +26,24 @@ describe("RpcClient clone", () => {
 		expect(send).toHaveBeenCalledWith({ type: "clone" });
 		expect(result).toEqual({ cancelled: false });
 	});
+
+	it("sends the get_workflow RPC command", async () => {
+		const client = new RpcClient();
+		const privateClient = client as unknown as RpcClientPrivate;
+		const send = vi.fn(async () => ({
+			type: "response",
+			command: "get_workflow",
+			success: true,
+			data: { workflow: null },
+		}));
+		privateClient.send = send;
+		privateClient.getData = <T>(response: unknown): T => {
+			return (response as { data: T }).data;
+		};
+
+		const result = await client.getWorkflow();
+
+		expect(send).toHaveBeenCalledWith({ type: "get_workflow" });
+		expect(result).toBeNull();
+	});
 });

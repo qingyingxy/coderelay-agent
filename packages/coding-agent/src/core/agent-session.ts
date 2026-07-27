@@ -127,6 +127,7 @@ import {
 	parsePlannerPlanContent,
 } from "./workflow/planner-runtime.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
+import type { WorkflowView } from "./workflow/view.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -343,6 +344,7 @@ export class AgentSession {
 	/** The workflow adapter for the in-flight Direct workflow, if any. */
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
+	private _latestWorkflowView: WorkflowView | undefined;
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
 	private _subagentRuntime: SubagentRuntime | undefined;
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
@@ -1127,6 +1129,10 @@ export class AgentSession {
 			if (finalReport) {
 				this._latestWorkflowReport = finalReport;
 			}
+			const view = adapter.view;
+			if (view) {
+				this._latestWorkflowView = view;
+			}
 			return true;
 		}
 		const planRuntime = this._planWorkflowRuntime;
@@ -1142,21 +1148,30 @@ export class AgentSession {
 		return this._latestWorkflowReport ? structuredClone(this._latestWorkflowReport) : undefined;
 	}
 
+	/** Return a serializable, UI-independent view of the current or latest Workflow. */
+	getWorkflowView(): WorkflowView | undefined {
+		const active = this._activeWorkflowAdapter?.view;
+		if (active) {
+			return structuredClone(active);
+		}
+		const planRuntime = this._planWorkflowRuntime;
+		if (planRuntime) {
+			const workflowId = planRuntime.workflow.id;
+			return structuredClone(
+				planRuntime.view(this._subagentRuntime?.list(workflowId) ?? [], this._jobRuntime?.jobs(workflowId) ?? []),
+			);
+		}
+		return this._latestWorkflowView ? structuredClone(this._latestWorkflowView) : undefined;
+	}
+
 	/** Return the current or latest authoritative Workflow status line for CLI presentation. */
 	getWorkflowStatusLine(): string | undefined {
-		return (
-			this._activeWorkflowAdapter?.statusLine ??
-			this._planWorkflowRuntime?.statusLines[0] ??
-			this._latestWorkflowReport?.statusLine
-		);
+		return this.getWorkflowView()?.statusLine ?? this._latestWorkflowReport?.statusLine;
 	}
 
 	/** Return the current or latest Workflow summary rendered by `/workflow`. */
 	getWorkflowReportLines(): readonly string[] | undefined {
-		const lines =
-			this._activeWorkflowAdapter?.statusLines ??
-			this._planWorkflowRuntime?.statusLines ??
-			this._latestWorkflowReport?.lines;
+		const lines = this.getWorkflowView()?.reportLines ?? this._latestWorkflowReport?.lines;
 		return lines ? [...lines] : undefined;
 	}
 
@@ -1236,6 +1251,9 @@ export class AgentSession {
 	}
 
 	private _startDirectWorkflow(requestText: string): AgentSessionAdapter {
+		if (this._planWorkflowRuntime?.isTerminal) {
+			this._planWorkflowRuntime = undefined;
+		}
 		return startDirectAgentSessionWorkflow(this, {
 			commandId: `command-${randomUUID()}`,
 			workflowId: `workflow-${randomUUID()}`,
@@ -1478,6 +1496,10 @@ export class AgentSession {
 			if (finalReport) {
 				this._latestWorkflowReport = finalReport;
 			}
+			const view = workflowAdapter?.view;
+			if (view) {
+				this._latestWorkflowView = view;
+			}
 			if (this._activeWorkflowAdapter === workflowAdapter) {
 				this._activeWorkflowAdapter = undefined;
 			}
@@ -1493,6 +1515,7 @@ export class AgentSession {
 		const [commandName, ...args] = text.trim().split(/\s+/);
 		if (
 			commandName !== "/workflow" &&
+			commandName !== "/cancel" &&
 			commandName !== "/workflow-cancel" &&
 			commandName !== "/plan" &&
 			commandName !== "/approve" &&
@@ -1511,16 +1534,12 @@ export class AgentSession {
 		}
 
 		let lines: readonly string[];
-		if (
-			(commandName === "/workflow" ||
-				commandName === "/workflow-cancel" ||
-				commandName === "/plan" ||
-				commandName === "/tasks") &&
-			args.length > 0
-		) {
+		if ((commandName === "/workflow" || commandName === "/plan" || commandName === "/tasks") && args.length > 0) {
 			lines = [`Usage: ${commandName}`];
-		} else if (commandName === "/workflow-cancel") {
-			const cancelled = await this.cancelWorkflow();
+		} else if (commandName === "/workflow-cancel" && args.length > 0) {
+			lines = ["Usage: /workflow-cancel"];
+		} else if (commandName === "/workflow-cancel" || commandName === "/cancel") {
+			const cancelled = await this.cancelWorkflow(args.join(" ") || "Cancelled by user");
 			lines = cancelled
 				? (this.getWorkflowReportLines() ?? ["Workflow cancellation completed."])
 				: ["No active Workflow to cancel."];
@@ -1564,12 +1583,14 @@ export class AgentSession {
 			}
 		} else if (commandName === "/tasks") {
 			const runtime = this._planWorkflowRuntime;
-			if (!runtime || runtime.workflow.status !== "executing") {
-				lines = ["No Plan Workflow is executing."];
+			if (!runtime) {
+				lines = ["No Plan Workflow exists."];
 			} else {
-				runtime.refreshTaskReadiness();
+				if (runtime.workflow.status === "executing") {
+					runtime.refreshTaskReadiness();
+				}
 				const maxConcurrency = Math.max(1, runtime.workflow.budget.maxConcurrentAgents ?? 4);
-				const dispatches = runtime.selectDispatches(maxConcurrency);
+				const dispatches = runtime.workflow.status === "executing" ? runtime.selectDispatches(maxConcurrency) : [];
 				lines = [
 					`Tasks | ${runtime.workflow.status} | ${runtime.progress.succeededSteps}/${runtime.progress.totalSteps} steps`,
 					runtime.budgetStatusLine,
@@ -1581,12 +1602,14 @@ export class AgentSession {
 		} else if (commandName === "/task") {
 			const runtime = this._planWorkflowRuntime;
 			const [action, taskId, ...detailParts] = args;
-			if (!runtime || runtime.workflow.status !== "executing") {
-				lines = ["No Plan Workflow is executing."];
+			if (!runtime) {
+				lines = ["No Plan Workflow exists."];
 			} else if (!action || !taskId || !["show", "retry", "cancel"].includes(action)) {
 				lines = ["Usage: /task show <id> | /task retry <id> | /task cancel <id> [reason]"];
 			} else if (action === "show") {
 				lines = runtime.taskDetails(taskId);
+			} else if (runtime.workflow.status !== "executing") {
+				lines = [`Plan Workflow is ${runtime.workflow.status}; Task mutation is unavailable.`];
 			} else if (action === "retry") {
 				runtime.retryTask(taskId);
 				lines = runtime.taskDetails(taskId);
@@ -1846,11 +1869,13 @@ export class AgentSession {
 			details: {
 				command: commandName,
 				statusLine: this.getWorkflowStatusLine(),
+				workflow: this.getWorkflowView(),
 			},
 			timestamp: Date.now(),
 		} satisfies CustomMessage<{
 			readonly command: string;
 			readonly statusLine: string | undefined;
+			readonly workflow: WorkflowView | undefined;
 		}>;
 		// Workflow command output is presentation-only: do not persist it or add it
 		// to Agent state, because a status query must never become model context.

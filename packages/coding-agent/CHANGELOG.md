@@ -10,6 +10,7 @@
 - Added a formal Subagent Runtime with independent RPC sessions, Agent Registry and control commands, inherited guardrails, structured Handoff validation and aggregation, Scheduler integration, and Agent CLI status.
 - Added a Background Job Runtime with Command Task scheduling, incremental stdout/stderr logs, timeout and process-tree cleanup, completion notifications, and Job CLI controls.
 - Added a delivery and recovery runtime with scoped Diff ownership, read-only Review, Job-backed Test/Build verification, bounded Repair Tasks, Completion Gate, terminal reports, Workflow Snapshots, interrupted-resource recovery, and Resume CLI controls.
+- Added a unified Workflow view across interactive, Print, JSON, and RPC modes, richer Task/Agent/Job status, deterministic CLI evaluation, and an offline end-to-end showcase.
 
 ## [0.82.1] - 2026-07-25
 

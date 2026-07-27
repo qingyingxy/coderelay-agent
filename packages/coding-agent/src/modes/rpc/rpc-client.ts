@@ -11,6 +11,7 @@ import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.t
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { WorkflowView } from "../../core/workflow/view.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
@@ -240,6 +241,14 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.send({ type: "get_state" });
 		return this.getData(response);
+	}
+
+	/**
+	 * Get the current or latest structured Workflow view.
+	 */
+	async getWorkflow(): Promise<WorkflowView | null> {
+		const response = await this.send({ type: "get_workflow" });
+		return this.getData<{ workflow: WorkflowView | null }>(response).workflow;
 	}
 
 	/**

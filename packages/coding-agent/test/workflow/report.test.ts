@@ -133,7 +133,7 @@ describe("buildBasicVerificationReport", () => {
 			workflowId: "workflow-1",
 			mode: "direct",
 			status: "completed",
-			statusLine: "direct | completed | 1 task | 1 file | tests: not configured",
+			statusLine: "direct | completed | root: task-1 | 1 task | 1 file | tests: not configured",
 			task: {
 				status: "succeeded",
 			},

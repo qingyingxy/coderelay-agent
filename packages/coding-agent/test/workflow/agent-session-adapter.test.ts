@@ -147,9 +147,14 @@ describe("AgentSessionAdapter", () => {
 		session.emit({ type: "agent_start" });
 		const runningTask = adapter.controller.getRootTask(WORKFLOW_ID);
 		expect(runningTask?.status).toBe("running");
-		expect(adapter.statusLine).toBe("direct | executing | task: running | attempt: 1");
+		expect(adapter.statusLine).toBe(
+			"direct | executing | root: task-1 (running) | attempt: 1 | Budget: within limits",
+		);
 		expect(adapter.statusLines).toEqual(
-			expect.arrayContaining(["Budget: within limits", expect.stringMatching(/^Writer Lease: held \| /)]),
+			expect.arrayContaining([
+				"direct | executing | root: task-1 (running) | attempt: 1 | Budget: within limits",
+				expect.stringMatching(/^Writer Lease: held \| /),
+			]),
 		);
 
 		emitRun(session, fauxAssistantMessage("Implemented"), false);
@@ -182,13 +187,15 @@ describe("AgentSessionAdapter", () => {
 		]);
 		expect(adapter.finalReport).toMatchObject({
 			status: "completed",
-			statusLine: "direct | completed | 1 task | 0 files | tests: not configured",
+			statusLine: "direct | completed | root: task-1 | 1 task | 0 files | tests: not configured",
 			task: {
 				status: "succeeded",
 			},
 			attempts: [{ number: 1, status: "succeeded" }],
 		});
-		expect(adapter.statusLines?.[0]).toBe("direct | completed | 1 task | 0 files | tests: not configured");
+		expect(adapter.statusLines?.[0]).toBe(
+			"direct | completed | root: task-1 | 1 task | 0 files | tests: not configured",
+		);
 
 		adapter.dispose();
 	});
@@ -446,7 +453,7 @@ describe("AgentSessionAdapter", () => {
 			status: "draft",
 			version: 1,
 		});
-		expect(adapter.statusLine).toBe("plan | planning | task: ready | attempt: 1");
+		expect(adapter.statusLine).toBe("plan | planning | root: task-1 (ready) | attempt: 1 | Budget: within limits");
 
 		adapter.dispose();
 	});

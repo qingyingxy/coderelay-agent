@@ -35,6 +35,8 @@
 		"demo:subagent-runtime": "tsx packages/coding-agent/examples/sdk/18-subagent-runtime-demo.ts",
 		"demo:job-runtime": "tsx packages/coding-agent/examples/sdk/19-background-job-runtime-demo.ts",
 		"demo:delivery-recovery": "tsx packages/coding-agent/examples/sdk/20-delivery-recovery-demo.ts",
+		"eval:cli-agent": "tsx packages/coding-agent/examples/sdk/21-cli-agent-evaluation.ts",
+		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run test:scripts && npm run test --workspaces --if-present",

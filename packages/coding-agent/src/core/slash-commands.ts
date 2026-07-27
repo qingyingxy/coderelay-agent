@@ -27,6 +27,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "name", description: "Set session display name" },
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "workflow", description: "Show the current or latest Workflow status" },
+	{ name: "cancel", description: "Cancel the active Workflow", argumentHint: "[reason]" },
 	{ name: "workflow-cancel", description: "Cancel the active Workflow" },
 	{
 		name: "workflow-resume",

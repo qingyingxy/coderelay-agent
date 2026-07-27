@@ -19,6 +19,7 @@ import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from 
 import { WorkflowStore } from "./stores.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type { AttemptId, ResourceUsage, TaskId, VerificationId, WorkflowId } from "./types.ts";
+import { buildWorkflowView, type WorkflowView } from "./view.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "./writer-lease.ts";
 
 /** Built-in tools whose successful results contribute to the changed-file summary. */
@@ -221,11 +222,18 @@ export class AgentSessionAdapter {
 		if (!workflow || !rootTask) {
 			return undefined;
 		}
-		return formatWorkflowStatusLine({
+		const attempts = this.#controller.listAttempts(rootTask.id);
+		const status = formatWorkflowStatusLine({
 			workflow,
 			rootTask,
-			attempts: this.#controller.listAttempts(rootTask.id),
+			attempts,
 		});
+		const budget = formatBudgetEvaluation(
+			evaluateBudget(workflow.budget, sumResourceUsage(attempts.map(({ usage }) => usage)), {
+				activeAgents: rootTask.status === "running" || rootTask.status === "verifying" ? 1 : 0,
+			}),
+		);
+		return `${status} | ${budget}`;
 	}
 
 	/** Current or terminal summary rendered by `/workflow`. */
@@ -240,19 +248,39 @@ export class AgentSessionAdapter {
 		if (!workflow || !rootTask || !statusLine) {
 			return undefined;
 		}
-		const attempts = this.#controller.listAttempts(rootTask.id);
-		const budgetLine = formatBudgetEvaluation(
-			evaluateBudget(workflow.budget, sumResourceUsage(attempts.map(({ usage }) => usage)), {
-				activeAgents: rootTask.status === "running" || rootTask.status === "verifying" ? 1 : 0,
-			}),
-		);
 		return [
 			statusLine,
 			`Workflow ID: ${workflow.id}`,
 			`Task: ${rootTask.status} | ${rootTask.title}`,
-			budgetLine,
 			`Writer Lease: ${this.#writerLeaseId ? `held | ${this.#writerLeaseId}` : "not held"}`,
 		];
+	}
+
+	get view(): WorkflowView | undefined {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		const rootTask = this.#controller.getRootTask(this.#workflowId);
+		const statusLine = this.statusLine;
+		const reportLines = this.statusLines;
+		if (!workflow || !rootTask || !statusLine || !reportLines) {
+			return undefined;
+		}
+		const attempts = this.#controller.listAttempts(rootTask.id);
+		return buildWorkflowView({
+			workflow,
+			rootTask,
+			tasks: [rootTask],
+			attempts,
+			verifications: this.#controller.listVerifications(workflow.id),
+			agents: [],
+			jobs: [],
+			statusLine,
+			reportLines,
+			budgetStatus: formatBudgetEvaluation(
+				evaluateBudget(workflow.budget, sumResourceUsage(attempts.map(({ usage }) => usage)), {
+					activeAgents: rootTask.status === "running" || rootTask.status === "verifying" ? 1 : 0,
+				}),
+			),
+		});
 	}
 
 	start(): this {

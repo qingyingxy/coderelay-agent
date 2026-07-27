@@ -23,6 +23,8 @@ export interface PrintModeOptions {
 	initialMessage?: string;
 	/** Images to attach to the initial message */
 	initialImages?: ImageContent[];
+	/** Append the authoritative Workflow report after the Assistant text. */
+	includeWorkflowReport?: boolean;
 }
 
 /**
@@ -30,7 +32,7 @@ export interface PrintModeOptions {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
-	const { mode, messages = [], initialMessage, initialImages } = options;
+	const { mode, messages = [], initialMessage, initialImages, includeWorkflowReport = false } = options;
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
@@ -126,6 +128,11 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			await session.prompt(message);
 		}
 
+		const workflow = session.getWorkflowView();
+		if (mode === "json" && workflow) {
+			writeRawStdout(`${JSON.stringify({ type: "workflow_result", workflow })}\n`);
+		}
+
 		if (mode === "text") {
 			const state = session.state;
 			const lastMessage = state.messages[state.messages.length - 1];
@@ -143,6 +150,12 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					}
 				}
 			}
+			if (includeWorkflowReport && workflow) {
+				writeRawStdout(`[workflow]\n${workflow.reportLines.join("\n")}\n`);
+			}
+		}
+		if (workflow?.workflow.result?.status === "failed" || workflow?.workflow.result?.status === "cancelled") {
+			exitCode = 1;
 		}
 
 		return exitCode;

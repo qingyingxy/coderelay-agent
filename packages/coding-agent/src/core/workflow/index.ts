@@ -24,4 +24,5 @@ export * from "./task-graph.ts";
 export * from "./task-report.ts";
 export * from "./transitions.ts";
 export * from "./types.ts";
+export * from "./view.ts";
 export * from "./writer-lease.ts";

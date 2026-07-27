@@ -23,7 +23,17 @@ import { type TaskDispatch, TaskScheduler } from "./scheduler.ts";
 import { WorkflowStore } from "./stores.ts";
 import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
-import type { Plan, PlanContent, PlanProgress, Task, UserRequest, VerificationResult, Workflow } from "./types.ts";
+import type {
+	Attempt,
+	Plan,
+	PlanContent,
+	PlanProgress,
+	Task,
+	UserRequest,
+	VerificationResult,
+	Workflow,
+} from "./types.ts";
+import { buildWorkflowView, type WorkflowView } from "./view.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY } from "./writer-lease.ts";
 
 export interface StartPlanRuntimeInput {
@@ -159,6 +169,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		return this.#controller.listVerifications(this.#workflowId);
 	}
 
+	get attempts(): readonly Attempt[] {
+		return this.tasks.flatMap(({ id }) => this.#controller.listAttempts(id));
+	}
+
 	get progress(): PlanProgress {
 		return derivePlanProgress(this.currentPlan, this.tasks);
 	}
@@ -174,11 +188,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			return this.finalReport?.lines ?? [];
 		}
 		const progress = this.progress;
+		const stopReason = workflow.result?.reason ? ` | stop: ${workflow.result.reason}` : "";
 		return [
-			`plan | ${workflow.status} | Plan v${plan.version}: ${plan.status} | ${progress.succeededSteps}/${progress.totalSteps} steps`,
-			this.budgetStatusLine,
+			`plan | ${workflow.status} | root: ${workflow.rootTaskId ?? "(none)"} | ${progress.succeededSteps}/${progress.totalSteps} tasks | ${this.budgetStatusLine}${stopReason}`,
 			this.writerLeaseStatusLine,
-			`Goal: ${plan.goal || "(draft)"}`,
+			`Plan v${plan.version}: ${plan.status} | Goal: ${plan.goal || "(draft)"}`,
 			...plan.steps.map((step, index) => `${index + 1}. ${step.title}`),
 		];
 	}
@@ -196,8 +210,34 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		});
 	}
 
+	view(agents: readonly AgentInstance[] = [], jobs: readonly Job[] = []): WorkflowView {
+		const workflow = this.workflow;
+		const rootTask = this.tasks.find(({ id }) => id === workflow.rootTaskId);
+		const reportLines = this.statusLines;
+		const reportStatusLine = reportLines[0] ?? `plan | ${workflow.status}`;
+		const statusLine = reportStatusLine.includes("Budget:")
+			? reportStatusLine
+			: `${reportStatusLine} | ${this.budgetStatusLine}`;
+		return buildWorkflowView({
+			workflow,
+			plan: this.currentPlan,
+			rootTask,
+			tasks: this.tasks,
+			attempts: this.attempts,
+			verifications: this.verifications,
+			agents,
+			jobs,
+			statusLine,
+			reportLines,
+			budgetStatus: this.budgetStatusLine,
+		});
+	}
+
 	get taskTreeLines(): readonly string[] {
-		return formatTaskTree(this.#workflowId, this.tasks);
+		return formatTaskTree(this.#workflowId, this.tasks, {
+			attempts: this.attempts,
+			verifications: this.verifications,
+		});
 	}
 
 	get budgetStatusLine(): string {
@@ -456,7 +496,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		if (!task || task.workflowId !== this.#workflowId) {
 			throw new Error(`Task ${taskId} does not exist in workflow ${this.#workflowId}`);
 		}
-		return formatTaskDetails(task, this.#controller.listAttempts(task.id));
+		return formatTaskDetails(
+			task,
+			this.#controller.listAttempts(task.id),
+			this.verifications.filter(({ taskId }) => taskId === task.id),
+		);
 	}
 
 	refreshTaskReadiness(): void {
@@ -552,7 +596,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			planId: plan.id,
 			comment,
 		});
-		this.#checkpoint();
+		this.refreshTaskReadiness();
 	}
 
 	reject(comment: string): void {

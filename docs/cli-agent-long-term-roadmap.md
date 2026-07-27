@@ -337,18 +337,18 @@ flowchart TB
 
 | ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
 |---|---|---|---|---|
-| R11.1 | `TODO` | 完善 Workflow 状态栏 | 展示模式、阶段、根 Task、预算和停止原因 | R7.6、R10.8 |
-| R11.2 | `TODO` | 完善 Task Tree | 展示父子、依赖、状态、Agent、Attempt 和验证结果 | R6.8、R10.4 |
-| R11.3 | `TODO` | 完善 Plan、Agent、Job 面板 | 统一交互与状态表达，避免重复信息 | R5.8、R8.10、R9.8 |
-| R11.4 | `TODO` | 完善控制命令 | `/plan`、`/tasks`、`/agents`、`/jobs`、`/cancel`、`/resume` | 各相关阶段 |
-| R11.5 | `TODO` | 支持非交互输出 | Print、JSON、RPC 可以表达 Workflow、Task 和最终结果 | R10.8 |
-| R11.6 | `TODO` | 验证最小打扰原则 | 只在批准、关键澄清和权限扩大时暂停用户 | R4.4、R5.4、R7.1 |
-| R11.7 | `TODO` | 建立 CLI 端到端回归 | 覆盖 Direct、Plan、Subagent、Job、取消、Repair 和恢复 | R10.13 |
-| R11.8 | `TODO` | 建立可重复评测集 | 使用固定小型仓库任务，不虚构指标 | R11.7 |
-| R11.9 | `TODO` | 编写 README | 明确基于 Pi，区分复用能力和个人贡献 | R11.8 |
-| R11.10 | `TODO` | 完善架构文档 | 保存流程图、详细架构图、状态机、协议和关键权衡 | R0.3、R10.13 |
-| R11.11 | `TODO` | 编写演示脚本 | 展示 Plan、Task、Subagent、Job、修复、取消和报告 | R11.7 |
-| R11.12 | `TODO` | 整理简历材料 | 只写实际完成、测试和评测过的能力与指标 | R11.8-R11.11 |
+| R11.1 | `DONE` | 完善 Workflow 状态栏 | 展示模式、阶段、根 Task、预算和停止原因 | R7.6、R10.8 |
+| R11.2 | `DONE` | 完善 Task Tree | 展示父子、依赖、状态、Agent、Attempt 和验证结果 | R6.8、R10.4 |
+| R11.3 | `DONE` | 完善 Plan、Agent、Job 面板 | 统一交互与状态表达，避免重复信息 | R5.8、R8.10、R9.8 |
+| R11.4 | `DONE` | 完善控制命令 | `/plan`、`/tasks`、`/agents`、`/jobs`、`/cancel`；Workflow 恢复使用 `/workflow-resume`，保留 Pi 原有会话 `/resume` | 各相关阶段 |
+| R11.5 | `DONE` | 支持非交互输出 | Print、JSON、RPC 可以表达 Workflow、Task 和最终结果 | R10.8 |
+| R11.6 | `DONE` | 验证最小打扰原则 | 只在批准、关键澄清和权限扩大时暂停用户 | R4.4、R5.4、R7.1 |
+| R11.7 | `DONE` | 建立 CLI 端到端回归 | 覆盖 Direct、Plan、Subagent、Job、取消、Repair 和恢复 | R10.13 |
+| R11.8 | `DONE` | 建立可重复评测集 | 使用固定小型仓库任务，不虚构指标 | R11.7 |
+| R11.9 | `DONE` | 编写 README | 明确基于 Pi，区分复用能力和个人贡献 | R11.8 |
+| R11.10 | `DONE` | 完善架构文档 | 保存流程图、详细架构图、状态机、协议和关键权衡 | R0.3、R10.13 |
+| R11.11 | `DONE` | 编写演示脚本 | 展示 Plan、Task、Subagent、Job、修复、取消和报告 | R11.7 |
+| R11.12 | `DONE` | 整理简历材料 | 只写实际完成、测试和评测过的能力与指标 | R11.8-R11.11 |
 
 ## 7. 里程碑
 
@@ -359,7 +359,7 @@ flowchart TB
 | M2：Plan 与 Task | `DONE` | R4-R6 | 自动模式、Plan 审批、Task Graph 和调度可演示 |
 | M3：受控 Runtime | `DONE` | R7-R9 | 可控 Subagent、后台 Job、单 Writer、预算和级联取消 |
 | M4：交付与恢复 | `DONE` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
-| M5：作品版本 | `TODO` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
+| M5：作品版本 | `DONE` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -490,11 +490,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-27 | R9 Background Job Runtime 完成 | JobRegistry、后台进程、增量日志、超时与进程树清理、完成通知、Command Task 调度和 Job CLI 已接入 Core，并有本地进程、Faux Provider 与离线演示覆盖 |
 | 2026-07-27 | R10 交付闭环与恢复完成 | Diff 归属、只读 Review、Job 验证、Completion Gate、受限 Repair、终态报告、Snapshot 重放、中断与 Lease 恢复和 Resume CLI 已接入 Core，并有聚焦测试、Faux Provider 集成测试和离线演示覆盖 |
 | 2026-07-27 | M4 交付与恢复完成 | R10.1-R10.13 全部完成；Event Log 保持事实来源，Snapshot 仅用于加速恢复，不确定运行资源统一标记为 interrupted |
+| 2026-07-27 | R11 CLI 打磨与作品材料完成 | 统一 Workflow View 已接入 Interactive、Print、JSON 和 RPC；CLI 回归覆盖 Direct、Plan、Subagent、Job、取消、Repair 与恢复；固定评测、架构、演示和简历证据已落地 |
+| 2026-07-27 | M5 作品版本完成 | R0-R11 全部完成；项目明确标注基于 Pi 二次开发，个人贡献边界和可重复验证入口已写入文档 |
 
 ## 12. 下一步
 
-M0-M4 已完成并验证。下一步进入 M5：
+M0-M5 已完成。后续不再扩展首版范围，只处理作品发布：
 
-1. 完成 R11.1-R11.4：统一 Workflow、Task、Plan、Agent 和 Job 的 CLI 状态与控制体验。
-2. 完成 R11.5-R11.8：补齐非交互输出、端到端回归和可重复评测集。
-3. 完成 R11.9-R11.12：整理 README、架构文档、完整演示和简历证据。
+1. 在真实终端录制 `npm run demo:cli-agent-showcase`，保存演示视频或 GIF。
+2. 选择固定真实仓库任务和明确模型版本，建立与确定性评测分离的模型效果基线。
+3. 按目标岗位调整简历措辞，但继续保留 Pi Fork 和个人贡献边界。

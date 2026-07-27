@@ -148,14 +148,16 @@ function jobPlanContent(): PlanContent {
 class CliJobProcess implements JobProcess {
 	readonly pid = 9001;
 	readonly #input: StartJobProcessInput;
+	readonly #exitCode: number;
 
-	constructor(input: StartJobProcessInput) {
+	constructor(input: StartJobProcessInput, exitCode = 0) {
 		this.#input = input;
+		this.#exitCode = exitCode;
 	}
 
 	async wait(): Promise<JobProcessExit> {
-		this.#input.onStdout("check passed\n");
-		return { exitCode: 0 };
+		this.#input.onStdout(this.#exitCode === 0 ? "check passed\n" : "check failed\n");
+		return { exitCode: this.#exitCode };
 	}
 
 	async terminate(): Promise<void> {}
@@ -164,6 +166,18 @@ class CliJobProcess implements JobProcess {
 class CliJobProcessFactory implements JobProcessFactory {
 	start(input: StartJobProcessInput): JobProcess {
 		return new CliJobProcess(input);
+	}
+}
+
+class SequencedCliJobProcessFactory implements JobProcessFactory {
+	readonly #exitCodes: number[];
+
+	constructor(exitCodes: readonly number[]) {
+		this.#exitCodes = [...exitCodes];
+	}
+
+	start(input: StartJobProcessInput): JobProcess {
+		return new CliJobProcess(input, this.#exitCodes.shift() ?? 0);
 	}
 }
 
@@ -309,7 +323,8 @@ describe("Plan Workflow AgentSession integration", () => {
 			.slice()
 			.reverse()
 			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
-		expect(getMessageText(message)).toContain("plan | cancelled | Plan v1: rejected");
+		expect(getMessageText(message)).toContain("plan | cancelled | root:");
+		expect(getMessageText(message)).toContain("Plan v1: rejected");
 	});
 
 	it("shows the Task tree and supports Task inspection and cancellation without provider calls", async () => {
@@ -522,9 +537,81 @@ describe("Plan Workflow AgentSession integration", () => {
 			.filter((message) => message.role === "custom" && message.customType === "workflow")
 			.map(getMessageText)
 			.join("\n");
-		expect(output).toContain("plan | completed | 1/1 tasks");
+		expect(output).toContain("plan | completed | root:");
+		expect(output).toContain("1/1 tasks");
 		expect(output).toContain(`${workflowId} | completed`);
 		expect(output).toContain("Verifications:");
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { id: workflowId, status: "completed" },
+			availableActions: ["resume"],
+			jobs: expect.arrayContaining([expect.objectContaining({ id: implementationJob.id, status: "succeeded" })]),
+		});
+		expect(harness.faux.state.callCount).toBe(1);
+	});
+
+	it("repairs a failed delivery check through CLI Agent and Job controls", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const jobRuntime = new JobRuntime({
+			processFactory: new SequencedCliJobProcessFactory([0, 1, 0]),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const harness = await createHarness({
+			subagentRuntime,
+			jobRuntime,
+			deliveryReviewer: new CliPassingReviewer(),
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([fauxAssistantMessage(JSON.stringify(jobPlanContent()))]);
+
+		await harness.session.prompt("/plan");
+		await harness.session.prompt("Run, repair, and verify the CLI workflow");
+		await harness.session.prompt("/approve");
+		await harness.session.prompt("/jobs dispatch 1");
+		const implementationJob = jobRuntime.jobs()[0];
+		if (!implementationJob) {
+			throw new Error("Expected an implementation Job");
+		}
+		await harness.session.prompt(`/job wait ${implementationJob.id}`);
+		await harness.session.prompt("/verify");
+
+		const { workflowId } = replay(harness);
+		const repairTask = replay(harness)
+			.store.listTasks(workflowId)
+			.find(({ kind }) => kind === "repair");
+		expect(repairTask?.status).toBe("ready");
+
+		await harness.session.prompt("/agents dispatch 1");
+		const repairAgent = subagentRuntime.list(workflowId)[0];
+		if (!repairAgent || !factory.sessions[0]) {
+			throw new Error("Expected a Repair Agent");
+		}
+		factory.sessions[0].complete(
+			subagentHandoff({
+				conclusion: "Repair completed",
+				evidence: [{ path: "src/repair.ts", line: 1, note: "Failure corrected" }],
+				verificationSummary: ["Repair applied"],
+			}),
+		);
+		await harness.session.prompt(`/agent wait ${repairAgent.id}`);
+		await harness.session.prompt("/verify");
+		await harness.session.prompt(`/workflow-resume continue ${workflowId}`);
+
+		const view = harness.session.getWorkflowView();
+		expect(view).toMatchObject({
+			workflow: { id: workflowId, status: "completed" },
+			availableActions: ["resume"],
+			tasks: expect.arrayContaining([expect.objectContaining({ kind: "repair", status: "succeeded" })]),
+			agents: expect.arrayContaining([expect.objectContaining({ id: repairAgent.id, status: "idle" })]),
+		});
+		expect(view?.verifications.some(({ status }) => status === "failed")).toBe(true);
+		expect(view?.verifications.some(({ status }) => status === "passed")).toBe(true);
+		expect(jobRuntime.jobs(workflowId)).toHaveLength(3);
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

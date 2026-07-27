@@ -57,12 +57,19 @@ describe("Direct Workflow AgentSession integration", () => {
 		});
 		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
 			status: "completed",
-			statusLine: "direct | completed | 1 task | 0 files | tests: not configured",
 			task: {
 				status: "succeeded",
 			},
 			changedFiles: [],
 		});
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { id: workflowId, status: "completed" },
+			rootTask: { id: task?.id, status: "succeeded" },
+			availableActions: ["resume"],
+		});
+		expect(harness.session.getWorkflowStatusLine()).toContain(
+			`direct | completed | root: ${task?.id} | 1 task | 0 files`,
+		);
 	});
 
 	it("reports files changed by successful built-in write and edit tools", async () => {
@@ -92,9 +99,9 @@ describe("Direct Workflow AgentSession integration", () => {
 		expect(readFileSync(join(harness.tempDir, "src/demo.ts"), "utf8")).toBe("export const value = 2;\n");
 		expect(harness.session.getLatestWorkflowReport()).toMatchObject({
 			status: "completed",
-			statusLine: "direct | completed | 1 task | 1 file | tests: not configured",
 			changedFiles: ["src/demo.ts"],
 		});
+		expect(harness.session.getWorkflowStatusLine()).toContain("1 task | 1 file | tests: not configured");
 	});
 
 	it("creates a new Workflow after the previous request reaches a terminal state", async () => {
@@ -141,7 +148,8 @@ describe("Direct Workflow AgentSession integration", () => {
 			.slice()
 			.reverse()
 			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
-		expect(getMessageText(message)).toContain("direct | completed | 1 task | 0 files | tests: not configured");
+		expect(getMessageText(message)).toContain("direct | completed | root:");
+		expect(getMessageText(message)).toContain("1 task | 0 files | tests: not configured");
 		expect(harness.faux.state.callCount).toBe(callCount);
 		expect(new SessionWorkflowEventLog(harness.sessionManager).read()).toHaveLength(workflowBatchCount);
 		expect(harness.session.messages.some((candidate) => candidate.role === "custom")).toBe(false);
@@ -267,10 +275,11 @@ describe("Direct Workflow AgentSession integration", () => {
 			.slice()
 			.reverse()
 			.find((candidate) => candidate.role === "custom" && candidate.customType === "workflow");
-		expect(getMessageText(statusMessage)).toContain("direct | executing | task: running | attempt: 1");
+		expect(getMessageText(statusMessage)).toContain("direct | executing | root:");
+		expect(getMessageText(statusMessage)).toContain("(running) | attempt: 1");
 		expect(harness.session.pendingMessageCount).toBe(0);
 
-		await harness.session.prompt("/workflow-cancel", { streamingBehavior: "steer" });
+		await harness.session.prompt("/cancel User cancelled the workflow", { streamingBehavior: "steer" });
 		await promptPromise;
 
 		const { store, workflowId } = replayWorkflow(harness);

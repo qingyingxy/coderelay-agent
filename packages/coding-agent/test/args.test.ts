@@ -58,6 +58,12 @@ describe("parseArgs", () => {
 			expect(result.provider).toBe("openai");
 			expect(result.messages).toEqual(["Say hi."]);
 		});
+
+		test("parses --workflow-report", () => {
+			const result = parseArgs(["--print", "--workflow-report", "Say hi."]);
+			expect(result.workflowReport).toBe(true);
+			expect(result.messages).toEqual(["Say hi."]);
+		});
 	});
 
 	describe("--continue flag", () => {

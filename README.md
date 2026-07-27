@@ -18,6 +18,17 @@ This is the home of the Pi agent harness project including our self extensible c
 * **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
 * **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
 
+## Personal CLI Agent Fork
+
+This branch is a secondary-development project based on Pi, not an independently implemented agent framework. It reuses Pi's provider abstraction, Agent Loop, tool calling, sessions, extensions, and terminal UI.
+
+The personal-project contribution is the productized CLI workflow layer: Direct/Plan mode selection, approval-backed Plans, persistent Task Graphs, Subagent and background Job runtimes, inherited runtime guardrails, structured Handoffs, delivery verification and bounded Repair, recovery, and unified interactive/Print/JSON/RPC Workflow output.
+
+- [Architecture and design](docs/cli-agent-architecture.md)
+- [Deterministic evaluation](docs/cli-agent-evaluation.md)
+- [Reproducible showcase](docs/cli-agent-showcase.md)
+- [Development roadmap](docs/cli-agent-long-term-roadmap.md)
+
 To learn more about Pi:
 
 * [Visit pi.dev](https://pi.dev), the project website with demos

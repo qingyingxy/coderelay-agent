@@ -250,6 +250,27 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("returns a structured null Workflow when no Workflow is active", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "workflow-1", type: "get_workflow" }));
+
+			await vi.waitFor(() => {
+				const response = parseOutputLines(rpcIo.outputLines).find(
+					(record) => record.id === "workflow-1" && record.command === "get_workflow",
+				);
+				expect(response).toMatchObject({
+					type: "response",
+					success: true,
+					data: { workflow: null },
+				});
+			});
+		} finally {
+			await cleanup();
+		}
+	});
+
 	it("emits one success response when prompt is queued during streaming", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
 
