@@ -46,6 +46,7 @@ import {
 	resetApiProviders,
 	streamSimple,
 } from "@earendil-works/pi-ai/compat";
+import { getAgentDir } from "../config.ts";
 import { getThemeByName, theme } from "../modes/interactive/theme/theme.ts";
 import { stripFrontmatter } from "../utils/frontmatter.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -106,13 +107,19 @@ import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import {
+	AgentProfileLoader,
 	type AgentRunResult,
+	createSubagentToolDefinitions,
 	formatAgentDetails,
 	formatAgentEvents,
 	formatAgentList,
 	formatAgentRunResult,
 	RpcSubagentSessionFactory,
+	SessionSubagentPersistence,
 	SubagentRuntime,
+	type SubagentService,
+	type SubagentSessionFactory,
+	SubagentToolController,
 } from "./subagents/index.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
@@ -144,6 +151,7 @@ import {
 	parsePlannerPlanContent,
 } from "./workflow/planner-runtime.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
+import type { PermissionSet } from "./workflow/runtime-policy.ts";
 import type { ExecutionMode, ModeDecision } from "./workflow/types.ts";
 import type { WorkflowView } from "./workflow/view.ts";
 
@@ -278,7 +286,9 @@ export interface AgentSessionConfig {
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
 	/** Optional Subagent Runtime override used by tests and embedders. */
-	subagentRuntime?: SubagentRuntime;
+	subagentRuntime?: SubagentService;
+	/** Optional same-process backend. Runtime policy still limits it to safe read-only Agents. */
+	inProcessSubagentSessionFactory?: SubagentSessionFactory;
 	/** Optional background Job Runtime override used by tests and embedders. */
 	jobRuntime?: JobRuntime;
 	/** Optional read-only delivery Reviewer override used by tests and embedders. */
@@ -396,7 +406,9 @@ export class AgentSession {
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 	private _latestWorkflowView: WorkflowView | undefined;
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
-	private _subagentRuntime: SubagentRuntime | undefined;
+	private _subagentRuntime: SubagentService | undefined;
+	private _inProcessSubagentSessionFactory: SubagentSessionFactory | undefined;
+	private _subagentToolsInstalled = false;
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
 	private _jobRuntime: JobRuntime | undefined;
 	private _jobTaskCompletions = new Map<string, Promise<Job>>();
@@ -478,6 +490,7 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._subagentRuntime = config.subagentRuntime;
+		this._inProcessSubagentSessionFactory = config.inProcessSubagentSessionFactory;
 		this._jobRuntime = config.jobRuntime;
 		this._deliveryReviewer = config.deliveryReviewer;
 
@@ -1162,6 +1175,7 @@ export class AgentSession {
 	/** Enable CLI Workflow creation for accepted top-level prompts. */
 	enableWorkflowTracking(mode?: ExecutionMode, automationEnabled = false): void {
 		this._workflowTrackingEnabled = true;
+		this._installSubagentTools();
 		this._workflowMode = mode ?? "direct";
 		this._workflowModeExplicit = mode !== undefined;
 		this._workflowAutomationEnabled = automationEnabled;
@@ -1488,11 +1502,92 @@ export class AgentSession {
 		return lines ? [...lines] : undefined;
 	}
 
-	private _getSubagentRuntime(): SubagentRuntime {
+	private _getSubagentRuntime(): SubagentService {
 		this._subagentRuntime ??= new SubagentRuntime({
 			sessionFactory: new RpcSubagentSessionFactory(),
+			inProcessSessionFactory: this._inProcessSubagentSessionFactory,
+			persistence: new SessionSubagentPersistence(this.sessionManager),
 		});
 		return this._subagentRuntime;
+	}
+
+	private _installSubagentTools(): void {
+		if (this._subagentToolsInstalled) {
+			return;
+		}
+		const profiles = new AgentProfileLoader({
+			cwd: this._cwd,
+			agentDir: getAgentDir(),
+		});
+		const controller = new SubagentToolController({
+			service: this._getSubagentRuntime(),
+			profiles,
+			bind: async (request) => {
+				const adapter = this._activeWorkflowAdapter;
+				if (!adapter) {
+					throw new Error("Subagent tools require an active Direct Workflow");
+				}
+				return adapter.bindDelegation({
+					parentPermission: this._subagentParentPermission(),
+					requiresWriter:
+						request.profile.profile.permissionCeiling.write ||
+						request.profile.profile.permissionCeiling.executeCommands,
+					runInBackground: request.runInBackground,
+				});
+			},
+			inheritedContext: () => this._subagentInheritedContext(),
+			allowModelOverride: (_profile, modelName) => {
+				const separator = modelName.indexOf("/");
+				return (
+					separator > 0 &&
+					this._modelRuntime.getModel(modelName.slice(0, separator), modelName.slice(separator + 1)) !== undefined
+				);
+			},
+			allowThinkingOverride: (profile, thinking) => {
+				const configuredModel = profile.profile.model;
+				const separator = configuredModel?.indexOf("/") ?? -1;
+				const model =
+					configuredModel && separator > 0
+						? this._modelRuntime.getModel(
+								configuredModel.slice(0, separator),
+								configuredModel.slice(separator + 1),
+							)
+						: this.model;
+				return model ? getSupportedThinkingLevels(model).includes(thinking) : thinking === "off";
+			},
+		});
+		this._customTools.push(...createSubagentToolDefinitions(controller));
+		this._subagentToolsInstalled = true;
+		this._refreshToolRegistry();
+	}
+
+	private _subagentParentPermission(): PermissionSet {
+		const activeTools = new Set(this.getActiveToolNames());
+		return {
+			read: ["read", "grep", "find", "ls", "bash"].some((name) => activeTools.has(name)),
+			write: activeTools.has("edit") || activeTools.has("write"),
+			executeCommands: activeTools.has("bash"),
+			network: activeTools.has("bash"),
+			allowedPaths: [],
+			deniedPaths: [],
+		};
+	}
+
+	private _subagentInheritedContext(): string | undefined {
+		const lines = this.messages.slice(-12).flatMap((message) => {
+			if (
+				message.role !== "user" &&
+				message.role !== "assistant" &&
+				message.role !== "toolResult" &&
+				message.role !== "custom"
+			) {
+				return [];
+			}
+			const text = contentText(message.content, "").trim();
+			return text ? [`${message.role}: ${text.slice(0, 4_000)}`] : [];
+		});
+		const context = lines.join("\n\n");
+		return context ? context.slice(-20_000) : undefined;
 	}
 
 	private _trackSubagentExecution(execution: SubagentTaskExecution): void {
@@ -2179,41 +2274,88 @@ export class AgentSession {
 		} else if (commandName === "/agent") {
 			const planRuntime = this._planWorkflowRuntime;
 			const [action, agentOrTaskId, ...detailParts] = args;
-			if (!planRuntime) {
-				lines = ["No Plan Workflow exists."];
-			} else if (!action || !agentOrTaskId) {
+			const usage =
+				"Usage: /agent profiles | /agent profile <name> | /agent sessions | /agent transcript <agent-id> | /agent resume <agent-id> <prompt> | /agent spawn <task-id> [profile] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>";
+			if (action === "profiles" && !agentOrTaskId) {
+				lines = new AgentProfileLoader({ cwd: this._cwd, agentDir: getAgentDir() })
+					.load()
+					.map(
+						({ profile, source }) =>
+							`${profile.name} | ${profile.role} | ${source} | ${profile.model ?? "active model"} | ${profile.description}`,
+					);
+			} else if (action === "profile" && agentOrTaskId && detailParts.length === 0) {
+				const loaded = new AgentProfileLoader({ cwd: this._cwd, agentDir: getAgentDir() }).get(agentOrTaskId);
+				lines = loaded
+					? [
+							`${loaded.profile.name} | ${loaded.profile.role} | ${loaded.source}`,
+							`Source: ${loaded.sourcePath ?? "(built-in)"}`,
+							`Model: ${loaded.profile.model ?? "active model"} | Thinking: ${loaded.profile.thinkingLevel ?? "default"}`,
+							`Tools: ${loaded.profile.allowedTools.join(", ") || "(none)"}`,
+							`Background: ${loaded.runInBackground ? "yes" : "no"} | Inherit context: ${loaded.inheritContext ? "yes" : "no"}`,
+							loaded.profile.description,
+						]
+					: [`Agent Profile ${agentOrTaskId} does not exist.`];
+			} else if (action === "sessions" && !agentOrTaskId) {
+				const agents = this._getSubagentRuntime().list();
+				lines =
+					agents.length === 0
+						? ["No Subagent Sessions exist."]
+						: agents.map(
+								(agent) =>
+									`${agent.id} | ${agent.sessionId ?? "(starting)"} | ${agent.backend} | ${agent.status} | ${agent.sessionReleasedAt ? "released" : "retained"} | ${agent.taskId}`,
+							);
+			} else if (action === "transcript" && agentOrTaskId && detailParts.length === 0) {
+				const transcript = this._getSubagentRuntime().getTranscript(agentOrTaskId);
 				lines = [
-					"Usage: /agent spawn <task-id> [explorer|worker|reviewer] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>",
+					`${transcript.agentId} | ${transcript.sessionId ?? "(no session)"} | ${transcript.backend} | ${transcript.released ? "released" : "active"}`,
+					...transcript.entries.map(
+						(entry) =>
+							`${entry.sequence} ${entry.type} | ${entry.text.replace(/\s+/g, " ").trim().slice(0, 500)}`,
+					),
 				];
+			} else if (action === "resume" && agentOrTaskId && detailParts.length > 0) {
+				const subagentRuntime = this._getSubagentRuntime();
+				await subagentRuntime.resume(agentOrTaskId, detailParts.join(" "));
+				const completion = subagentRuntime.wait(agentOrTaskId);
+				this._subagentTaskCompletions.set(agentOrTaskId, completion);
+				const agent = subagentRuntime.get(agentOrTaskId);
+				lines = agent ? formatAgentList([agent]) : [`Agent ${agentOrTaskId} does not exist.`];
+			} else if (!action) {
+				lines = [usage];
+			} else if (!agentOrTaskId) {
+				lines = [usage];
 			} else {
 				const subagentRuntime = this._getSubagentRuntime();
 				if (action === "spawn") {
-					const role = detailParts[0];
-					const profileRole = role === "explorer" || role === "worker" || role === "reviewer" ? role : undefined;
-					if (detailParts.length > 1 || (role !== undefined && profileRole === undefined)) {
-						lines = ["Usage: /agent spawn <task-id> [explorer|worker|reviewer]"];
+					if (!planRuntime) {
+						lines = ["No Plan Workflow exists."];
 					} else {
-						const execution = await planRuntime.startSubagentTask(subagentRuntime, agentOrTaskId, {
-							profileRole,
-						});
-						this._trackSubagentExecution(execution);
-						lines = formatAgentList([execution.agent]);
+						const loadedProfile = detailParts[0]
+							? new AgentProfileLoader({ cwd: this._cwd, agentDir: getAgentDir() }).get(detailParts[0])
+							: undefined;
+						if (detailParts.length > 1 || (detailParts[0] && !loadedProfile)) {
+							lines = ["Usage: /agent spawn <task-id> [profile]"];
+						} else {
+							const execution = await planRuntime.startSubagentTask(subagentRuntime, agentOrTaskId, {
+								profile: loadedProfile?.profile,
+								profileSource: loadedProfile?.source,
+								profileSourcePath: loadedProfile?.sourcePath,
+							});
+							this._trackSubagentExecution(execution);
+							lines = formatAgentList([execution.agent]);
+						}
 					}
 				} else if (action === "show" && detailParts.length === 0) {
-					const agent = subagentRuntime.registry.get(agentOrTaskId);
+					const agent = subagentRuntime.get(agentOrTaskId);
 					if (!agent) {
 						lines = [`Agent ${agentOrTaskId} does not exist.`];
 					} else {
-						const handoff = agent.handoffId ? subagentRuntime.registry.getHandoff(agent.handoffId) : undefined;
-						lines = formatAgentDetails(
-							agent,
-							handoff,
-							formatAgentEvents(subagentRuntime.registry.events(agent.id)),
-						);
+						const handoff = agent.handoffId ? subagentRuntime.getHandoff(agent.handoffId) : undefined;
+						lines = formatAgentDetails(agent, handoff, formatAgentEvents(subagentRuntime.events(agent.id)));
 					}
 				} else if (action === "send" && detailParts.length > 0) {
 					await subagentRuntime.send(agentOrTaskId, detailParts.join(" "));
-					const updatedAgent = subagentRuntime.registry.get(agentOrTaskId);
+					const updatedAgent = subagentRuntime.get(agentOrTaskId);
 					lines = updatedAgent ? formatAgentList([updatedAgent]) : [`Agent ${agentOrTaskId} does not exist.`];
 				} else if (action === "wait" && detailParts.length === 0) {
 					const completion = this._subagentTaskCompletions.get(agentOrTaskId);
@@ -2226,20 +2368,22 @@ export class AgentSession {
 					const completion = this._subagentTaskCompletions.get(agentOrTaskId);
 					lines = formatAgentRunResult(completion ? await completion : result);
 				} else if (action === "retry" && detailParts.length === 0) {
-					const source = subagentRuntime.registry.get(agentOrTaskId);
-					if (!source) {
-						lines = [`Agent ${agentOrTaskId} does not exist.`];
+					if (!planRuntime) {
+						lines = ["No Plan Workflow exists."];
 					} else {
-						const execution = await planRuntime.startSubagentTask(subagentRuntime, source.taskId, {
-							retryAgentId: source.id,
-						});
-						this._trackSubagentExecution(execution);
-						lines = formatAgentList([execution.agent]);
+						const source = subagentRuntime.get(agentOrTaskId);
+						if (!source) {
+							lines = [`Agent ${agentOrTaskId} does not exist.`];
+						} else {
+							const execution = await planRuntime.startSubagentTask(subagentRuntime, source.taskId, {
+								retryAgentId: source.id,
+							});
+							this._trackSubagentExecution(execution);
+							lines = formatAgentList([execution.agent]);
+						}
 					}
 				} else {
-					lines = [
-						"Usage: /agent spawn <task-id> [explorer|worker|reviewer] | /agent show <agent-id> | /agent send <agent-id> <message> | /agent wait <agent-id> | /agent interrupt <agent-id> [reason] | /agent retry <agent-id>",
-					];
+					lines = [usage];
 				}
 			}
 		} else if (commandName === "/jobs") {

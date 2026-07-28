@@ -23,6 +23,20 @@ export const AGENT_INSTANCE_STATUSES = [
 ] as const;
 export type AgentInstanceStatus = (typeof AGENT_INSTANCE_STATUSES)[number];
 
+export const AGENT_SCOPES = ["delegation", "task", "workflow"] as const;
+export type AgentScope = (typeof AGENT_SCOPES)[number];
+
+export const AGENT_BACKENDS = ["rpc", "in-process"] as const;
+export type AgentBackend = (typeof AGENT_BACKENDS)[number];
+export type AgentBackendPolicy = AgentBackend | "auto";
+
+export interface AgentWorkspace {
+	readonly id: string;
+	readonly path: string;
+	readonly baselineCommit?: string;
+	readonly resultBranch?: string;
+}
+
 export interface AgentInstance {
 	readonly id: AgentId;
 	readonly workflowId: WorkflowId;
@@ -30,7 +44,16 @@ export interface AgentInstance {
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
 	readonly profileName: string;
+	/** Stable Profile snapshot for persisted Runtime-owned Agents. */
+	readonly profile?: AgentProfile;
+	readonly profileSource?: "builtin" | "global" | "project" | "runtime";
+	readonly profileSourcePath?: string;
+	readonly scope: AgentScope;
+	readonly backend: AgentBackend;
+	readonly backendReason?: string;
+	readonly workspace?: AgentWorkspace;
 	readonly sessionId?: string;
+	readonly sessionReleasedAt?: IsoDateTime;
 	readonly status: AgentInstanceStatus;
 	readonly depth: number;
 	readonly retryCount: number;
@@ -113,16 +136,53 @@ export type AgentRuntimeEventType =
 	| "completed"
 	| "failed"
 	| "interrupted"
-	| "stopped";
+	| "stopped"
+	| "steered"
+	| "resumed"
+	| "session_released";
+
+export type StableSubagentEventName =
+	| "subagent_created"
+	| "subagent_queued"
+	| "subagent_started"
+	| "subagent_progress"
+	| "subagent_waiting"
+	| "subagent_steered"
+	| "subagent_usage"
+	| "subagent_completed"
+	| "subagent_failed"
+	| "subagent_interrupted"
+	| "subagent_resumed"
+	| "subagent_session_released";
 
 export interface AgentRuntimeEvent {
 	readonly sequence: number;
 	readonly agentId: AgentId;
 	readonly workflowId: WorkflowId;
 	readonly taskId: TaskId;
+	readonly attemptId: AttemptId;
 	readonly type: AgentRuntimeEventType;
+	readonly eventName: StableSubagentEventName;
 	readonly occurredAt: IsoDateTime;
 	readonly message?: string;
+}
+
+export type AgentTranscriptEntryType = "prompt" | "steer" | "assistant" | "activity" | "interrupt" | "resume";
+
+export interface AgentTranscriptEntry {
+	readonly sequence: number;
+	readonly agentId: AgentId;
+	readonly type: AgentTranscriptEntryType;
+	readonly text: string;
+	readonly occurredAt: IsoDateTime;
+}
+
+export interface AgentTranscriptView {
+	readonly agentId: AgentId;
+	readonly sessionId?: string;
+	readonly backend: AgentBackend;
+	readonly released: boolean;
+	readonly entries: readonly AgentTranscriptEntry[];
 }
 
 export interface SpawnSubagentInput {
@@ -131,6 +191,12 @@ export interface SpawnSubagentInput {
 	readonly attemptId: AttemptId;
 	readonly cwd: string;
 	readonly profile: AgentProfile;
+	readonly profileSource?: "builtin" | "global" | "project" | "runtime";
+	readonly profileSourcePath?: string;
+	/** Governance scope. Existing Workflow dispatches default to `task`. */
+	readonly scope?: AgentScope;
+	/** Requested Session backend policy. `auto` remains safety-first and falls back to RPC. */
+	readonly backend?: AgentBackendPolicy;
 	readonly parentAgentId?: AgentId;
 	readonly parentPermission: PermissionSet;
 	readonly workflowPermission: PermissionSet;

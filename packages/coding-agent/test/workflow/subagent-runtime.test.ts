@@ -3,7 +3,10 @@ import {
 	BUILTIN_AGENT_PROFILES,
 	FULL_PERMISSION_SET,
 	RuntimePolicyError,
+	SessionManager,
+	SessionSubagentPersistence,
 	SubagentRuntime,
+	type SubagentService,
 	WorkflowRuntimeRegistry,
 	WriterLeaseRegistry,
 } from "../../src/index.ts";
@@ -40,12 +43,14 @@ function runtime(factory: FakeSubagentSessionFactory): SubagentRuntime {
 describe("SubagentRuntime", () => {
 	it("creates an isolated read-only Session and completes with a validated Handoff", async () => {
 		const factory = new FakeSubagentSessionFactory();
-		const subject = runtime(factory);
+		const subject: SubagentService = runtime(factory);
 		const agent = await subject.spawn(spawnInput());
 
 		expect(agent).toMatchObject({
 			id: "agent-1",
 			sessionId: "session-1",
+			scope: "task",
+			backend: "rpc",
 			status: "idle",
 			depth: 1,
 		});
@@ -72,13 +77,73 @@ describe("SubagentRuntime", () => {
 				turns: 1,
 			},
 		});
-		expect(subject.registry.get(agent.id)).toMatchObject({
+		expect(subject.get(agent.id)).toMatchObject({
 			status: "idle",
 			handoffId: "handoff-2",
 		});
 		await expect(subject.send(agent.id, "Run again")).rejects.toMatchObject({
 			code: "subagent.run_terminal",
 		});
+	});
+
+	it("resumes a completed Agent in the same Session and keeps a Transcript", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subject = runtime(factory);
+		const agent = await subject.spawn(spawnInput());
+
+		await subject.send(agent.id, "Inspect first");
+		factory.sessions[0]?.complete(SUBAGENT_HANDOFF);
+		await subject.wait(agent.id);
+		await subject.resume(agent.id, "Inspect the follow-up");
+		factory.sessions[0]?.complete(subagentHandoff({ conclusion: "Follow-up completed" }));
+		const resumed = await subject.wait(agent.id);
+
+		expect(resumed).toMatchObject({
+			status: "completed",
+			handoff: {
+				conclusion: "Follow-up completed",
+			},
+		});
+		expect(factory.sessions).toHaveLength(1);
+		expect(factory.sessions[0]?.promptCalls).toEqual(["Inspect first", "Inspect the follow-up"]);
+		expect(subject.getTranscript(agent.id)).toMatchObject({
+			agentId: agent.id,
+			sessionId: "session-1",
+			released: false,
+			entries: [
+				{ type: "prompt", text: "Inspect first" },
+				{ type: "assistant" },
+				{ type: "resume", text: "Inspect the follow-up" },
+				{ type: "prompt", text: "Inspect the follow-up" },
+				{ type: "assistant" },
+			],
+		});
+		expect(subject.events(agent.id).map(({ type }) => type)).toContain("resumed");
+
+		await subject.release(agent.id);
+		expect(subject.getTranscript(agent.id).released).toBe(true);
+		await expect(subject.resume(agent.id, "One more pass")).rejects.toMatchObject({
+			code: "subagent.resume_unavailable",
+		});
+	});
+
+	it("releases completed Sessions without replacing their successful result", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subject = runtime(factory);
+		const agent = await subject.spawn(spawnInput());
+		await subject.send(agent.id, "Inspect");
+		factory.sessions[0]?.complete(SUBAGENT_HANDOFF);
+		const completed = await subject.wait(agent.id);
+
+		await subject.dispose();
+
+		expect(await subject.wait(agent.id)).toEqual(completed);
+		expect(subject.get(agent.id)).toMatchObject({
+			status: "idle",
+			handoffId: completed.handoff?.id,
+			sessionReleasedAt: expect.any(String),
+		});
+		expect(factory.sessions[0]?.stopCalls).toBe(1);
 	});
 
 	it("streams steering, records successful mutations, and releases the Writer Lease", async () => {
@@ -186,6 +251,115 @@ describe("SubagentRuntime", () => {
 			code: "runtime_policy.path_scope_unsupported",
 		});
 		expect(factory.sessions).toHaveLength(0);
+	});
+
+	it("rejects an unavailable backend before creating an Agent", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subject = runtime(factory);
+
+		await expect(
+			subject.spawn({
+				...spawnInput(),
+				backend: "in-process",
+			}),
+		).rejects.toMatchObject({
+			code: "subagent.backend_unsupported",
+		});
+		expect(subject.list()).toHaveLength(0);
+		expect(factory.sessions).toHaveLength(0);
+	});
+
+	it("routes eligible read-only Agents to the in-process Backend without weakening safety", async () => {
+		const rpcFactory = new FakeSubagentSessionFactory();
+		const inProcessFactory = new FakeSubagentSessionFactory();
+		const subject = new SubagentRuntime({
+			sessionFactory: rpcFactory,
+			inProcessSessionFactory: inProcessFactory,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const agent = await subject.spawn({ ...spawnInput(), backend: "auto" });
+
+		expect(agent).toMatchObject({
+			backend: "in-process",
+			backendReason: "Auto-selected for a statically safe read-only Agent",
+		});
+		expect(rpcFactory.sessions).toHaveLength(0);
+		expect(inProcessFactory.sessions).toHaveLength(1);
+		await expect(
+			subject.spawn({
+				...spawnInput(BUILTIN_AGENT_PROFILES.worker),
+				taskId: "task-2",
+				attemptId: "attempt-2",
+				backend: "in-process",
+			}),
+		).rejects.toMatchObject({ code: "subagent.in_process_unsafe" });
+	});
+
+	it("retains a prepared Workspace through completion and releases it with the Session", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const released: string[] = [];
+		const subject = new SubagentRuntime({
+			sessionFactory: factory,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			workspaceProvider: {
+				prepare: async ({ agentId }) => ({ id: `workspace:${agentId}`, path: "C:/isolated" }),
+				release: async ({ id }) => {
+					released.push(id);
+				},
+			},
+		});
+		const agent = await subject.spawn(spawnInput());
+		expect(agent.workspace).toEqual({ id: `workspace:${agent.id}`, path: "C:/isolated" });
+		expect(factory.sessions[0]?.config.cwd).toBe("C:/isolated");
+
+		await subject.send(agent.id, "Inspect");
+		factory.sessions[0]?.complete(SUBAGENT_HANDOFF);
+		await subject.wait(agent.id);
+		expect(released).toEqual([]);
+
+		await subject.release(agent.id);
+		expect(released).toEqual([`workspace:${agent.id}`]);
+	});
+
+	it("recovers released Agent state and Transcript from the parent Session", async () => {
+		const sessionManager = SessionManager.inMemory("C:/repo");
+		const persistence = new SessionSubagentPersistence(sessionManager);
+		const factory = new FakeSubagentSessionFactory();
+		const first = new SubagentRuntime({
+			sessionFactory: factory,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			persistence,
+			createId: (() => {
+				let sequence = 0;
+				return (kind: "agent" | "handoff") => `${kind}-${++sequence}`;
+			})(),
+		});
+		const agent = await first.spawn(spawnInput());
+		await first.send(agent.id, "Inspect persisted state");
+		factory.sessions[0]?.complete(SUBAGENT_HANDOFF);
+		const completed = await first.wait(agent.id);
+		await first.dispose();
+
+		const recovered = new SubagentRuntime({
+			sessionFactory: new FakeSubagentSessionFactory(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			persistence,
+		});
+
+		expect(recovered.get(agent.id)).toMatchObject({
+			status: "idle",
+			handoffId: completed.handoff?.id,
+			sessionReleasedAt: expect.any(String),
+		});
+		expect(recovered.getTranscript(agent.id).entries.map(({ type }) => type)).toEqual(["prompt", "assistant"]);
+		expect(await recovered.wait(agent.id)).toMatchObject({
+			status: "completed",
+			handoff: { conclusion: "Inspection completed" },
+		});
 	});
 
 	it("cascades Workflow cancellation to every live Agent", async () => {

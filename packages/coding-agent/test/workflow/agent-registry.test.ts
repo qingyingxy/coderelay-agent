@@ -10,6 +10,8 @@ function instance(id: string, parentAgentId?: string): AgentInstance {
 		taskId: `task-${id}`,
 		attemptId: `attempt-${id}`,
 		profileName: "explorer",
+		scope: "task",
+		backend: "rpc",
 		status: "starting",
 		depth: parentAgentId ? 2 : 1,
 		retryCount: 0,
@@ -53,6 +55,16 @@ describe("AgentRegistry", () => {
 			"usage",
 			"completed",
 		]);
+		expect(registry.events("child").map(({ eventName }) => eventName)).toEqual([
+			"subagent_created",
+			"subagent_queued",
+			"subagent_started",
+			"subagent_progress",
+			"subagent_waiting",
+			"subagent_started",
+			"subagent_usage",
+			"subagent_completed",
+		]);
 	});
 
 	it("rejects invalid hierarchy and state transitions", () => {
@@ -60,5 +72,25 @@ describe("AgentRegistry", () => {
 		expect(() => registry.create(instance("child", "missing"))).toThrow(AgentRegistryError);
 		registry.create(instance("agent"));
 		expect(() => registry.transition("agent", "stopped")).toThrow(AgentRegistryError);
+	});
+
+	it("isolates observer failures from authoritative state transitions", () => {
+		const listenerErrors: unknown[] = [];
+		const registry = new AgentRegistry({
+			now: () => NOW,
+			onListenerError: (error) => listenerErrors.push(error),
+		});
+		registry.subscribe(() => {
+			throw new Error("observer failed");
+		});
+
+		expect(() => registry.create(instance("agent"))).not.toThrow();
+		expect(() => registry.transition("agent", "idle")).not.toThrow();
+		expect(registry.get("agent")).toMatchObject({ status: "idle" });
+		expect(registry.events("agent")[0]).toMatchObject({
+			attemptId: "attempt-agent",
+			type: "created",
+		});
+		expect(listenerErrors).toHaveLength(2);
 	});
 });

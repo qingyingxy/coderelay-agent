@@ -4,6 +4,8 @@ import { contentText } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../agent-session.ts";
 import type { SessionManager } from "../session-manager.ts";
+import type { DelegationBindingHandle } from "../subagents/subagent-tools.ts";
+import type { AgentRunResult } from "../subagents/types.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
 import type { UpgradeDirectToPlanDecision } from "./direct-plan-upgrade.ts";
@@ -14,7 +16,7 @@ import {
 	formatWorkflowStatusLine,
 	type WorkflowFinalReport,
 } from "./report.ts";
-import { evaluateBudget, formatBudgetEvaluation, sumResourceUsage } from "./runtime-policy.ts";
+import { evaluateBudget, formatBudgetEvaluation, type PermissionSet, sumResourceUsage } from "./runtime-policy.ts";
 import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from "./runtime-registry.ts";
 import { WorkflowStore } from "./stores.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
@@ -52,6 +54,12 @@ export interface AgentSessionAdapterOptions {
 	readonly writerLeaseRegistry?: WriterLeaseRegistry;
 	readonly runtimeRegistry?: WorkflowRuntimeRegistry;
 	readonly writerLeaseTtlMs?: number;
+}
+
+export interface AgentSessionDelegationRequest {
+	readonly parentPermission: PermissionSet;
+	readonly requiresWriter: boolean;
+	readonly runInBackground: boolean;
 }
 
 interface PendingAgentEnd {
@@ -292,13 +300,7 @@ export class AgentSessionAdapter {
 			const workflow = this.#controller.getWorkflow(this.#workflowId);
 			const task = this.#controller.getRootTask(this.#workflowId);
 			if (workflow && task?.accessMode === "writer") {
-				const lease = this.#writerLeaseRegistry.acquire({
-					workspace: workflow.request.cwd,
-					workflowId: this.#workflowId,
-					taskId: this.#taskId,
-					ttlMs: this.#writerLeaseTtlMs,
-				});
-				this.#writerLeaseId = lease.id;
+				this.#acquireWriterLease();
 			}
 			this.#unregisterRuntime = this.#runtimeRegistry.register({
 				id: `agent-session:${this.#workflowId}`,
@@ -321,6 +323,69 @@ export class AgentSessionAdapter {
 			throw error;
 		}
 		return this;
+	}
+
+	/**
+	 * Bind a model-initiated delegation to the currently running Direct Task and Attempt.
+	 *
+	 * Writer delegations are foreground-only. The parent Writer Lease is released before
+	 * dispatch and reacquired after the child settles, so a single writer remains authoritative.
+	 */
+	bindDelegation(request: AgentSessionDelegationRequest): DelegationBindingHandle {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		const task = this.#controller.getRootTask(this.#workflowId);
+		const attemptId = this.#activeAttemptId;
+		if (!workflow || workflow.status !== "executing" || !task || task.status !== "running" || !attemptId) {
+			throw new Error("Subagent delegation requires a running Direct Workflow Task and Attempt");
+		}
+		if (request.requiresWriter && request.runInBackground) {
+			throw new Error("Writer Subagents must run in the foreground while sharing the parent workspace");
+		}
+		const transferredWriterLease = request.requiresWriter && this.#writerLeaseId !== undefined;
+		if (transferredWriterLease) {
+			this.#releaseWriterLease();
+		}
+		const taskPermission: PermissionSet =
+			task.accessMode === "writer"
+				? request.parentPermission
+				: {
+						...request.parentPermission,
+						write: false,
+						executeCommands: false,
+						network: false,
+					};
+		let settled = false;
+		return {
+			input: {
+				workflowId: workflow.id,
+				taskId: task.id,
+				attemptId,
+				cwd: workflow.request.cwd,
+				parentPermission: request.parentPermission,
+				workflowPermission: request.parentPermission,
+				taskPermission,
+				parentBudget: workflow.budget,
+				workflowBudget: workflow.budget,
+				taskBudget: task.budget,
+			},
+			settle: (result) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				if (result && this.#activeAttemptId === attemptId) {
+					this.#attemptUsage = addResourceUsage(this.#attemptUsage, result.usage);
+					this.#recordSubagentModifications(result, attemptId);
+				}
+				if (transferredWriterLease) {
+					const currentWorkflow = this.#controller.getWorkflow(this.#workflowId);
+					const currentTask = this.#controller.getRootTask(this.#workflowId);
+					if (currentWorkflow?.status === "executing" && currentTask?.status === "running") {
+						this.#acquireWriterLease();
+					}
+				}
+			},
+		};
 	}
 
 	async abort(): Promise<void> {
@@ -690,6 +755,45 @@ export class AgentSessionAdapter {
 			...this.#attemptUsage,
 			durationMs: Math.max(0, this.#now() - this.#attemptStartedAt),
 		};
+	}
+
+	#recordSubagentModifications(result: AgentRunResult, attemptId: AttemptId): void {
+		for (const modification of result.modifications) {
+			this.#controller.recordTaskModification({
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				modification: {
+					path: modification.path,
+					operation: modification.operation,
+					attemptId,
+					agentId: result.agentId,
+					toolCallId: modification.toolCallId,
+				},
+			});
+			if (!this.#changedFiles.includes(modification.path)) {
+				this.#changedFiles.push(modification.path);
+			}
+		}
+	}
+
+	#acquireWriterLease(): void {
+		if (this.#writerLeaseId) {
+			this.#writerLeaseRegistry.renew(this.#writerLeaseId, this.#writerLeaseTtlMs);
+			return;
+		}
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow) {
+			throw new Error(`Workflow ${this.#workflowId} does not exist`);
+		}
+		const lease = this.#writerLeaseRegistry.acquire({
+			workspace: workflow.request.cwd,
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			attemptId: this.#activeAttemptId,
+			ttlMs: this.#writerLeaseTtlMs,
+		});
+		this.#writerLeaseId = lease.id;
 	}
 
 	#releaseWriterLease(): void {

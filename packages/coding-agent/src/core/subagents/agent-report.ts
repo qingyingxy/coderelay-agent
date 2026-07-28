@@ -12,6 +12,7 @@ function relationshipLine(agent: AgentInstance): string {
 		`parent: ${agent.parentAgentId ?? "(root)"}`,
 		`depth: ${agent.depth}`,
 		`session: ${agent.sessionId ?? "(starting)"}`,
+		`backend: ${agent.backend}`,
 	].join(" | ");
 }
 
@@ -37,6 +38,10 @@ export function formatAgentDetails(
 		`${agent.id} | ${agent.status} | ${agent.profileName}`,
 		relationshipLine(agent),
 		`attempt: ${agent.attemptId} | retry: ${agent.retryCount}${agent.retryOfAgentId ? ` of ${agent.retryOfAgentId}` : ""}`,
+		`profile source: ${agent.profileSource ?? "unknown"}${agent.profileSourcePath ? ` | ${agent.profileSourcePath}` : ""}`,
+		`backend: ${agent.backend}${agent.backendReason ? ` | ${agent.backendReason}` : ""}`,
+		`workspace: ${agent.workspace?.id ?? "(current)"} | ${agent.workspace?.path ?? "(not recorded)"}`,
+		`session lifecycle: ${agent.sessionReleasedAt ? `released ${agent.sessionReleasedAt}` : "retained"}`,
 		usageLine(agent),
 		`permissions: read=${agent.effectivePermissions.read} write=${agent.effectivePermissions.write} commands=${agent.effectivePermissions.executeCommands} network=${agent.effectivePermissions.network}`,
 	];

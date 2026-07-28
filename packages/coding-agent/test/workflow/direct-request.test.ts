@@ -160,9 +160,14 @@ describe("Direct Workflow request integration", () => {
 	it("does not change SDK prompt behavior until Workflow tracking is enabled", async () => {
 		const { session, sessionManager } = await createSession([], false);
 
+		expect(session.getAllTools().map(({ name }) => name)).not.toContain("subagent");
 		await session.prompt("SDK request");
 
 		expect(new SessionWorkflowEventLog(sessionManager).read()).toHaveLength(0);
+		session.enableWorkflowTracking();
+		expect(session.getAllTools().map(({ name }) => name)).toEqual(
+			expect.arrayContaining(["subagent", "get_subagent_result", "steer_subagent"]),
+		);
 
 		session.dispose();
 	});

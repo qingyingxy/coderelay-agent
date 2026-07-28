@@ -39,7 +39,8 @@ describe("formatWorkflowProgress", () => {
 		);
 
 		expect(lines).toEqual([
-			"Workflow: Executing · Tasks 1/3 · Running 1 · Waiting 1",
+			"Workflow: Executing · Tasks 1/3",
+			"Agents: 1 running · 0 queued",
 			"Current: Fix Windows tests · Agent worker-2",
 		]);
 	});
@@ -54,7 +55,8 @@ describe("formatWorkflowProgress", () => {
 		);
 
 		expect(lines).toEqual([
-			"Workflow: Verifying · Tasks 1/1 · Running 0 · Waiting 0",
+			"Workflow: Verifying · Tasks 1/1",
+			"Agents: 0 running · 0 queued",
 			"Verification: Passed 1 · Running 1 · Failed 1",
 		]);
 	});
@@ -76,10 +78,33 @@ describe("formatWorkflowProgress", () => {
 		);
 
 		expect(lines).toEqual([
-			"Workflow: Executing · Tasks 1/2 · Running 1 · Waiting 0",
+			"Workflow: Executing · Tasks 1/2",
+			"Agents: 0 running · 0 queued",
 			"Current: Repair failing test",
-			"Repair: Iteration 2",
 		]);
+	});
+
+	it("expands Agent backend, usage, and operation hints without percentages or ETA", () => {
+		const lines = formatWorkflowProgress(
+			workflowView({
+				tasks: [{ id: "one", kind: "agent", status: "running", title: "Inspect code" }],
+				agents: [
+					{
+						id: "agent-1",
+						taskId: "one",
+						status: "running",
+						profileName: "explorer",
+						backend: "in-process",
+						usage: { turns: 2, inputTokens: 10, outputTokens: 5 },
+					},
+				],
+			}),
+			true,
+		);
+
+		expect(lines).toContain("Agent agent-1: explorer · in-process · Running · Task one · 2 turns · 15 tokens");
+		expect(lines.at(-1)).toContain("/agent transcript");
+		expect(lines.join("\n")).not.toMatch(/%|ETA/);
 	});
 
 	it("hides terminal workflows", () => {

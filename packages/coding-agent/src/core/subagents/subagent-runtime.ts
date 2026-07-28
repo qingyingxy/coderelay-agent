@@ -11,19 +11,28 @@ import {
 	sumResourceUsage,
 } from "../workflow/runtime-policy.ts";
 import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from "../workflow/runtime-registry.ts";
-import type { AgentId, BudgetLimit, ResourceUsage } from "../workflow/types.ts";
+import type { AgentId, BudgetLimit, HandoffId, ResourceUsage } from "../workflow/types.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "../workflow/writer-lease.ts";
 import { AgentRegistry, AgentRegistryError } from "./agent-registry.ts";
 import { parseHandoff } from "./handoff.ts";
+import type { SubagentPersistence } from "./subagent-persistence.ts";
+import type { SubagentService } from "./subagent-service.ts";
 import type {
+	AgentBackend,
 	AgentInstance,
 	AgentRunResult,
+	AgentRuntimeEvent,
+	AgentTranscriptEntry,
+	AgentTranscriptEntryType,
+	AgentTranscriptView,
+	Handoff,
 	RetrySubagentInput,
 	SpawnSubagentInput,
 	SubagentModification,
 	SubagentSession,
 	SubagentSessionFactory,
 } from "./types.ts";
+import { CurrentWorkspaceProvider, type WorkspaceProvider } from "./workspace-provider.ts";
 
 const ACTIVE_AGENT_STATUSES = new Set(["starting", "running", "waiting"]);
 const LIVE_AGENT_STATUSES = new Set(["starting", "idle", "running", "waiting", "stopping"]);
@@ -45,6 +54,7 @@ interface RuntimeEventShape {
 
 export interface SubagentRuntimeOptions {
 	readonly sessionFactory: SubagentSessionFactory;
+	readonly inProcessSessionFactory?: SubagentSessionFactory;
 	readonly registry?: AgentRegistry;
 	readonly writerLeaseRegistry?: WriterLeaseRegistry;
 	readonly runtimeRegistry?: WorkflowRuntimeRegistry;
@@ -52,6 +62,8 @@ export interface SubagentRuntimeOptions {
 	readonly now?: () => number;
 	readonly maxAgents?: number;
 	readonly writerLeaseTtlMs?: number;
+	readonly persistence?: SubagentPersistence;
+	readonly workspaceProvider?: WorkspaceProvider;
 }
 
 export class SubagentRuntimeError extends Error {
@@ -135,15 +147,19 @@ function decrementedDepthBudget(budget: BudgetLimit): BudgetLimit {
 	return { ...budget, maxAgentDepth: Math.max(0, budget.maxAgentDepth - 1) };
 }
 
-export class SubagentRuntime {
+export class SubagentRuntime implements SubagentService {
 	readonly registry: AgentRegistry;
-	readonly #sessionFactory: SubagentSessionFactory;
+	readonly #sessionFactories: ReadonlyMap<AgentBackend, SubagentSessionFactory>;
 	readonly #writerLeaseRegistry: WriterLeaseRegistry;
 	readonly #runtimeRegistry: WorkflowRuntimeRegistry;
 	readonly #createId: (kind: "agent" | "handoff") => string;
 	readonly #now: () => number;
 	readonly #maxAgents: number;
 	readonly #writerLeaseTtlMs: number;
+	readonly #persistence?: SubagentPersistence;
+	readonly #workspaceProvider: WorkspaceProvider;
+	readonly #unsubscribeRegistry: () => void;
+	readonly #resourceRecovery: Promise<void>;
 	readonly #sessions = new Map<AgentId, SubagentSession>();
 	readonly #spawnInputs = new Map<AgentId, SpawnSubagentInput>();
 	readonly #workflowBudgets = new Map<string, BudgetLimit>();
@@ -160,9 +176,16 @@ export class SubagentRuntime {
 	readonly #pendingMutations = new Map<AgentId, Map<string, PendingMutation>>();
 	readonly #modifications = new Map<AgentId, SubagentModification[]>();
 	readonly #incrementalUsage = new Map<AgentId, ResourceUsage>();
+	readonly #transcripts = new Map<AgentId, AgentTranscriptEntry[]>();
+	readonly #releasedWorkspaceAgents = new Set<AgentId>();
+	#transcriptSequence = 0;
 
 	constructor(options: SubagentRuntimeOptions) {
-		this.#sessionFactory = options.sessionFactory;
+		const sessionFactories = new Map<AgentBackend, SubagentSessionFactory>([["rpc", options.sessionFactory]]);
+		if (options.inProcessSessionFactory) {
+			sessionFactories.set("in-process", options.inProcessSessionFactory);
+		}
+		this.#sessionFactories = sessionFactories;
 		this.#now = options.now ?? Date.now;
 		this.registry =
 			options.registry ??
@@ -174,9 +197,18 @@ export class SubagentRuntime {
 		this.#createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
 		this.#maxAgents = options.maxAgents ?? 8;
 		this.#writerLeaseTtlMs = options.writerLeaseTtlMs ?? 60_000;
+		this.#persistence = options.persistence;
+		this.#workspaceProvider = options.workspaceProvider ?? new CurrentWorkspaceProvider();
 		if (!Number.isInteger(this.#maxAgents) || this.#maxAgents < 1) {
 			throw new SubagentRuntimeError("subagent.invalid_max_agents", "Subagent maxAgents must be positive");
 		}
+		this.#restorePersistedState();
+		this.#resourceRecovery = this.#recoverResources();
+		this.#unsubscribeRegistry = this.registry.subscribe((event) => {
+			if (event.type !== "progress") {
+				this.#persistState(event);
+			}
+		});
 	}
 
 	availableSlots(workflowId: string): number {
@@ -185,6 +217,7 @@ export class SubagentRuntime {
 	}
 
 	async spawn(input: SpawnSubagentInput): Promise<AgentInstance> {
+		await this.#resourceRecovery;
 		const profileViolations = validateAgentProfile(input.profile);
 		if (profileViolations.length > 0) {
 			throw new SubagentRuntimeError(
@@ -252,6 +285,11 @@ export class SubagentRuntime {
 			);
 		}
 		const budget = inheritBudgetLimits(parentBudget, workflowBudget, input.taskBudget, input.profile.defaultBudget);
+		const { backend, reason: backendReason } = this.#selectBackend(input, effectivePermissions, budget);
+		const sessionFactory = this.#sessionFactories.get(backend);
+		if (!sessionFactory) {
+			throw new SubagentRuntimeError("subagent.backend_unsupported", `Subagent backend ${backend} is unavailable`);
+		}
 		const toolNames = filterToolsByPermissions(input.profile.allowedTools, effectivePermissions).filter(
 			(toolName) => toolName !== "bash" || effectivePermissions.network,
 		);
@@ -262,6 +300,7 @@ export class SubagentRuntime {
 			this.#workflowPermissions.set(input.workflowId, workflowPermission);
 		}
 		const agentId = this.#createId("agent");
+		const workspace = await this.#workspaceProvider.prepare({ agentId, backend, input });
 		const timestamp = new Date(this.#now()).toISOString();
 		this.registry.create({
 			id: agentId,
@@ -270,6 +309,13 @@ export class SubagentRuntime {
 			taskId: input.taskId,
 			attemptId: input.attemptId,
 			profileName: input.profile.name,
+			profile: structuredClone(input.profile),
+			profileSource: input.profileSource ?? "runtime",
+			profileSourcePath: input.profileSourcePath,
+			scope: input.scope ?? "task",
+			backend,
+			backendReason,
+			workspace,
 			status: "starting",
 			depth,
 			retryCount: input.retryCount ?? 0,
@@ -281,8 +327,8 @@ export class SubagentRuntime {
 			createdAt: timestamp,
 			updatedAt: timestamp,
 		});
-		const session = this.#sessionFactory.create({
-			cwd: input.cwd,
+		const session = sessionFactory.create({
+			cwd: workspace.path,
 			profile: input.profile,
 			toolNames,
 			effectivePermissions,
@@ -300,6 +346,7 @@ export class SubagentRuntime {
 		this.#pendingMutations.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
 		this.#incrementalUsage.set(agentId, zeroUsage());
+		this.#transcripts.set(agentId, []);
 		this.#unsubscribeEvents.set(
 			agentId,
 			session.onEvent((event) => this.#handleSessionEvent(agentId, event)),
@@ -325,7 +372,7 @@ export class SubagentRuntime {
 			const message = error instanceof Error ? error.message : String(error);
 			this.registry.fail(agentId, message);
 			await session.stop().catch(() => undefined);
-			this.#cleanupAgent(agentId);
+			await this.#cleanupAgent(agentId);
 			throw new SubagentRuntimeError("subagent.start_failed", message);
 		}
 	}
@@ -360,7 +407,8 @@ export class SubagentRuntime {
 		const session = this.#requireSession(agentId);
 		if (agent.status === "running" || agent.status === "waiting") {
 			await session.steer(message);
-			this.registry.progress(agentId, "Steering message sent");
+			this.#recordTranscript(agentId, "steer", message);
+			this.registry.steered(agentId, "Steering message sent");
 			if (agent.status === "waiting") {
 				this.registry.transition(agentId, "running", "Agent resumed");
 			}
@@ -386,6 +434,7 @@ export class SubagentRuntime {
 		});
 		this.reserveWriter(agentId);
 		this.#lastPrompts.set(agentId, message);
+		this.#recordTranscript(agentId, "prompt", message);
 		this.#pendingMutations.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
 		this.#incrementalUsage.set(agentId, zeroUsage());
@@ -401,6 +450,23 @@ export class SubagentRuntime {
 		}
 		const runPromise = this.#settleRun(agentId, idlePromise, startedAt);
 		this.#runPromises.set(agentId, runPromise);
+	}
+
+	async resume(agentId: AgentId, message: string): Promise<void> {
+		if (!message.trim()) {
+			throw new SubagentRuntimeError("subagent.message_required", "Resume message is required");
+		}
+		const agent = this.#requireAgent(agentId);
+		if (agent.status !== "idle" || !agent.handoffId || !this.#lastResults.has(agentId)) {
+			throw new SubagentRuntimeError("subagent.resume_not_allowed", `Agent ${agentId} is not terminal`);
+		}
+		if (agent.sessionReleasedAt || !this.#sessions.has(agentId)) {
+			throw new SubagentRuntimeError("subagent.resume_unavailable", `Agent ${agentId} Session was released`);
+		}
+		this.registry.resume(agentId, message);
+		this.#lastResults.delete(agentId);
+		this.#recordTranscript(agentId, "resume", message);
+		await this.send(agentId, message);
 	}
 
 	async wait(agentId: AgentId): Promise<AgentRunResult> {
@@ -431,6 +497,10 @@ export class SubagentRuntime {
 	async #interrupt(agentId: AgentId, reason: string): Promise<AgentRunResult> {
 		const agent = this.#requireAgent(agentId);
 		const existingResult = this.#lastResults.get(agentId);
+		if (existingResult && agent.status === "idle") {
+			await this.release(agentId);
+			return structuredClone(existingResult);
+		}
 		if (agent.status === "stopped" || agent.status === "interrupted" || agent.status === "failed") {
 			return structuredClone(
 				existingResult ?? {
@@ -444,6 +514,7 @@ export class SubagentRuntime {
 		}
 		this.#interrupting.add(agentId);
 		this.#interruptReasons.set(agentId, reason);
+		this.#recordTranscript(agentId, "interrupt", reason);
 		if (agent.status !== "stopping") {
 			this.registry.transition(agentId, "stopping", reason);
 		}
@@ -455,7 +526,7 @@ export class SubagentRuntime {
 		await session.stop();
 		this.#releaseWriter(agentId);
 		this.registry.transition(agentId, "stopped", reason);
-		this.#cleanupAgent(agentId);
+		await this.#cleanupAgent(agentId);
 		const result: AgentRunResult = {
 			agentId,
 			status: "interrupted",
@@ -509,6 +580,45 @@ export class SubagentRuntime {
 		return this.registry.list(workflowId);
 	}
 
+	get(agentId: AgentId): AgentInstance | undefined {
+		return this.registry.get(agentId);
+	}
+
+	getHandoff(handoffId: HandoffId): Handoff | undefined {
+		return this.registry.getHandoff(handoffId);
+	}
+
+	events(agentId?: AgentId): readonly AgentRuntimeEvent[] {
+		return this.registry.events(agentId);
+	}
+
+	getTranscript(agentId: AgentId): AgentTranscriptView {
+		const agent = this.#requireAgent(agentId);
+		return {
+			agentId,
+			sessionId: agent.sessionId,
+			backend: agent.backend,
+			released: agent.sessionReleasedAt !== undefined,
+			entries: structuredClone(this.#transcripts.get(agentId) ?? []),
+		};
+	}
+
+	subscribe(listener: (event: AgentRuntimeEvent) => void): () => void {
+		return this.registry.subscribe(listener);
+	}
+
+	async release(agentId: AgentId): Promise<void> {
+		const agent = this.#requireAgent(agentId);
+		if (agent.status === "running" || agent.status === "waiting" || agent.status === "stopping") {
+			throw new SubagentRuntimeError("subagent.session_active", `Agent ${agentId} Session is active`);
+		}
+		if (agent.sessionReleasedAt && (!agent.workspace || this.#releasedWorkspaceAgents.has(agent.id))) {
+			return;
+		}
+		await this.#sessions.get(agentId)?.stop();
+		await this.#cleanupAgent(agentId);
+	}
+
 	async cancelWorkflow(workflowId: string, reason: string): Promise<readonly AgentRunResult[]> {
 		return Promise.all(
 			this.registry
@@ -519,12 +629,16 @@ export class SubagentRuntime {
 	}
 
 	async dispose(): Promise<void> {
+		await this.#resourceRecovery.catch(() => undefined);
 		await Promise.all(
 			this.registry
 				.list()
 				.filter(({ status }) => LIVE_AGENT_STATUSES.has(status))
-				.map(({ id }) => this.interrupt(id, "Subagent Runtime disposed").catch(() => undefined)),
+				.map(({ id, handoffId }) =>
+					(handoffId ? this.release(id) : this.interrupt(id, "Subagent Runtime disposed")).catch(() => undefined),
+				),
 		);
+		this.#unsubscribeRegistry();
 	}
 
 	async #settleRun(agentId: AgentId, idlePromise: Promise<void>, startedAt: number): Promise<AgentRunResult> {
@@ -539,7 +653,7 @@ export class SubagentRuntime {
 				this.#releaseWriter(agentId);
 				this.registry.transition(agentId, "interrupted", reason);
 				await session.stop();
-				this.#cleanupAgent(agentId);
+				await this.#cleanupAgent(agentId);
 				const interrupted: AgentRunResult = {
 					agentId,
 					status: "interrupted",
@@ -575,6 +689,7 @@ export class SubagentRuntime {
 				agentId,
 				createdAt: new Date(this.#now()).toISOString(),
 			});
+			this.#recordTranscript(agentId, "assistant", text);
 			this.registry.recordHandoff(agentId, handoff);
 			this.#releaseWriter(agentId);
 			if (this.#requireAgent(agentId).status === "waiting") {
@@ -618,7 +733,7 @@ export class SubagentRuntime {
 		}
 		this.#releaseWriter(agentId);
 		await session?.stop().catch(() => undefined);
-		this.#cleanupAgent(agentId);
+		await this.#cleanupAgent(agentId);
 		const result: AgentRunResult = {
 			agentId,
 			status: this.#interrupting.has(agentId) ? "interrupted" : "failed",
@@ -651,6 +766,11 @@ export class SubagentRuntime {
 				}
 			}
 			this.registry.progress(agentId, typeof event.toolName === "string" ? `Tool: ${event.toolName}` : "Tool call");
+			this.#recordTranscript(
+				agentId,
+				"activity",
+				typeof event.toolName === "string" ? `Tool: ${event.toolName}` : "Tool call",
+			);
 			return;
 		}
 		if (type === "tool_execution_end" && typeof event.toolCallId === "string") {
@@ -702,11 +822,191 @@ export class SubagentRuntime {
 		}
 	}
 
-	#cleanupAgent(agentId: AgentId): void {
+	async #cleanupAgent(agentId: AgentId): Promise<void> {
 		this.#unsubscribeEvents.get(agentId)?.();
 		this.#unsubscribeEvents.delete(agentId);
 		this.#unregisterRuntime.get(agentId)?.();
 		this.#unregisterRuntime.delete(agentId);
+		this.#sessions.delete(agentId);
+		const agent = this.registry.get(agentId);
+		if (agent && !agent.sessionReleasedAt) {
+			this.registry.releaseSession(agentId);
+		}
+		if (agent?.workspace) {
+			await this.#workspaceProvider.release(agent.workspace);
+			this.#releasedWorkspaceAgents.add(agent.id);
+		}
+	}
+
+	#recordTranscript(agentId: AgentId, type: AgentTranscriptEntryType, text: string): void {
+		const entries = this.#transcripts.get(agentId);
+		if (!entries) {
+			return;
+		}
+		entries.push({
+			sequence: ++this.#transcriptSequence,
+			agentId,
+			type,
+			text,
+			occurredAt: new Date(this.#now()).toISOString(),
+		});
+		const entry = entries.at(-1);
+		if (entry) {
+			this.#persistence?.append({ kind: "transcript", entry });
+		}
+	}
+
+	#selectBackend(
+		input: SpawnSubagentInput,
+		permissions: SpawnSubagentInput["parentPermission"],
+		budget: BudgetLimit,
+	): { backend: AgentBackend; reason: string } {
+		const inProcessSafe =
+			input.profile.role !== "worker" &&
+			!permissions.write &&
+			!permissions.executeCommands &&
+			!permissions.network &&
+			budget.maxAgentDepth === 0;
+		if (input.backend === "in-process") {
+			if (!inProcessSafe) {
+				throw new SubagentRuntimeError(
+					"subagent.in_process_unsafe",
+					"In-process Subagents must be read-only, offline, command-free, non-worker, and unable to nest",
+				);
+			}
+			return { backend: "in-process", reason: "Explicit safe in-process request" };
+		}
+		if (input.backend === "auto" && inProcessSafe && this.#sessionFactories.has("in-process")) {
+			return { backend: "in-process", reason: "Auto-selected for a statically safe read-only Agent" };
+		}
+		return {
+			backend: "rpc",
+			reason:
+				input.backend === "auto"
+					? "RPC safety fallback because in-process was unavailable or ineligible"
+					: "RPC is the default isolated backend",
+		};
+	}
+
+	#persistState(event: AgentRuntimeEvent): void {
+		const agent = this.registry.get(event.agentId);
+		if (!agent) {
+			return;
+		}
+		this.#persistence?.append({
+			kind: "state",
+			agent,
+			event,
+			handoff: agent.handoffId ? this.registry.getHandoff(agent.handoffId) : undefined,
+		});
+	}
+
+	#restorePersistedState(): void {
+		if (!this.#persistence || this.registry.list().length > 0) {
+			return;
+		}
+		const records = this.#persistence.load();
+		const states = records.filter((record) => record.kind === "state");
+		const latestAgents = new Map<AgentId, AgentInstance>();
+		const handoffs = new Map<HandoffId, Handoff>();
+		const events: AgentRuntimeEvent[] = [];
+		for (const record of states) {
+			latestAgents.set(record.agent.id, record.agent);
+			events.push(record.event);
+			if (record.handoff) {
+				handoffs.set(record.handoff.id, record.handoff);
+			}
+		}
+		const recoveredAt = new Date(this.#now()).toISOString();
+		let sequence = Math.max(0, ...events.map((event) => event.sequence));
+		const recoveryEvents: AgentRuntimeEvent[] = [];
+		const agents = [...latestAgents.values()].map((agent) => {
+			const wasActive = ACTIVE_AGENT_STATUSES.has(agent.status) || agent.status === "stopping";
+			const recovered: AgentInstance = {
+				...agent,
+				status: wasActive ? "interrupted" : agent.status,
+				lastError: wasActive ? "Interrupted during Session recovery" : agent.lastError,
+				sessionReleasedAt: agent.sessionReleasedAt ?? recoveredAt,
+				updatedAt: recoveredAt,
+			};
+			if (wasActive) {
+				recoveryEvents.push({
+					sequence: ++sequence,
+					agentId: recovered.id,
+					workflowId: recovered.workflowId,
+					taskId: recovered.taskId,
+					attemptId: recovered.attemptId,
+					type: "interrupted",
+					eventName: "subagent_interrupted",
+					occurredAt: recoveredAt,
+					message: recovered.lastError,
+				});
+			}
+			if (!agent.sessionReleasedAt) {
+				recoveryEvents.push({
+					sequence: ++sequence,
+					agentId: recovered.id,
+					workflowId: recovered.workflowId,
+					taskId: recovered.taskId,
+					attemptId: recovered.attemptId,
+					type: "session_released",
+					eventName: "subagent_session_released",
+					occurredAt: recoveredAt,
+				});
+			}
+			return recovered;
+		});
+		events.push(...recoveryEvents);
+		this.registry.restore(agents, [...handoffs.values()], events);
+		for (const event of recoveryEvents) {
+			const agent = this.registry.get(event.agentId);
+			if (agent) {
+				this.#persistence.append({
+					kind: "state",
+					agent,
+					event,
+					handoff: agent.handoffId ? this.registry.getHandoff(agent.handoffId) : undefined,
+				});
+			}
+		}
+		for (const agent of agents) {
+			const handoff = agent.handoffId ? handoffs.get(agent.handoffId) : undefined;
+			if (agent.status === "idle" && handoff) {
+				this.#lastResults.set(agent.id, {
+					agentId: agent.id,
+					status: "completed",
+					handoff,
+					usage: agent.usage,
+					modifications: [],
+				});
+			} else if (agent.status === "failed" || agent.status === "interrupted" || agent.status === "stopped") {
+				this.#lastResults.set(agent.id, {
+					agentId: agent.id,
+					status: agent.status === "failed" ? "failed" : "interrupted",
+					usage: agent.usage,
+					modifications: [],
+					error: agent.lastError,
+				});
+			}
+		}
+		for (const record of records) {
+			if (record.kind !== "transcript") {
+				continue;
+			}
+			const entries = this.#transcripts.get(record.entry.agentId) ?? [];
+			entries.push(record.entry);
+			this.#transcripts.set(record.entry.agentId, entries);
+			this.#transcriptSequence = Math.max(this.#transcriptSequence, record.entry.sequence);
+		}
+	}
+
+	async #recoverResources(): Promise<void> {
+		const workspaces = this.registry
+			.list()
+			.map(({ workspace }) => workspace)
+			.filter((workspace): workspace is NonNullable<typeof workspace> => workspace !== undefined);
+		await this.#workspaceProvider.recover?.(workspaces);
+		await this.#workspaceProvider.cleanupOrphans?.(new Set(workspaces.map(({ id }) => id)));
 	}
 
 	#requireAgent(agentId: AgentId): AgentInstance {

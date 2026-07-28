@@ -407,6 +407,10 @@ describe("Plan Workflow AgentSession integration", () => {
 		);
 		await harness.session.prompt("/agent wait agent-3");
 		await harness.session.prompt("/agent show agent-1");
+		await harness.session.prompt("/agent sessions");
+		await harness.session.prompt("/agent transcript agent-1");
+		await harness.session.prompt("/agent profiles");
+		await harness.session.prompt("/agent profile explorer");
 		await harness.session.prompt("/agents");
 
 		const replayed = replay(harness);
@@ -446,6 +450,9 @@ describe("Plan Workflow AgentSession integration", () => {
 		expect(workflowOutput).toContain("agent-1 | idle | explorer");
 		expect(workflowOutput).toContain("agent-3 | idle | explorer");
 		expect(workflowOutput).toContain("handoff-2 | CLI Workflow inspected");
+		expect(workflowOutput).toContain("session-1 | rpc | idle | retained");
+		expect(workflowOutput).toContain("assistant |");
+		expect(workflowOutput).toContain("explorer | explorer | builtin");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 

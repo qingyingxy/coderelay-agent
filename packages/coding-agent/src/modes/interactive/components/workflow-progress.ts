@@ -57,7 +57,7 @@ function taskExecutor(view: WorkflowView, taskId: string): string | undefined {
 	return undefined;
 }
 
-export function formatWorkflowProgress(view: WorkflowView | undefined): readonly string[] {
+export function formatWorkflowProgress(view: WorkflowView | undefined, expanded = false): readonly string[] {
 	if (!view || !ACTIVE_WORKFLOW_STATUSES.has(view.workflow.status)) {
 		return [];
 	}
@@ -65,21 +65,18 @@ export function formatWorkflowProgress(view: WorkflowView | undefined): readonly
 	const tasks = view.tasks.filter(({ kind }) => kind !== "control");
 	const succeeded = tasks.filter(({ status }) => status === "succeeded" || status === "skipped").length;
 	const runningTasks = tasks.filter(({ status }) => status === "running" || status === "verifying");
-	const waiting = tasks.filter(
-		({ status }) => status === "pending" || status === "ready" || status === "blocked",
-	).length;
 	const failed = tasks.filter(({ status }) => status === "failed" || status === "cancelled").length;
-	const statusParts = [
-		`Workflow: ${label(view.workflow.status)}`,
-		`Tasks ${succeeded}/${tasks.length}`,
-		`Running ${runningTasks.length}`,
-		`Waiting ${waiting}`,
-	];
+	const statusParts = [`Workflow: ${label(view.workflow.status)}`, `Tasks ${succeeded}/${tasks.length}`];
 	if (failed > 0) {
 		statusParts.push(`Failed ${failed}`);
 	}
 
 	const lines = [statusParts.join(" · ")];
+	const runningAgents = view.agents.filter(({ status }) => status === "running" || status === "waiting");
+	const queuedAgents = view.agents.filter(
+		({ handoffId, status }) => !handoffId && (status === "starting" || status === "idle"),
+	);
+	lines.push(`Agents: ${runningAgents.length} running · ${queuedAgents.length} queued`);
 	const currentTask =
 		runningTasks[0] ??
 		tasks.find(({ kind, status }) => kind === "repair" && status === "ready") ??
@@ -121,11 +118,28 @@ export function formatWorkflowProgress(view: WorkflowView | undefined): readonly
 		lines.push(`Waiting: ${label(view.automation.waitingReason)}`);
 	}
 
+	if (expanded) {
+		const activeAgents = view.agents.filter(
+			({ handoffId, status }) =>
+				!handoffId && ["starting", "idle", "running", "waiting", "stopping", "failed"].includes(status),
+		);
+		lines.push(
+			...activeAgents.map(
+				(agent) =>
+					`Agent ${agent.id}: ${agent.profileName} · ${agent.backend} · ${label(agent.status)} · Task ${agent.taskId} · ${agent.usage.turns} turns · ${agent.usage.inputTokens + agent.usage.outputTokens} tokens`,
+			),
+		);
+		if (activeAgents.length > 0) {
+			lines.push("Agent actions: /agent show · /agent transcript · /agent send · /agent interrupt · /agent resume");
+		}
+		return lines;
+	}
 	return lines.slice(0, 3);
 }
 
 export class WorkflowProgressComponent implements Component {
 	private readonly getWorkflowView: () => WorkflowView | undefined;
+	private expanded = false;
 
 	constructor(getWorkflowView: () => WorkflowView | undefined) {
 		this.getWorkflowView = getWorkflowView;
@@ -135,11 +149,19 @@ export class WorkflowProgressComponent implements Component {
 		// The component reads the latest Workflow View on every render.
 	}
 
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+	}
+
+	toggleExpanded(): void {
+		this.expanded = !this.expanded;
+	}
+
 	render(width: number): string[] {
 		if (width <= 0) {
 			return [];
 		}
-		return formatWorkflowProgress(this.getWorkflowView()).map((line, index) => {
+		return formatWorkflowProgress(this.getWorkflowView(), this.expanded).map((line, index) => {
 			const text = index === 0 ? theme.fg("accent", line) : theme.fg("muted", line);
 			return truncateToWidth(text, width, theme.fg("muted", "..."));
 		});

@@ -4,9 +4,9 @@ import type { JobRuntime } from "../jobs/job-runtime.ts";
 import type { Job } from "../jobs/types.ts";
 import type { SessionManager } from "../session-manager.ts";
 import { aggregateHandoffs } from "../subagents/handoff.ts";
-import type { SubagentRuntime } from "../subagents/subagent-runtime.ts";
+import type { SubagentService } from "../subagents/subagent-service.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
-import { type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
+import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
 import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
 import { derivePlanProgress } from "./plan-progress.ts";
@@ -48,6 +48,9 @@ export interface StartPlanRuntimeInput {
 
 export interface StartSubagentTaskInput {
 	readonly profileRole?: Extract<AgentProfileRole, "explorer" | "worker" | "reviewer">;
+	readonly profile?: AgentProfile;
+	readonly profileSource?: "builtin" | "global" | "project" | "runtime";
+	readonly profileSourcePath?: string;
 	readonly parentAgentId?: string;
 	readonly parentPermission?: PermissionSet;
 	readonly workflowPermission?: PermissionSet;
@@ -425,7 +428,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 	}
 
 	async startSubagentTask(
-		runtime: SubagentRuntime,
+		runtime: SubagentService,
 		taskId: string,
 		input: StartSubagentTaskInput = {},
 	): Promise<SubagentTaskExecution> {
@@ -443,7 +446,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			throw new Error(`Task ${task.id} cannot run in a Subagent`);
 		}
 		const profileRole = input.profileRole ?? (task.accessMode === "writer" ? "worker" : "explorer");
-		const profile = BUILTIN_AGENT_PROFILES[profileRole];
+		const profile = input.profile ?? BUILTIN_AGENT_PROFILES[profileRole];
+		if (task.accessMode === "writer" && profile.role !== "worker") {
+			throw new Error(`Writer Task ${task.id} requires a worker Agent Profile`);
+		}
 		const taskPermission: PermissionSet =
 			task.accessMode === "writer"
 				? { ...FULL_PERMISSION_SET, network: false }
@@ -462,6 +468,9 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					attemptId,
 					cwd: workflow.request.cwd,
 					profile,
+					profileSource: input.profileSource ?? (input.profile ? "runtime" : "builtin"),
+					profileSourcePath: input.profileSourcePath,
+					scope: "task",
 					parentAgentId: input.parentAgentId,
 					parentPermission: input.parentPermission ?? FULL_PERMISSION_SET,
 					workflowPermission: input.workflowPermission ?? FULL_PERMISSION_SET,
@@ -498,7 +507,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			});
 			const dependencyHandoffs = task.dependencyIds.flatMap((dependencyId) => {
 				const handoffId = this.#controller.getTask(dependencyId)?.result?.handoffId;
-				const handoff = handoffId ? runtime.registry.getHandoff(handoffId) : undefined;
+				const handoff = handoffId ? runtime.getHandoff(handoffId) : undefined;
 				return handoff ? [handoff] : [];
 			});
 			const promptLines = [
@@ -520,11 +529,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			.wait(agent.id)
 			.then((result) => this.#finishSubagentTask(task.id, attemptId, result))
 			.finally(() => this.#checkpoint());
-		return { agent: runtime.registry.get(agent.id) ?? agent, completion };
+		return { agent: runtime.get(agent.id) ?? agent, completion };
 	}
 
 	async startReadySubagents(
-		runtime: SubagentRuntime,
+		runtime: SubagentService,
 		maxConcurrency: number,
 	): Promise<readonly SubagentTaskExecution[]> {
 		this.refreshTaskReadiness();
@@ -533,7 +542,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 	}
 
 	async startReadyTasks(
-		subagentRuntime: SubagentRuntime,
+		subagentRuntime: SubagentService,
 		jobRuntime: JobRuntime,
 		maxConcurrency: number,
 	): Promise<readonly WorkflowTaskExecution[]> {
@@ -620,7 +629,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 
 	async cancel(
 		reason = "User cancelled the workflow",
-		subagentRuntime?: SubagentRuntime,
+		subagentRuntime?: SubagentService,
 		jobRuntime?: JobRuntime,
 	): Promise<void> {
 		const workflow = this.workflow;

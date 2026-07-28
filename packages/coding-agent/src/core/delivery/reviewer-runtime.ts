@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SubagentRuntime } from "../subagents/subagent-runtime.ts";
+import type { SubagentService } from "../subagents/subagent-service.ts";
 import { BUILTIN_AGENT_PROFILES } from "../workflow/agent-profile.ts";
 import { FULL_PERMISSION_SET } from "../workflow/runtime-policy.ts";
 import type { ReadonlyReviewer, ReviewResult } from "./types.ts";
@@ -8,9 +8,9 @@ const REVIEW_PASSED = "review:passed";
 const REVIEW_FAILED = "review:failed";
 
 export class SubagentReadonlyReviewer implements ReadonlyReviewer {
-	readonly #runtime: SubagentRuntime;
+	readonly #runtime: SubagentService;
 
-	constructor(runtime: SubagentRuntime) {
+	constructor(runtime: SubagentService) {
 		this.#runtime = runtime;
 	}
 
@@ -27,6 +27,7 @@ export class SubagentReadonlyReviewer implements ReadonlyReviewer {
 			attemptId: `review-${randomUUID()}`,
 			cwd: input.workflow.request.cwd,
 			profile: BUILTIN_AGENT_PROFILES.reviewer,
+			scope: "workflow",
 			parentPermission: readOnlyPermission,
 			workflowPermission: readOnlyPermission,
 			taskPermission: readOnlyPermission,

@@ -111,6 +111,9 @@ export class RpcSubagentSessionFactory implements SubagentSessionFactory {
 		if (config.profile.model) {
 			args.push("--model", config.profile.model);
 		}
+		if (config.profile.thinkingLevel) {
+			args.push("--thinking", config.profile.thinkingLevel);
+		}
 		return new RpcSubagentSession({
 			command: this.#options.command ?? invocation.command,
 			commandArgs: this.#options.commandArgs ? [...this.#options.commandArgs] : invocation.commandArgs,

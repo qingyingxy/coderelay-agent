@@ -15,6 +15,7 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
+import { InProcessSubagentSessionFactory } from "./subagents/in-process-session.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -387,6 +388,42 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		inProcessSubagentSessionFactory: new InProcessSubagentSessionFactory(async (config) => {
+			const configuredModel = config.profile.model;
+			const separator = configuredModel?.indexOf("/") ?? -1;
+			const childModel =
+				configuredModel && separator > 0
+					? modelRuntime.getModel(configuredModel.slice(0, separator), configuredModel.slice(separator + 1))
+					: model;
+			if (!childModel) {
+				throw new Error(`In-process Agent Profile ${config.profile.name} has no available model`);
+			}
+			const child = await createAgentSession({
+				cwd: config.cwd,
+				agentDir,
+				modelRuntime,
+				model: childModel,
+				thinkingLevel: config.profile.thinkingLevel ?? thinkingLevel,
+				tools: [...config.toolNames],
+				sessionManager: SessionManager.inMemory(config.cwd),
+				settingsManager: SettingsManager.create(config.cwd, agentDir),
+			});
+			return {
+				get sessionId() {
+					return child.session.sessionId;
+				},
+				get messages() {
+					return child.session.messages;
+				},
+				prompt: (message) => child.session.prompt(message),
+				steer: (message) => child.session.steer(message),
+				abort: () => child.session.abort(),
+				waitForIdle: () => child.session.waitForIdle(),
+				getSessionStats: () => child.session.getSessionStats(),
+				subscribe: (listener) => child.session.subscribe((event) => listener(event)),
+				dispose: () => child.session.dispose(),
+			};
+		}),
 	});
 	const extensionsResult = resourceLoader.getExtensions();
 

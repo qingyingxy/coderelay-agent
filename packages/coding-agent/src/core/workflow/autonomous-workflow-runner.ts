@@ -1,6 +1,6 @@
 import type { DeliveryRuntime } from "../delivery/delivery-runtime.ts";
 import type { JobRuntime } from "../jobs/job-runtime.ts";
-import type { SubagentRuntime } from "../subagents/subagent-runtime.ts";
+import type { SubagentService } from "../subagents/subagent-service.ts";
 import type {
 	AutonomousWorkflowEvent,
 	WorkflowAutomationAction,
@@ -13,7 +13,7 @@ import { isWorkflowTerminalStatus } from "./transitions.ts";
 
 export interface AutonomousWorkflowRunnerOptions {
 	readonly runtime: PlanWorkflowRuntime;
-	readonly subagentRuntime: SubagentRuntime;
+	readonly subagentRuntime: SubagentService;
 	readonly jobRuntime: JobRuntime;
 	readonly deliveryRuntime: DeliveryRuntime;
 	readonly policy: WorkflowAutomationPolicy;
@@ -23,7 +23,7 @@ export interface AutonomousWorkflowRunnerOptions {
 
 export class AutonomousWorkflowRunner {
 	readonly #runtime: PlanWorkflowRuntime;
-	readonly #subagentRuntime: SubagentRuntime;
+	readonly #subagentRuntime: SubagentService;
 	readonly #jobRuntime: JobRuntime;
 	readonly #deliveryRuntime: DeliveryRuntime;
 	readonly #policy: WorkflowAutomationPolicy;

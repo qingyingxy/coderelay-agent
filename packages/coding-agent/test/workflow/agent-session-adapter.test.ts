@@ -6,6 +6,7 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "../../src/cor
 import { SessionManager } from "../../src/core/session-manager.ts";
 import {
 	decideDirectPlanUpgrade,
+	FULL_PERMISSION_SET,
 	SessionWorkflowEventLog,
 	startDirectAgentSessionWorkflow,
 	type WorkflowAgentSession,
@@ -238,6 +239,66 @@ describe("AgentSessionAdapter", () => {
 			}),
 		]);
 
+		adapter.dispose();
+	});
+
+	it("binds foreground writer delegations to the active Task and transfers the Writer Lease", async () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+
+		expect(() =>
+			adapter.bindDelegation({
+				parentPermission: FULL_PERMISSION_SET,
+				requiresWriter: true,
+				runInBackground: true,
+			}),
+		).toThrow("Writer Subagents must run in the foreground");
+		const binding = adapter.bindDelegation({
+			parentPermission: FULL_PERMISSION_SET,
+			requiresWriter: true,
+			runInBackground: false,
+		});
+		expect(binding.input).toMatchObject({
+			workflowId: WORKFLOW_ID,
+			taskId: TASK_ID,
+			attemptId: "attempt-2",
+		});
+		expect(adapter.statusLines).toContain("Writer Lease: not held");
+
+		await binding.settle?.({
+			agentId: "agent-child",
+			status: "completed",
+			usage: {
+				inputTokens: 7,
+				outputTokens: 3,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				cost: 0.01,
+				turns: 1,
+				durationMs: 20,
+			},
+			modifications: [{ path: "src/delegated.ts", operation: "write", toolCallId: "child-tool" }],
+		});
+		expect(adapter.statusLines).toEqual(expect.arrayContaining([expect.stringMatching(/^Writer Lease: held \| /)]));
+
+		emitRun(session, fauxAssistantMessage("Done"), false);
+		const store = replay(session);
+		expect(store.getWorkflow(WORKFLOW_ID)?.result).toMatchObject({
+			changedFiles: ["src/delegated.ts"],
+			usage: {
+				inputTokens: 7,
+				outputTokens: 3,
+				turns: 2,
+			},
+		});
+		expect(store.getTask(TASK_ID)?.modifications).toContainEqual(
+			expect.objectContaining({
+				path: "src/delegated.ts",
+				agentId: "agent-child",
+				attemptId: "attempt-2",
+			}),
+		);
 		adapter.dispose();
 	});
 

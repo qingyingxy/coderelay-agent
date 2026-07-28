@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { BudgetLimit } from "./types.ts";
 
 export const AGENT_PROFILE_ROLES = ["mode_advisor", "planner", "explorer", "worker", "reviewer"] as const;
@@ -20,6 +21,7 @@ export interface AgentProfile {
 	readonly role: AgentProfileRole;
 	readonly description: string;
 	readonly model?: string;
+	readonly thinkingLevel?: ThinkingLevel;
 	readonly systemPrompt: string;
 	readonly allowedTools: readonly string[];
 	readonly permissionCeiling: AgentPermissionCeiling;

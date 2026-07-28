@@ -1,5 +1,12 @@
 import type { AgentId, HandoffId, IsoDateTime, ResourceUsage, WorkflowId } from "../workflow/types.ts";
-import type { AgentInstance, AgentInstanceStatus, AgentRuntimeEvent, AgentRuntimeEventType, Handoff } from "./types.ts";
+import type {
+	AgentInstance,
+	AgentInstanceStatus,
+	AgentRuntimeEvent,
+	AgentRuntimeEventType,
+	Handoff,
+	StableSubagentEventName,
+} from "./types.ts";
 
 const TRANSITIONS: Readonly<Record<AgentInstanceStatus, ReadonlySet<AgentInstanceStatus>>> = {
 	starting: new Set(["idle", "failed", "stopping"]),
@@ -24,6 +31,7 @@ export class AgentRegistryError extends Error {
 
 export interface AgentRegistryOptions {
 	readonly now?: () => IsoDateTime;
+	readonly onListenerError?: (error: unknown) => void;
 }
 
 export class AgentRegistry {
@@ -32,10 +40,29 @@ export class AgentRegistry {
 	readonly #events: AgentRuntimeEvent[] = [];
 	readonly #listeners = new Set<(event: AgentRuntimeEvent) => void>();
 	readonly #now: () => IsoDateTime;
+	readonly #onListenerError: (error: unknown) => void;
 	#sequence = 0;
 
 	constructor(options: AgentRegistryOptions = {}) {
 		this.#now = options.now ?? (() => new Date().toISOString());
+		this.#onListenerError = options.onListenerError ?? (() => undefined);
+	}
+
+	restore(agents: readonly AgentInstance[], handoffs: readonly Handoff[], events: readonly AgentRuntimeEvent[]): void {
+		if (this.#agents.size > 0 || this.#handoffs.size > 0 || this.#events.length > 0) {
+			throw new AgentRegistryError(
+				"agent_registry.restore_not_empty",
+				"Agent Registry restore requires an empty Registry",
+			);
+		}
+		for (const agent of agents) {
+			this.#agents.set(agent.id, structuredClone(agent));
+		}
+		for (const handoff of handoffs) {
+			this.#handoffs.set(handoff.id, structuredClone(handoff));
+		}
+		this.#events.push(...events.map((event) => structuredClone(event)));
+		this.#sequence = Math.max(0, ...events.map(({ sequence }) => sequence));
 	}
 
 	create(instance: AgentInstance): AgentInstance {
@@ -164,6 +191,45 @@ export class AgentRegistry {
 		this.#emit(this.#require(agentId), "progress", message);
 	}
 
+	steered(agentId: AgentId, message: string): void {
+		this.#emit(this.#require(agentId), "steered", message);
+	}
+
+	resume(agentId: AgentId, message: string): AgentInstance {
+		const current = this.#require(agentId);
+		if (current.status !== "idle" || !current.handoffId || current.sessionReleasedAt) {
+			throw new AgentRegistryError("agent_registry.not_resumable", `Agent ${agentId} cannot be resumed`);
+		}
+		return this.#replace(
+			{
+				...current,
+				handoffId: undefined,
+				lastError: undefined,
+				revision: current.revision + 1,
+				updatedAt: this.#now(),
+			},
+			"resumed",
+			message,
+		);
+	}
+
+	releaseSession(agentId: AgentId): AgentInstance {
+		const current = this.#require(agentId);
+		if (current.sessionReleasedAt) {
+			return structuredClone(current);
+		}
+		const releasedAt = this.#now();
+		return this.#replace(
+			{
+				...current,
+				sessionReleasedAt: releasedAt,
+				revision: current.revision + 1,
+				updatedAt: releasedAt,
+			},
+			"session_released",
+		);
+	}
+
 	block(agentId: AgentId, message: string): AgentInstance {
 		const current = this.#require(agentId);
 		if (current.status === "waiting") {
@@ -242,13 +308,55 @@ export class AgentRegistry {
 			agentId: instance.id,
 			workflowId: instance.workflowId,
 			taskId: instance.taskId,
+			attemptId: instance.attemptId,
 			type,
+			eventName: this.#stableEventName(type),
 			occurredAt: this.#now(),
 			message,
 		};
 		this.#events.push(event);
 		for (const listener of this.#listeners) {
-			listener(structuredClone(event));
+			try {
+				listener(structuredClone(event));
+			} catch (error) {
+				try {
+					this.#onListenerError(error);
+				} catch {
+					// Diagnostics must not change authoritative Agent state.
+				}
+			}
+		}
+	}
+
+	#stableEventName(type: AgentRuntimeEventType): StableSubagentEventName {
+		switch (type) {
+			case "created":
+				return "subagent_created";
+			case "ready":
+				return "subagent_queued";
+			case "started":
+				return "subagent_started";
+			case "progress":
+				return "subagent_progress";
+			case "waiting":
+			case "blocked":
+				return "subagent_waiting";
+			case "steered":
+				return "subagent_steered";
+			case "usage":
+				return "subagent_usage";
+			case "completed":
+			case "stopped":
+				return "subagent_completed";
+			case "failed":
+				return "subagent_failed";
+			case "interrupted":
+			case "stopping":
+				return "subagent_interrupted";
+			case "resumed":
+				return "subagent_resumed";
+			case "session_released":
+				return "subagent_session_released";
 		}
 	}
 }

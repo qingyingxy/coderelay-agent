@@ -21,7 +21,9 @@ function createRpcChild(): string {
 			"  const command = JSON.parse(line);",
 			"  if (command.type === 'get_state') {",
 			"    const toolsMode = process.argv.includes('--tools') ? 'restricted' : process.argv.includes('--no-tools') ? 'none' : 'default';",
-			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: 'rpc-' + process.pid + '-' + toolsMode } });",
+			"    const modelMode = process.argv.includes('openai/test-model') ? 'model' : 'no-model';",
+			"    const thinkingMode = process.argv.includes('high') ? 'thinking' : 'no-thinking';",
+			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: 'rpc-' + process.pid + '-' + toolsMode + '-' + modelMode + '-' + thinkingMode } });",
 			"  } else if (command.type === 'get_last_assistant_text') {",
 			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { text: handoff } });",
 			"  } else if (command.type === 'get_session_stats') {",
@@ -51,7 +53,11 @@ describe("RpcSubagentSessionFactory", () => {
 		});
 		const session = factory.create({
 			cwd: process.cwd(),
-			profile: BUILTIN_AGENT_PROFILES.explorer,
+			profile: {
+				...BUILTIN_AGENT_PROFILES.explorer,
+				model: "openai/test-model",
+				thinkingLevel: "high",
+			},
 			toolNames: ["read", "grep"],
 			effectivePermissions: {
 				...FULL_PERMISSION_SET,
@@ -67,7 +73,7 @@ describe("RpcSubagentSessionFactory", () => {
 		await session.prompt("Inspect the repository");
 		await idle;
 
-		expect(await session.getSessionId()).toMatch(/^rpc-\d+-restricted$/);
+		expect(await session.getSessionId()).toMatch(/^rpc-\d+-restricted-model-thinking$/);
 		expect(await session.getLastAssistantText()).toBe(SUBAGENT_HANDOFF);
 		expect(await session.getUsage()).toMatchObject({
 			inputTokens: 8,
