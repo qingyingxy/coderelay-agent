@@ -40,13 +40,24 @@ export function formatAgentDetails(
 		`attempt: ${agent.attemptId} | retry: ${agent.retryCount}${agent.retryOfAgentId ? ` of ${agent.retryOfAgentId}` : ""}`,
 		`profile source: ${agent.profileSource ?? "unknown"}${agent.profileSourcePath ? ` | ${agent.profileSourcePath}` : ""}`,
 		`backend: ${agent.backend}${agent.backendReason ? ` | ${agent.backendReason}` : ""}`,
-		`workspace: ${agent.workspace?.id ?? "(current)"} | ${agent.workspace?.path ?? "(not recorded)"}`,
+		`enforcement: ${agent.sandbox?.assurance ?? "unverified"} | ${agent.enforcementPlan?.mode ?? "unknown"} | ${agent.enforcementPlan?.digest.slice(0, 12) ?? "(no plan)"}`,
+		`workspace: ${agent.workspace?.id ?? "(current)"} | ${agent.workspace?.kind ?? "current"} | ${agent.workspace?.assurance ?? "shared"} | ${agent.workspace?.path ?? "(not recorded)"}`,
+		`repository: ${agent.workspace?.repositoryIdentity ?? "(not recorded)"}`,
 		`session lifecycle: ${agent.sessionReleasedAt ? `released ${agent.sessionReleasedAt}` : "retained"}`,
 		usageLine(agent),
 		`permissions: read=${agent.effectivePermissions.read} write=${agent.effectivePermissions.write} commands=${agent.effectivePermissions.executeCommands} network=${agent.effectivePermissions.network}`,
 	];
 	if (agent.lastError) {
 		lines.push(`error: ${agent.lastError}`);
+	}
+	if (agent.sandbox?.missingGuarantees.length) {
+		lines.push(`sandbox limitations: ${agent.sandbox.missingGuarantees.join("; ")}`);
+	}
+	if (agent.artifact) {
+		lines.push(
+			`artifact: ${agent.artifact.id} | ${agent.artifact.status} | ${agent.artifact.changedFiles.length} file(s)`,
+			`artifact patch: ${agent.artifact.patchPath}`,
+		);
 	}
 	if (handoff) {
 		lines.push(
@@ -67,6 +78,11 @@ export function formatAgentRunResult(result: AgentRunResult): readonly string[] 
 		`${result.agentId} | ${result.status}`,
 		`usage: ${result.usage.inputTokens + result.usage.outputTokens} tokens | ${result.usage.turns} turns | $${result.usage.cost.toFixed(4)} | ${result.usage.durationMs}ms`,
 		`changed: ${result.modifications.map(({ path }) => path).join(", ") || "(none)"}`,
+		...(result.artifact
+			? [
+					`artifact: ${result.artifact.id} | ${result.artifact.status} | ${result.artifact.changedFiles.join(", ") || "(none)"}`,
+				]
+			: []),
 		...(result.handoff ? [`handoff: ${result.handoff.id} | ${result.handoff.conclusion}`] : []),
 		...(result.error ? [`error: ${result.error}`] : []),
 	];

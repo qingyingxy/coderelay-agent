@@ -14,6 +14,7 @@ import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.t
 import type { WorkflowAutomationResult } from "../../core/workflow/autonomous-workflow-types.ts";
 import type { ExecutionMode } from "../../core/workflow/types.ts";
 import type { WorkflowView } from "../../core/workflow/view.ts";
+import { killProcessTree } from "../../utils/shell.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
@@ -38,6 +39,8 @@ export interface RpcClientOptions {
 	cwd?: string;
 	/** Environment variables */
 	env?: Record<string, string>;
+	/** Whether to inherit the parent process environment. Default: true. */
+	inheritParentEnv?: boolean;
 	/** Provider to use */
 	provider?: string;
 	/** Model ID to use */
@@ -100,7 +103,8 @@ export class RpcClient {
 
 		const childProcess = spawn(command, [...commandArgs, ...args], {
 			cwd: this.options.cwd,
-			env: { ...process.env, ...this.options.env },
+			env:
+				this.options.inheritParentEnv === false ? { ...this.options.env } : { ...process.env, ...this.options.env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.process = childProcess;
@@ -159,7 +163,12 @@ export class RpcClient {
 		// Wait for process to exit
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				this.process?.kill("SIGKILL");
+				const pid = this.process?.pid;
+				if (pid) {
+					killProcessTree(pid);
+				} else {
+					this.process?.kill("SIGKILL");
+				}
 				resolve();
 			}, 1000);
 

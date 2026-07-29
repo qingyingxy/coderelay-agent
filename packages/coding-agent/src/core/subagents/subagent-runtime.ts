@@ -14,7 +14,17 @@ import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from 
 import type { AgentId, BudgetLimit, HandoffId, ResourceUsage } from "../workflow/types.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "../workflow/writer-lease.ts";
 import { AgentRegistry, AgentRegistryError } from "./agent-registry.ts";
+import { compileAgentEnforcementPlan, type EnforcementMode, parseEnforcementMode } from "./enforcement-plan.ts";
+import { GitWorktreeWorkspaceProvider } from "./git-worktree-workspace-provider.ts";
 import { parseHandoff } from "./handoff.ts";
+import { DEFAULT_WORKSPACE_INTEGRATION_QUEUE, type WorkspaceIntegrationQueue } from "./integration-queue.ts";
+import {
+	BaselineSandboxBackend,
+	providerEnvironmentKeys,
+	type SandboxBackend,
+	type SandboxHandle,
+} from "./sandbox-backend.ts";
+import { resolveSubagentModelName } from "./subagent-model.ts";
 import type { SubagentPersistence } from "./subagent-persistence.ts";
 import type { SubagentService } from "./subagent-service.ts";
 import type {
@@ -31,8 +41,9 @@ import type {
 	SubagentModification,
 	SubagentSession,
 	SubagentSessionFactory,
+	WorkspaceArtifact,
 } from "./types.ts";
-import { CurrentWorkspaceProvider, type WorkspaceProvider } from "./workspace-provider.ts";
+import type { WorkspaceProvider } from "./workspace-provider.ts";
 
 const ACTIVE_AGENT_STATUSES = new Set(["starting", "running", "waiting"]);
 const LIVE_AGENT_STATUSES = new Set(["starting", "idle", "running", "waiting", "stopping"]);
@@ -64,6 +75,9 @@ export interface SubagentRuntimeOptions {
 	readonly writerLeaseTtlMs?: number;
 	readonly persistence?: SubagentPersistence;
 	readonly workspaceProvider?: WorkspaceProvider;
+	readonly sandboxBackend?: SandboxBackend;
+	readonly enforcementMode?: EnforcementMode;
+	readonly integrationQueue?: WorkspaceIntegrationQueue;
 }
 
 export class SubagentRuntimeError extends Error {
@@ -158,6 +172,9 @@ export class SubagentRuntime implements SubagentService {
 	readonly #writerLeaseTtlMs: number;
 	readonly #persistence?: SubagentPersistence;
 	readonly #workspaceProvider: WorkspaceProvider;
+	readonly #sandboxBackend: SandboxBackend;
+	readonly #enforcementMode: EnforcementMode;
+	readonly #integrationQueue: WorkspaceIntegrationQueue;
 	readonly #unsubscribeRegistry: () => void;
 	readonly #resourceRecovery: Promise<void>;
 	readonly #sessions = new Map<AgentId, SubagentSession>();
@@ -178,6 +195,7 @@ export class SubagentRuntime implements SubagentService {
 	readonly #incrementalUsage = new Map<AgentId, ResourceUsage>();
 	readonly #transcripts = new Map<AgentId, AgentTranscriptEntry[]>();
 	readonly #releasedWorkspaceAgents = new Set<AgentId>();
+	readonly #sandboxHandles = new Map<AgentId, SandboxHandle>();
 	#transcriptSequence = 0;
 
 	constructor(options: SubagentRuntimeOptions) {
@@ -198,7 +216,10 @@ export class SubagentRuntime implements SubagentService {
 		this.#maxAgents = options.maxAgents ?? 8;
 		this.#writerLeaseTtlMs = options.writerLeaseTtlMs ?? 60_000;
 		this.#persistence = options.persistence;
-		this.#workspaceProvider = options.workspaceProvider ?? new CurrentWorkspaceProvider();
+		this.#workspaceProvider = options.workspaceProvider ?? new GitWorktreeWorkspaceProvider();
+		this.#sandboxBackend = options.sandboxBackend ?? new BaselineSandboxBackend();
+		this.#enforcementMode = options.enforcementMode ?? parseEnforcementMode(process.env.PI_SUBAGENT_ENFORCEMENT);
+		this.#integrationQueue = options.integrationQueue ?? DEFAULT_WORKSPACE_INTEGRATION_QUEUE;
 		if (!Number.isInteger(this.#maxAgents) || this.#maxAgents < 1) {
 			throw new SubagentRuntimeError("subagent.invalid_max_agents", "Subagent maxAgents must be positive");
 		}
@@ -274,16 +295,6 @@ export class SubagentRuntime implements SubagentService {
 			workflow: workflowPermission,
 			task: input.taskPermission,
 		});
-		if (
-			effectivePermissions.denyAllPaths ||
-			effectivePermissions.allowedPaths.length > 0 ||
-			effectivePermissions.deniedPaths.length > 0
-		) {
-			throw new RuntimePolicyError(
-				"runtime_policy.path_scope_unsupported",
-				"RPC Subagents cannot enforce path-scoped permissions without a sandbox",
-			);
-		}
 		const budget = inheritBudgetLimits(parentBudget, workflowBudget, input.taskBudget, input.profile.defaultBudget);
 		const { backend, reason: backendReason } = this.#selectBackend(input, effectivePermissions, budget);
 		const sessionFactory = this.#sessionFactories.get(backend);
@@ -300,7 +311,40 @@ export class SubagentRuntime implements SubagentService {
 			this.#workflowPermissions.set(input.workflowId, workflowPermission);
 		}
 		const agentId = this.#createId("agent");
-		const workspace = await this.#workspaceProvider.prepare({ agentId, backend, input });
+		const modelName = resolveSubagentModelName(input.cwd, input.profile.model);
+		const workspace = await this.#workspaceProvider.prepare({
+			agentId,
+			backend,
+			write: effectivePermissions.write,
+			input,
+		});
+		if (this.#enforcementMode === "strict" && effectivePermissions.write && workspace.assurance !== "isolated") {
+			await this.#workspaceProvider.release(workspace);
+			throw new SubagentRuntimeError(
+				"workspace.strict_isolation_unavailable",
+				"Strict Subagent enforcement requires an isolated Workspace for write access",
+			);
+		}
+		const enforcementPlan = compileAgentEnforcementPlan({
+			mode: this.#enforcementMode,
+			backend,
+			workspace,
+			permissions: effectivePermissions,
+			providerEnvironmentKeys: providerEnvironmentKeys(modelName),
+		});
+		let sandboxHandle: SandboxHandle;
+		try {
+			sandboxHandle = await this.#sandboxBackend.prepare({
+				agentId,
+				backend,
+				plan: enforcementPlan,
+			});
+		} catch (error) {
+			await this.#workspaceProvider.release(workspace).catch(() => undefined);
+			throw error;
+		}
+		this.#sandboxHandles.set(agentId, sandboxHandle);
+		const sandbox = await this.#sandboxBackend.verify(sandboxHandle);
 		const timestamp = new Date(this.#now()).toISOString();
 		this.registry.create({
 			id: agentId,
@@ -315,6 +359,8 @@ export class SubagentRuntime implements SubagentService {
 			scope: input.scope ?? "task",
 			backend,
 			backendReason,
+			enforcementPlan,
+			sandbox,
 			workspace,
 			status: "starting",
 			depth,
@@ -330,9 +376,13 @@ export class SubagentRuntime implements SubagentService {
 		const session = sessionFactory.create({
 			cwd: workspace.path,
 			profile: input.profile,
+			modelName,
 			toolNames,
 			effectivePermissions,
 			budget,
+			enforcementPlan,
+			sandbox,
+			environment: sandboxHandle.environment,
 		});
 		this.#sessions.set(agentId, session);
 		this.#spawnInputs.set(
@@ -389,7 +439,7 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const input = this.#requireInput(agentId);
 		const lease = this.#writerLeaseRegistry.acquire({
-			workspace: input.cwd,
+			workspace: agent.workspace?.repositoryIdentity ?? input.cwd,
 			workflowId: agent.workflowId,
 			taskId: agent.taskId,
 			attemptId: agent.attemptId,
@@ -532,6 +582,7 @@ export class SubagentRuntime implements SubagentService {
 			status: "interrupted",
 			usage: agent.usage,
 			modifications: [],
+			artifact: agent.artifact,
 			error: reason,
 		};
 		this.#lastResults.set(agentId, result);
@@ -681,7 +732,7 @@ export class SubagentRuntime implements SubagentService {
 			if (!text) {
 				throw new SubagentRuntimeError("subagent.output_missing", `Agent ${agentId} returned no output`);
 			}
-			const handoff = parseHandoff(text, {
+			const parsedHandoff = parseHandoff(text, {
 				id: this.#createId("handoff"),
 				workflowId: agent.workflowId,
 				taskId: agent.taskId,
@@ -689,6 +740,17 @@ export class SubagentRuntime implements SubagentService {
 				agentId,
 				createdAt: new Date(this.#now()).toISOString(),
 			});
+			const artifact = await this.#finalizeWorkspace(agentId);
+			const handoff: Handoff = artifact
+				? {
+						...parsedHandoff,
+						changedFiles: artifact.changedFiles,
+						verificationSummary: [
+							...parsedHandoff.verificationSummary,
+							`Workspace Artifact ${artifact.id} integrated`,
+						],
+					}
+				: parsedHandoff;
 			this.#recordTranscript(agentId, "assistant", text);
 			this.registry.recordHandoff(agentId, handoff);
 			this.#releaseWriter(agentId);
@@ -702,6 +764,7 @@ export class SubagentRuntime implements SubagentService {
 				handoff,
 				usage: completedUsage,
 				modifications: [...(this.#modifications.get(agentId) ?? [])],
+				artifact,
 			};
 			this.#lastResults.set(agentId, result);
 			return structuredClone(result);
@@ -739,6 +802,7 @@ export class SubagentRuntime implements SubagentService {
 			status: this.#interrupting.has(agentId) ? "interrupted" : "failed",
 			usage: completedUsage,
 			modifications: [...(this.#modifications.get(agentId) ?? [])],
+			artifact: this.#requireAgent(agentId).artifact,
 			error: message,
 		};
 		this.#lastResults.set(agentId, result);
@@ -832,9 +896,17 @@ export class SubagentRuntime implements SubagentService {
 		if (agent && !agent.sessionReleasedAt) {
 			this.registry.releaseSession(agentId);
 		}
-		if (agent?.workspace) {
-			await this.#workspaceProvider.release(agent.workspace);
-			this.#releasedWorkspaceAgents.add(agent.id);
+		try {
+			if (agent?.workspace) {
+				await this.#workspaceProvider.release(agent.workspace);
+				this.#releasedWorkspaceAgents.add(agent.id);
+			}
+		} finally {
+			const sandboxHandle = this.#sandboxHandles.get(agentId);
+			if (sandboxHandle) {
+				await this.#sandboxBackend.release(sandboxHandle);
+				this.#sandboxHandles.delete(agentId);
+			}
 		}
 	}
 
@@ -866,6 +938,9 @@ export class SubagentRuntime implements SubagentService {
 			!permissions.write &&
 			!permissions.executeCommands &&
 			!permissions.network &&
+			!permissions.denyAllPaths &&
+			permissions.allowedPaths.length === 0 &&
+			permissions.deniedPaths.length === 0 &&
 			budget.maxAgentDepth === 0;
 		if (input.backend === "in-process") {
 			if (!inProcessSafe) {
@@ -978,6 +1053,7 @@ export class SubagentRuntime implements SubagentService {
 					handoff,
 					usage: agent.usage,
 					modifications: [],
+					artifact: agent.artifact,
 				});
 			} else if (agent.status === "failed" || agent.status === "interrupted" || agent.status === "stopped") {
 				this.#lastResults.set(agent.id, {
@@ -985,6 +1061,7 @@ export class SubagentRuntime implements SubagentService {
 					status: agent.status === "failed" ? "failed" : "interrupted",
 					usage: agent.usage,
 					modifications: [],
+					artifact: agent.artifact,
 					error: agent.lastError,
 				});
 			}
@@ -1007,6 +1084,36 @@ export class SubagentRuntime implements SubagentService {
 			.filter((workspace): workspace is NonNullable<typeof workspace> => workspace !== undefined);
 		await this.#workspaceProvider.recover?.(workspaces);
 		await this.#workspaceProvider.cleanupOrphans?.(new Set(workspaces.map(({ id }) => id)));
+	}
+
+	async #finalizeWorkspace(agentId: AgentId): Promise<WorkspaceArtifact | undefined> {
+		const agent = this.#requireAgent(agentId);
+		const workspace = agent.workspace;
+		if (!workspace || !this.#workspaceProvider.createArtifact) {
+			return undefined;
+		}
+		const artifact = await this.#workspaceProvider.createArtifact(workspace, this.#modifications.get(agentId) ?? []);
+		if (!artifact) {
+			return undefined;
+		}
+		this.registry.setArtifact(agentId, artifact);
+		if (!this.#workspaceProvider.integrateArtifact) {
+			return artifact;
+		}
+		try {
+			const integrated = await this.#integrationQueue.run(artifact.repositoryIdentity, () =>
+				this.#workspaceProvider.integrateArtifact!(artifact),
+			);
+			this.registry.setArtifact(agentId, integrated);
+			return integrated;
+		} catch (error) {
+			this.registry.setArtifact(agentId, {
+				...artifact,
+				status: "failed",
+				error: error instanceof Error ? error.message : String(error),
+			});
+			throw error;
+		}
 	}
 
 	#requireAgent(agentId: AgentId): AgentInstance {

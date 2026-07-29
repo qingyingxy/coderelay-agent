@@ -6,6 +6,7 @@ import { BUILTIN_AGENT_PROFILES, FULL_PERMISSION_SET, RpcSubagentSessionFactory 
 import { SUBAGENT_HANDOFF } from "./subagent-fixtures.ts";
 
 const tempDirectories: string[] = [];
+const originalSecret = process.env.PI_R14_RPC_SECRET;
 
 function createRpcChild(): string {
 	const directory = mkdtempSync(join(tmpdir(), "pi-subagent-rpc-"));
@@ -23,7 +24,8 @@ function createRpcChild(): string {
 			"    const toolsMode = process.argv.includes('--tools') ? 'restricted' : process.argv.includes('--no-tools') ? 'none' : 'default';",
 			"    const modelMode = process.argv.includes('openai/test-model') ? 'model' : 'no-model';",
 			"    const thinkingMode = process.argv.includes('high') ? 'thinking' : 'no-thinking';",
-			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: 'rpc-' + process.pid + '-' + toolsMode + '-' + modelMode + '-' + thinkingMode } });",
+			"    const envMode = process.env.PI_RPC_ALLOWED === 'yes' ? (process.env.PI_R14_RPC_SECRET ? '-leaked' : '-clean') : '';",
+			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: 'rpc-' + process.pid + '-' + toolsMode + '-' + modelMode + '-' + thinkingMode + envMode } });",
 			"  } else if (command.type === 'get_last_assistant_text') {",
 			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { text: handoff } });",
 			"  } else if (command.type === 'get_session_stats') {",
@@ -41,6 +43,11 @@ function createRpcChild(): string {
 afterEach(() => {
 	for (const directory of tempDirectories.splice(0)) {
 		rmSync(directory, { recursive: true, force: true });
+	}
+	if (originalSecret === undefined) {
+		delete process.env.PI_R14_RPC_SECRET;
+	} else {
+		process.env.PI_R14_RPC_SECRET = originalSecret;
 	}
 });
 
@@ -80,6 +87,39 @@ describe("RpcSubagentSessionFactory", () => {
 			outputTokens: 4,
 			turns: 1,
 		});
+		await session.stop();
+	});
+
+	it("uses an explicit minimal environment without inheriting unrelated secrets", async () => {
+		const childPath = createRpcChild();
+		process.env.PI_R14_RPC_SECRET = "must-not-leak";
+		const factory = new RpcSubagentSessionFactory({
+			command: process.execPath,
+			commandArgs: [childPath],
+		});
+		const environment: Record<string, string> = { PI_RPC_ALLOWED: "yes" };
+		for (const key of ["PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP"]) {
+			const value = process.env[key];
+			if (value) {
+				environment[key] = value;
+			}
+		}
+		const session = factory.create({
+			cwd: process.cwd(),
+			profile: BUILTIN_AGENT_PROFILES.explorer,
+			toolNames: [],
+			effectivePermissions: {
+				...FULL_PERMISSION_SET,
+				write: false,
+				executeCommands: false,
+				network: false,
+			},
+			budget: {},
+			environment,
+		});
+
+		await session.start();
+		expect(await session.getSessionId()).toMatch(/-clean$/);
 		await session.stop();
 	});
 });

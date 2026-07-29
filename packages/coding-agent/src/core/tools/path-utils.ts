@@ -1,8 +1,80 @@
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, existsSync, realpathSync } from "node:fs";
 import { access } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
+import { SUBAGENT_PATH_POLICY_ENV } from "../subagents/enforcement-plan.ts";
 
 const NARROW_NO_BREAK_SPACE = "\u202F";
+
+interface SubagentPathPolicy {
+	readonly readableRoots: readonly string[];
+	readonly writableRoots: readonly string[];
+	readonly deniedRoots: readonly string[];
+	readonly denyAll: boolean;
+}
+
+function stringArray(value: unknown): readonly string[] {
+	return Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : [];
+}
+
+function subagentPathPolicy(): SubagentPathPolicy | undefined {
+	const serialized = process.env[SUBAGENT_PATH_POLICY_ENV];
+	if (!serialized) {
+		return undefined;
+	}
+	try {
+		const value: unknown = JSON.parse(serialized);
+		if (typeof value !== "object" || value === null) {
+			throw new Error("Path policy must be an object");
+		}
+		const record = value as Record<string, unknown>;
+		return {
+			readableRoots: stringArray(record.readableRoots),
+			writableRoots: stringArray(record.writableRoots),
+			deniedRoots: stringArray(record.deniedRoots),
+			denyAll: record.denyAll === true,
+		};
+	} catch {
+		throw new Error(`Invalid ${SUBAGENT_PATH_POLICY_ENV} configuration`);
+	}
+}
+
+function canonicalPath(path: string): string {
+	let existing = resolve(path);
+	const missingSegments: string[] = [];
+	while (!existsSync(existing)) {
+		const parent = dirname(existing);
+		if (parent === existing) {
+			break;
+		}
+		missingSegments.unshift(existing.slice(parent.length).replace(/^[\\/]+/, ""));
+		existing = parent;
+	}
+	const canonicalExisting = existsSync(existing) ? realpathSync.native(existing) : existing;
+	return resolve(canonicalExisting, ...missingSegments);
+}
+
+function pathContains(parent: string, child: string): boolean {
+	const relativePath = relative(canonicalPath(parent), canonicalPath(child));
+	return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
+}
+
+function enforceSubagentPathPolicy(path: string): void {
+	const policy = subagentPathPolicy();
+	if (!policy) {
+		return;
+	}
+	if (policy.denyAll) {
+		throw new Error(`Subagent filesystem policy denies all paths: ${path}`);
+	}
+	if (policy.deniedRoots.some((root) => pathContains(root, path))) {
+		throw new Error(`Subagent filesystem policy denied path: ${path}`);
+	}
+	const allowedRoots = policy.writableRoots.length > 0 ? policy.writableRoots : policy.readableRoots;
+	if (allowedRoots.length > 0 && !allowedRoots.some((root) => pathContains(root, path))) {
+		throw new Error(`Subagent filesystem policy blocked path outside allowed roots: ${path}`);
+	}
+}
 
 function tryMacOSScreenshotPath(filePath: string): string {
 	return filePath.replace(/ (AM|PM)\./gi, `${NARROW_NO_BREAK_SPACE}$1.`);
@@ -46,7 +118,9 @@ export function expandPath(filePath: string): string {
  * Handles ~ expansion and absolute paths.
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
-	return resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	const path = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	enforceSubagentPathPolicy(path);
+	return path;
 }
 
 export function resolveReadPath(filePath: string, cwd: string): string {

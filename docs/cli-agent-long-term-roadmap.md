@@ -1,7 +1,7 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M0-M6 已完成；R12 自动 Workflow 编排已实现并验证
-> 最后更新：2026-07-27
+> 状态：M0-M7、R0-R14 已完成；M8 正在实施，R15-R18 待实施
+> 最后更新：2026-07-29
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
 ## 1. 文档目的
@@ -45,6 +45,14 @@ M4 实施计划：
 M6 实施计划：
 
 - [`M6 自动 Workflow 编排实施计划`](./design/m6-autonomous-workflow-implementation-plan.md)
+
+M7 实施计划：
+
+- [`M7 Subagent Runtime 融合实施计划`](./design/m7-subagent-runtime-fusion-plan.md)
+
+M8 实施计划：
+
+- [`M8 Subagent 生产加固与受治理团队实施计划`](./design/m8-subagent-production-hardening-plan.md)
 
 ## 2. 状态约定
 
@@ -166,7 +174,7 @@ flowchart TB
 
 ## 6. 长期任务计划
 
-下面的 R0-R12 是 13 个开发阶段，不是用户请求在运行时依次经过的 13 个流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
+R0-R13 已完成，R14-R18 是后续生产加固阶段。它们不是用户请求在运行时依次经过的流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
 
 ### R0：范围与架构基线
 
@@ -374,6 +382,32 @@ R12 不重复实现现有 Mode、Scheduler、Delivery 或 Repair，而是用一�
 | R12.12 | `DONE` | 建立自动闭环测试 | 覆盖 Mode、审批、并发调度、验证、Repair、取消、恢复和幂等 | R12.1-R12.11 |
 | R12.13 | `DONE` | 建立离线演示和真实任务基线 | Showcase 无手动 dispatch/verify；真实模型评测与机制评测分开 | R12.12 |
 
+### R13：Subagent Runtime 融合
+
+R13 保留 R12 的权威 Workflow 闭环，同时吸收自定义 Agent、轻量工具调用、前后台运行、Transcript、Resume、事件和 In-process Backend。详细设计见 [`M7 Subagent Runtime 融合实施计划`](./design/m7-subagent-runtime-fusion-plan.md)。
+
+| ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
+|---|---|---|---|---|
+| R13.1 | `DONE` | 统一 Subagent 入口 | CLI、模型工具、Workflow 和 SDK 共用 `SubagentService` | R12 |
+| R13.2 | `DONE` | 自定义 Agent Profile | 支持项目、全局和内置 Profile，并严格限制权限与预算 | R13.1 |
+| R13.3 | `DONE` | Session 生命周期与观察 | 前后台、steer、resume、Transcript、事件和进度面板统一 | R13.1 |
+| R13.4 | `DONE` | 混合 Backend | RPC 为安全默认，In-process 只允许静态安全的只读任务 | R13.1 |
+| R13.5 | `DONE` | Workspace Provider 协议 | Workspace 生命周期覆盖恢复和清理，不声明已实现 Git Worktree | R13.3-R13.4 |
+| R13.6 | `DONE` | Workflow 权威绑定 | 所有委派绑定 Task/Attempt，并经过 Handoff、Verification 和 Repair | R13.1-R13.5 |
+| R13.7 | `DONE` | 测试与烟测 | Windows、Faux Provider、伪 RPC、In-process 和真实模型烟测通过 | R13.1-R13.6 |
+
+### R14-R18：生产加固与受治理团队
+
+R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 生产加固与受治理团队实施计划`](./design/m8-subagent-production-hardening-plan.md)。
+
+| 阶段 | 状态 | 范围 | 关键完成条件 |
+|---|---|---|---|
+| R14 | `DONE` | 真实隔离与单 Writer Worktree | Enforcement Plan、最小 RPC 环境、严格保障检查、独立 Worktree、Artifact 和串行集成已完成 |
+| R15 | `TODO` | 持久化、Retention 与恢复 | Transcript 有界，Secret 脱敏，中断任务可创建新 Attempt 继续 |
+| R16 | `TODO` | 真实模型评测与调度解释 | 量化单/多 Agent 质量和成本，每个自动决策有原因 |
+| R17 | `TODO` | 受治理的 Agent Team | 共享现有 Task Graph，消息和提议不能绕过 Controller |
+| R18 | `TODO` | 多 Writer 与自动集成 | Patch 串行集成、冲突 Attempt、可回滚并执行合并后验证 |
+
 ## 7. 里程碑
 
 | 里程碑 | 状态 | 范围 | 演示目标 |
@@ -385,6 +419,8 @@ R12 不重复实现现有 Mode、Scheduler、Delivery 或 Repair，而是用一�
 | M4：交付与恢复 | `DONE` | R10 | Diff、Review、Test、Repair、报告和中断恢复 |
 | M5：作品版本 | `DONE` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 | M6：自动 Workflow | `DONE` | R12 | 自动 Mode、调度、验证和有界 Repair 可以无手动推进地形成闭环 |
+| M7：Subagent 融合 | `DONE` | R13 | 自定义 Agent、统一 Runtime、混合 Backend、Transcript 和控制能力不绕过 Workflow |
+| M8：生产加固 | `IMPLEMENTING` | R14-R18 | R14 已完成；待实现恢复、评测、受治理团队和多 Writer 集成 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -522,12 +558,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-27 | M6 自动 Workflow 编排立项 | 保留现有 Core 为权威状态源，新增薄 Runner 接通真实自动 Mode、事件驱动调度、自动 Delivery 和有界 Repair；只在关键澄清、Plan 审批、扩权或不可恢复阻塞时暂停 |
 | 2026-07-27 | R12 自动 Workflow 编排完成 | `AutonomousWorkflowRunner` 已接通自动 Mode、澄清、审批后调度、Delivery、Repair、恢复和四种输出；专项回归与 `demo:autonomous-workflow` 通过 |
 | 2026-07-27 | M6 自动 Workflow 完成 | R0-R12 全部完成；默认 CLI 入口使用 Auto Mode，除关键澄清和 Plan 审批外无需手动 dispatch、wait 或 verify |
+| 2026-07-29 | M7 Subagent Runtime 融合完成 | R13 统一自定义 Agent、工具入口、RPC/In-process Backend、Transcript、Resume、进度和 Workflow 权威绑定 |
+| 2026-07-29 | M8 生产加固完成设计 | R14-R18 依次建设真实隔离、单 Writer Worktree、持久化恢复、效果评测、受治理团队和多 Writer 集成 |
+| 2026-07-29 | R14 真实隔离与单 Writer Worktree 完成 | 有效权限编译为 Enforcement Plan；RPC 使用最小环境；strict 明确拒绝缺失保障；写入经独立 Worktree、Repository Writer Lease、Patch Artifact 和串行 Integration Queue 进入 Delivery Verification |
 
 ## 12. 后续维护
 
-M0-M6、R0-R12 已完成。后续工作不再新增主路线阶段，按以下原则维护：
+M0-M7、R0-R14 已完成。M8 的 R15-R18 按正式阶段推进：
 
 1. 用 `npm run demo:autonomous-workflow` 验证确定性自动闭环。
 2. 真实模型任务效果单独评测，不与机制正确性测试混合统计。
-3. 新增权限、远程执行、多 Writer 或工作区隔离前，先补正式安全设计。
+3. R14-R18 必须遵守 M8 的阶段门禁，不能先开放 Agent Team 或多 Writer 再补隔离。
 4. 自动流程协议变更必须同步更新 RPC Schema、Workflow View、恢复测试和本路线图。

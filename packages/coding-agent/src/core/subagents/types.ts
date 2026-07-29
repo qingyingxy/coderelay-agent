@@ -10,6 +10,7 @@ import type {
 	TaskId,
 	WorkflowId,
 } from "../workflow/types.ts";
+import type { AgentEnforcementPlan, SandboxVerification } from "./enforcement-plan.ts";
 
 export const AGENT_INSTANCE_STATUSES = [
 	"starting",
@@ -33,8 +34,29 @@ export type AgentBackendPolicy = AgentBackend | "auto";
 export interface AgentWorkspace {
 	readonly id: string;
 	readonly path: string;
+	readonly kind?: "current" | "git-worktree";
+	readonly repositoryIdentity?: string;
+	readonly repositoryRoot?: string;
 	readonly baselineCommit?: string;
 	readonly resultBranch?: string;
+	readonly baselineFingerprint?: string;
+	readonly assurance?: "shared" | "isolated";
+}
+
+export type WorkspaceArtifactStatus = "created" | "integrated" | "failed";
+
+export interface WorkspaceArtifact {
+	readonly id: string;
+	readonly workspaceId: string;
+	readonly repositoryIdentity: string;
+	readonly baselineCommit: string;
+	readonly resultCommit: string;
+	readonly patchPath: string;
+	readonly changedFiles: readonly string[];
+	readonly status: WorkspaceArtifactStatus;
+	readonly createdAt: IsoDateTime;
+	readonly integratedAt?: IsoDateTime;
+	readonly error?: string;
 }
 
 export interface AgentInstance {
@@ -51,7 +73,10 @@ export interface AgentInstance {
 	readonly scope: AgentScope;
 	readonly backend: AgentBackend;
 	readonly backendReason?: string;
+	readonly enforcementPlan?: AgentEnforcementPlan;
+	readonly sandbox?: SandboxVerification;
 	readonly workspace?: AgentWorkspace;
+	readonly artifact?: WorkspaceArtifact;
 	readonly sessionId?: string;
 	readonly sessionReleasedAt?: IsoDateTime;
 	readonly status: AgentInstanceStatus;
@@ -121,6 +146,7 @@ export interface AgentRunResult {
 	readonly handoff?: Handoff;
 	readonly usage: ResourceUsage;
 	readonly modifications: readonly SubagentModification[];
+	readonly artifact?: WorkspaceArtifact;
 	readonly error?: string;
 }
 
@@ -216,9 +242,13 @@ export interface RetrySubagentInput {
 export interface SubagentSessionConfig {
 	readonly cwd: string;
 	readonly profile: AgentProfile;
+	readonly modelName?: string;
 	readonly toolNames: readonly string[];
 	readonly effectivePermissions: PermissionSet;
 	readonly budget: BudgetLimit;
+	readonly enforcementPlan?: AgentEnforcementPlan;
+	readonly sandbox?: SandboxVerification;
+	readonly environment?: Readonly<Record<string, string>>;
 }
 
 export interface SubagentSession {

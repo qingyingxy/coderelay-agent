@@ -15,6 +15,7 @@
 - Added `/provider` for explicit active-provider switching, active-provider-scoped `/model` selection, and `/auth` for unified credential and provider management.
 - Added a persistent Workflow progress panel above the editor with stage, completed/total Tasks, running and waiting counts, current execution, Verification, and Repair status.
 - Added R13 Subagent fusion with a typed service boundary, strict project/global Markdown Agent Profiles, governed delegation/result/steering tools, authoritative Direct/Plan Task and Attempt binding, resumable retained Sessions, persisted Transcripts and stable events, RPC and policy-gated read-only in-process Backends, Workspace lifecycle hooks, Agent management commands, and expandable Workflow progress.
+- Added R14 Subagent production hardening with stable Enforcement Plans, provider-scoped RPC environments, strict and best-effort assurance reporting, guarded filesystem paths, Git Worktree isolation, repository-scoped Writer Leases, immutable Patch Artifacts, serialized integration, orphan cleanup, and post-integration Workflow visibility.
 
 ## [0.82.1] - 2026-07-25
 

@@ -129,6 +129,12 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 					`Agent ${agent.id}: ${agent.profileName} · ${agent.backend} · ${label(agent.status)} · Task ${agent.taskId} · ${agent.usage.turns} turns · ${agent.usage.inputTokens + agent.usage.outputTokens} tokens`,
 			),
 		);
+		lines.push(
+			...activeAgents.map(
+				(agent) =>
+					`  Isolation: ${agent.sandbox?.assurance ?? "unverified"} · ${agent.workspace?.kind ?? "current"} · ${agent.artifact?.status ?? "no artifact"}${agent.sandbox?.missingGuarantees.length ? ` · ${agent.sandbox.missingGuarantees.length} limitation(s)` : ""}`,
+			),
+		);
 		if (activeAgents.length > 0) {
 			lines.push("Agent actions: /agent show · /agent transcript · /agent send · /agent interrupt · /agent resume");
 		}

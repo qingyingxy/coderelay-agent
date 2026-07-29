@@ -103,6 +103,7 @@ describe("formatWorkflowProgress", () => {
 		);
 
 		expect(lines).toContain("Agent agent-1: explorer · in-process · Running · Task one · 2 turns · 15 tokens");
+		expect(lines).toContain("  Isolation: unverified · current · no artifact");
 		expect(lines.at(-1)).toContain("/agent transcript");
 		expect(lines.join("\n")).not.toMatch(/%|ETA/);
 	});

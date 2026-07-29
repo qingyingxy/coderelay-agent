@@ -6,6 +6,7 @@ import type {
 	AgentRuntimeEventType,
 	Handoff,
 	StableSubagentEventName,
+	WorkspaceArtifact,
 } from "./types.ts";
 
 const TRANSITIONS: Readonly<Record<AgentInstanceStatus, ReadonlySet<AgentInstanceStatus>>> = {
@@ -125,6 +126,22 @@ export class AgentRegistry {
 		return this.#replace({
 			...current,
 			sessionId,
+			revision: current.revision + 1,
+			updatedAt: this.#now(),
+		});
+	}
+
+	setArtifact(agentId: AgentId, artifact: WorkspaceArtifact): AgentInstance {
+		const current = this.#require(agentId);
+		if (artifact.workspaceId !== current.workspace?.id) {
+			throw new AgentRegistryError(
+				"agent_registry.artifact_owner",
+				`Artifact ${artifact.id} does not belong to Agent ${agentId}`,
+			);
+		}
+		return this.#replace({
+			...current,
+			artifact: structuredClone(artifact),
 			revision: current.revision + 1,
 			updatedAt: this.#now(),
 		});

@@ -1,14 +1,26 @@
 import { resolve } from "node:path";
-import type { AgentBackend, AgentWorkspace, SpawnSubagentInput } from "./types.ts";
+import type {
+	AgentBackend,
+	AgentWorkspace,
+	SpawnSubagentInput,
+	SubagentModification,
+	WorkspaceArtifact,
+} from "./types.ts";
 
 export interface WorkspacePrepareRequest {
 	readonly agentId: string;
 	readonly backend: AgentBackend;
+	readonly write: boolean;
 	readonly input: SpawnSubagentInput;
 }
 
 export interface WorkspaceProvider {
 	prepare(request: WorkspacePrepareRequest): Promise<AgentWorkspace>;
+	createArtifact?(
+		workspace: AgentWorkspace,
+		modifications: readonly SubagentModification[],
+	): Promise<WorkspaceArtifact | undefined>;
+	integrateArtifact?(artifact: WorkspaceArtifact): Promise<WorkspaceArtifact>;
 	release(workspace: AgentWorkspace): Promise<void>;
 	recover?(workspaces: readonly AgentWorkspace[]): Promise<void>;
 	cleanupOrphans?(ownedWorkspaceIds: ReadonlySet<string>): Promise<readonly string[]>;
@@ -26,6 +38,10 @@ export class CurrentWorkspaceProvider implements WorkspaceProvider {
 		return {
 			id: `current:${path}`,
 			path,
+			kind: "current",
+			repositoryIdentity: `current:${path.toLowerCase()}`,
+			repositoryRoot: path,
+			assurance: "shared",
 		};
 	}
 

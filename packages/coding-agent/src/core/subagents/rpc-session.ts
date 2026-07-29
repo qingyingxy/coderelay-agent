@@ -93,6 +93,7 @@ export class RpcSubagentSessionFactory implements SubagentSessionFactory {
 
 	create(config: SubagentSessionConfig): SubagentSession {
 		const invocation = defaultInvocation();
+		const modelName = config.modelName ?? config.profile.model;
 		const args = ["--no-session"];
 		if (config.toolNames.length > 0) {
 			args.push("--tools", config.toolNames.join(","));
@@ -108,8 +109,8 @@ export class RpcSubagentSessionFactory implements SubagentSessionFactory {
 				STRUCTURED_HANDOFF_INSTRUCTION,
 			].join("\n\n"),
 		);
-		if (config.profile.model) {
-			args.push("--model", config.profile.model);
+		if (modelName) {
+			args.push("--model", modelName);
 		}
 		if (config.profile.thinkingLevel) {
 			args.push("--thinking", config.profile.thinkingLevel);
@@ -118,7 +119,15 @@ export class RpcSubagentSessionFactory implements SubagentSessionFactory {
 			command: this.#options.command ?? invocation.command,
 			commandArgs: this.#options.commandArgs ? [...this.#options.commandArgs] : invocation.commandArgs,
 			cwd: config.cwd,
-			env: this.#options.env ? { ...this.#options.env } : undefined,
+			env: config.environment
+				? {
+						...config.environment,
+						...this.#options.env,
+					}
+				: this.#options.env
+					? { ...this.#options.env }
+					: undefined,
+			inheritParentEnv: config.environment === undefined,
 			args,
 		});
 	}

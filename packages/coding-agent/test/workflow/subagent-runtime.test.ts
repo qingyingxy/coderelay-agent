@@ -161,6 +161,10 @@ describe("SubagentRuntime", () => {
 		expect(factory.sessions[0]?.config.toolNames).not.toContain("bash");
 
 		await subject.send(agent.id, "Implement the Task");
+		expect(leaseRegistry.get(agent.workspace!.repositoryIdentity!)).toMatchObject({
+			workflowId: "workflow-1",
+			taskId: "task-1",
+		});
 		await subject.send(agent.id, "Also check the CLI");
 		const session = factory.sessions[0]!;
 		session.emit({
@@ -180,7 +184,7 @@ describe("SubagentRuntime", () => {
 
 		expect(session.steerCalls).toEqual(["Also check the CLI"]);
 		expect(result.modifications).toEqual([{ path: "src/index.ts", operation: "edit", toolCallId: "tool-1" }]);
-		expect(leaseRegistry.get("C:/repo")).toBeUndefined();
+		expect(leaseRegistry.get(agent.workspace!.repositoryIdentity!)).toBeUndefined();
 	});
 
 	it("fails invalid Handoff output and creates a distinct retry Agent", async () => {
@@ -236,21 +240,19 @@ describe("SubagentRuntime", () => {
 		expect(factory.sessions[0]?.abortCalls).toBe(1);
 	});
 
-	it("rejects path-scoped RPC permissions instead of silently widening them", async () => {
+	it("compiles path-scoped RPC permissions into the enforced child policy", async () => {
 		const factory = new FakeSubagentSessionFactory();
 		const subject = runtime(factory);
-		await expect(
-			subject.spawn({
-				...spawnInput(),
-				parentPermission: {
-					...FULL_PERMISSION_SET,
-					allowedPaths: ["src"],
-				},
-			}),
-		).rejects.toMatchObject({
-			code: "runtime_policy.path_scope_unsupported",
+		const agent = await subject.spawn({
+			...spawnInput(),
+			parentPermission: {
+				...FULL_PERMISSION_SET,
+				allowedPaths: ["src"],
+			},
 		});
-		expect(factory.sessions).toHaveLength(0);
+
+		expect(agent.enforcementPlan?.filesystem.readableRoots[0]).toMatch(/[\\/]repo[\\/]src$/);
+		expect(factory.sessions[0]?.config.environment?.PI_SUBAGENT_PATH_POLICY).toContain("repo");
 	});
 
 	it("rejects an unavailable backend before creating an Agent", async () => {

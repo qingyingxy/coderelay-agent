@@ -2,9 +2,20 @@ import { mkdtempSync, readdirSync, rmdirSync, unlinkSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { SUBAGENT_PATH_POLICY_ENV } from "../src/core/subagents/enforcement-plan.ts";
 import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
 
 describe("path-utils", () => {
+	const originalPathPolicy = process.env[SUBAGENT_PATH_POLICY_ENV];
+
+	afterEach(() => {
+		if (originalPathPolicy === undefined) {
+			delete process.env[SUBAGENT_PATH_POLICY_ENV];
+		} else {
+			process.env[SUBAGENT_PATH_POLICY_ENV] = originalPathPolicy;
+		}
+	});
+
 	describe("expandPath", () => {
 		it("should expand ~ to home directory", () => {
 			const result = expandPath("~");
@@ -45,6 +56,25 @@ describe("path-utils", () => {
 			const cwd = join(tmpdir(), "pi-path-utils-cwd");
 			expect(resolveToCwd("~draft.md", cwd)).toBe(resolve(cwd, "~draft.md"));
 			expect(resolveToCwd("@~draft.md", cwd)).toBe(resolve(cwd, "~draft.md"));
+		});
+
+		it("enforces the Subagent path policy and resolves symlink targets", () => {
+			const allowed = mkdtempSync(join(tmpdir(), "pi-path-policy-allowed-"));
+			const outside = mkdtempSync(join(tmpdir(), "pi-path-policy-outside-"));
+			try {
+				process.env[SUBAGENT_PATH_POLICY_ENV] = JSON.stringify({
+					readableRoots: [allowed],
+					writableRoots: [allowed],
+					deniedRoots: [],
+					denyAll: false,
+				});
+
+				expect(resolveToCwd("inside.txt", allowed)).toBe(join(allowed, "inside.txt"));
+				expect(() => resolveToCwd(join(outside, "blocked.txt"), allowed)).toThrow("outside allowed roots");
+			} finally {
+				rmdirSync(allowed);
+				rmdirSync(outside);
+			}
 		});
 	});
 

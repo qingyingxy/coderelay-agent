@@ -696,6 +696,7 @@ R13 的完成不是“同时安装两套子代理实现”，而是：
 
 - 当前实现：`docs/design/m3-subagent-runtime-implementation-plan.md`
 - 自动闭环：`docs/design/m6-autonomous-workflow-implementation-plan.md`
+- 后续加固：`docs/design/m8-subagent-production-hardening-plan.md`
 - Runtime：`packages/coding-agent/src/core/subagents/subagent-runtime.ts`
 - RPC Session：`packages/coding-agent/src/core/subagents/rpc-session.ts`
 - Agent Profile：`packages/coding-agent/src/core/workflow/agent-profile.ts`
