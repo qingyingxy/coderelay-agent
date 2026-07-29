@@ -18,6 +18,7 @@
 - Added R14 Subagent production hardening with stable Enforcement Plans, provider-scoped RPC environments, strict and best-effort assurance reporting, guarded filesystem paths, Git Worktree isolation, repository-scoped Writer Leases, immutable Patch Artifacts, serialized integration, orphan cleanup, and post-integration Workflow visibility.
 - Added R15 bounded Subagent retention with physical Session checkpoint compaction, secret redaction, versioned persistence migration and corruption detection, Workspace and Artifact recovery verification, and authoritative Recovery Attempts with retained context.
 - Added R16 fixed real-model evaluation fixtures and five-strategy comparisons, quality/cost and marginal-benefit reports, stable Mode/Agent/Backend/Scheduler/Repair Reason Codes, and a comparable-report regression gate.
+- Added R17 governed Agent Teams with live Workflow Task Graph projection, bounded persistent mailboxes, Controller-admitted Task Proposals, role-aware scheduling, Team CLI views, collaboration guardrails, and a quality-evidence default-candidate gate.
 
 ## [0.82.1] - 2026-07-25
 

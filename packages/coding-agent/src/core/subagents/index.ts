@@ -1,6 +1,7 @@
 export * from "./agent-profile-loader.ts";
 export * from "./agent-registry.ts";
 export * from "./agent-report.ts";
+export * from "./agent-team.ts";
 export * from "./enforcement-plan.ts";
 export * from "./git-worktree-workspace-provider.ts";
 export * from "./handoff.ts";
@@ -14,5 +15,8 @@ export * from "./subagent-retention.ts";
 export * from "./subagent-runtime.ts";
 export * from "./subagent-service.ts";
 export * from "./subagent-tools.ts";
+export * from "./team-persistence.ts";
+export * from "./team-report.ts";
+export * from "./team-types.ts";
 export * from "./types.ts";
 export * from "./workspace-provider.ts";

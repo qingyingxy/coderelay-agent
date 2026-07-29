@@ -114,7 +114,12 @@ import {
 	formatAgentEvents,
 	formatAgentList,
 	formatAgentRunResult,
+	formatAgentTeam,
+	formatTeamMessages,
+	formatTeamProposals,
+	GovernedAgentTeam,
 	RpcSubagentSessionFactory,
+	SessionAgentTeamPersistence,
 	SessionSubagentPersistence,
 	SubagentRuntime,
 	type SubagentService,
@@ -300,6 +305,8 @@ export interface AgentSessionConfig {
 	sessionStartEvent?: SessionStartEvent;
 	/** Optional Subagent Runtime override used by tests and embedders. */
 	subagentRuntime?: SubagentService;
+	/** Optional governed Agent Team override used by tests and embedders. */
+	agentTeam?: GovernedAgentTeam;
 	/** Optional same-process backend. Runtime policy still limits it to safe read-only Agents. */
 	inProcessSubagentSessionFactory?: SubagentSessionFactory;
 	/** Optional background Job Runtime override used by tests and embedders. */
@@ -420,6 +427,7 @@ export class AgentSession {
 	private _latestWorkflowView: WorkflowView | undefined;
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
 	private _subagentRuntime: SubagentService | undefined;
+	private _agentTeam: GovernedAgentTeam | undefined;
 	private _inProcessSubagentSessionFactory: SubagentSessionFactory | undefined;
 	private _subagentToolsInstalled = false;
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
@@ -503,6 +511,7 @@ export class AgentSession {
 		this._baseToolsOverride = config.baseToolsOverride;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._subagentRuntime = config.subagentRuntime;
+		this._agentTeam = config.agentTeam;
 		this._inProcessSubagentSessionFactory = config.inProcessSubagentSessionFactory;
 		this._jobRuntime = config.jobRuntime;
 		this._deliveryReviewer = config.deliveryReviewer;
@@ -1537,6 +1546,33 @@ export class AgentSession {
 		return this._subagentRuntime;
 	}
 
+	/** Return the governed Team service backed by the authoritative Plan Workflow. */
+	getAgentTeam(): GovernedAgentTeam {
+		this._agentTeam ??= new GovernedAgentTeam({
+			agents: this._getSubagentRuntime(),
+			persistence: new SessionAgentTeamPersistence(this.sessionManager),
+			authority: {
+				getWorkflow: (workflowId) => {
+					const runtime = this._planWorkflowRuntime;
+					return runtime?.workflow.id === workflowId ? runtime.workflow : undefined;
+				},
+				getTask: (taskId) => this._planWorkflowRuntime?.tasks.find(({ id }) => id === taskId),
+				listTasks: (workflowId) => {
+					const runtime = this._planWorkflowRuntime;
+					return runtime?.workflow.id === workflowId ? runtime.tasks : [];
+				},
+				createTask: (proposal, admission) => {
+					const runtime = this._planWorkflowRuntime;
+					if (!runtime || runtime.workflow.id !== proposal.workflowId) {
+						throw new Error(`No active Plan Workflow owns Task Proposal ${proposal.id}`);
+					}
+					return runtime.createTeamProposalTask(proposal, admission);
+				},
+			},
+		});
+		return this._agentTeam;
+	}
+
 	private _installSubagentTools(): void {
 		if (this._subagentToolsInstalled) {
 			return;
@@ -2130,6 +2166,7 @@ export class AgentSession {
 			commandName !== "/replan" &&
 			commandName !== "/tasks" &&
 			commandName !== "/task" &&
+			commandName !== "/team" &&
 			commandName !== "/agents" &&
 			commandName !== "/agent" &&
 			commandName !== "/jobs" &&
@@ -2264,6 +2301,22 @@ export class AgentSession {
 				runtime.cancelTask(taskId, detailParts.join(" ") || "Cancelled by user");
 				runtime.refreshTaskReadiness();
 				lines = runtime.taskDetails(taskId);
+			}
+		} else if (commandName === "/team") {
+			const runtime = this._planWorkflowRuntime;
+			const action = args[0];
+			if (!runtime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (args.length > 1 || (action !== undefined && action !== "messages" && action !== "proposals")) {
+				lines = ["Usage: /team | /team messages | /team proposals"];
+			} else {
+				const team = this.getAgentTeam();
+				lines =
+					action === "messages"
+						? formatTeamMessages(team.messages(runtime.workflow.id))
+						: action === "proposals"
+							? formatTeamProposals(team.proposals(runtime.workflow.id))
+							: formatAgentTeam(team.view(runtime.workflow.id));
 			}
 		} else if (commandName === "/agents") {
 			const planRuntime = this._planWorkflowRuntime;

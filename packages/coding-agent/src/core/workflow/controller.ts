@@ -26,7 +26,9 @@ import type {
 	PlanDecisionRecord,
 	PlanId,
 	ResourceUsage,
+	RiskLevel,
 	Task,
+	TaskAgentRole,
 	TaskAssignment,
 	TaskBlockedReason,
 	TaskId,
@@ -212,6 +214,25 @@ export interface CreateRepairTaskCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly failedVerificationId: VerificationId;
 	readonly title?: string;
+}
+
+export interface CreateProposedTaskCommand extends WorkflowCommandBase {
+	readonly proposalId: string;
+	readonly taskId: TaskId;
+	readonly sourceAgentId: string;
+	readonly parentTaskId?: TaskId;
+	readonly title: string;
+	readonly description: string;
+	readonly dependencyIds: readonly TaskId[];
+	readonly accessMode: Task["accessMode"];
+	readonly requiredAgentRole: TaskAgentRole;
+	readonly riskLevel: RiskLevel;
+	readonly highRiskApproved: boolean;
+	readonly verification: {
+		readonly kind: VerificationRequirement["kind"];
+		readonly description: string;
+		readonly command?: string;
+	};
 }
 
 export interface CompleteDeliveryWorkflowCommand extends WorkflowCommandBase {
@@ -1326,6 +1347,7 @@ export class WorkflowController {
 			repairForVerificationId: verification.id,
 			repairIteration: iteration,
 			repairReasonCode: "repair.verification_failed",
+			recommendedAgentRole: "repair",
 			kind: "repair",
 			accessMode: "writer",
 			title: command.title?.trim() || `Repair ${verification.requirementId}`,
@@ -1372,6 +1394,116 @@ export class WorkflowController {
 			},
 		];
 		return this.#commit(command, events);
+	}
+
+	createProposedTask(command: CreateProposedTaskCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		if (workflow.status !== "executing") {
+			fail("controller.workflow_not_executing", `Workflow ${workflow.id} is not executing`);
+		}
+		const plan = workflow.currentPlanId ? this.#requirePlan(workflow.currentPlanId, workflow.id) : undefined;
+		if (!plan || plan.status !== "approved") {
+			fail("controller.team_plan_required", "Team Task Proposal requires an approved Plan");
+		}
+		if (this.#store.getTask(command.taskId)) {
+			fail("controller.task_exists", `Task ${command.taskId} already exists`);
+		}
+		const proposalId = command.proposalId.trim();
+		if (!proposalId) {
+			fail("controller.proposal_id_required", "Task Proposal id is required");
+		}
+		if (this.#store.listTasks(workflow.id).some(({ sourceProposalId }) => sourceProposalId === proposalId)) {
+			fail("controller.proposal_task_exists", `Task Proposal ${proposalId} already created a Task`);
+		}
+		const title = command.title.trim();
+		const description = command.description.trim();
+		const verificationDescription = command.verification.description.trim();
+		if (!title || !description || !verificationDescription) {
+			fail(
+				"controller.proposal_content_required",
+				"Proposed Task title, description, and verification are required",
+			);
+		}
+		if (command.riskLevel === "high" && !command.highRiskApproved) {
+			fail("controller.proposal_approval_required", "High-risk Task Proposal requires explicit user approval");
+		}
+		if (command.requiredAgentRole === "repair") {
+			fail("controller.proposal_repair_role", "Repair Tasks can only be created from failed Verification");
+		}
+		if (command.accessMode === "writer" && command.requiredAgentRole !== "worker") {
+			fail("controller.proposal_writer_role", "Writer Task Proposal requires the worker role");
+		}
+		if (command.accessMode === "read_only" && command.requiredAgentRole === "worker") {
+			fail(
+				"controller.proposal_read_only_role",
+				"Read-only Task Proposal requires coordinator, explorer, or reviewer",
+			);
+		}
+		const dependencyIds = [...new Set(command.dependencyIds)];
+		for (const dependencyId of dependencyIds) {
+			const dependency = this.#store.getTask(dependencyId);
+			if (!dependency || dependency.workflowId !== workflow.id || dependency.kind === "control") {
+				fail(
+					"controller.proposal_dependency_invalid",
+					`Dependency Task ${dependencyId} is not an executable Task in Workflow ${workflow.id}`,
+				);
+			}
+		}
+		const parentTask = command.parentTaskId
+			? this.#requireTask(command.parentTaskId, workflow.id)
+			: workflow.rootTaskId
+				? this.#requireTask(workflow.rootTaskId, workflow.id)
+				: fail("controller.root_task_missing", `Workflow ${workflow.id} has no root Task`);
+		const occurredAt = this.#now();
+		const task: Task = {
+			schemaVersion: WORKFLOW_SCHEMA_VERSION,
+			revision: 0,
+			createdAt: occurredAt,
+			updatedAt: occurredAt,
+			id: command.taskId,
+			workflowId: workflow.id,
+			parentTaskId: parentTask.id,
+			sourcePlanId: plan.id,
+			sourceProposalId: proposalId,
+			recommendedAgentRole: command.requiredAgentRole,
+			kind: "agent",
+			accessMode: command.accessMode,
+			title,
+			description,
+			status: "pending",
+			dependencyIds,
+			budget: inheritBudgetLimits(
+				workflow.budget,
+				BUILTIN_AGENT_PROFILES[command.requiredAgentRole === "coordinator" ? "planner" : command.requiredAgentRole]
+					.defaultBudget,
+			),
+			usage: zeroUsage(),
+			attemptIds: [],
+			verificationRequirements: [
+				{
+					id: `team-${proposalId}-verification`,
+					kind: command.verification.kind,
+					description: verificationDescription,
+					required: true,
+					command: command.verification.command?.trim() || undefined,
+				},
+			],
+			modifications: [],
+		};
+		const event: WorkflowEventDraft = {
+			eventId: this.#eventId(),
+			entityId: task.id,
+			entityRevision: 0,
+			eventType: "task.created",
+			occurredAt,
+			actor: { kind: "controller" },
+			payload: { task },
+		};
+		return this.#commit(command, [event]);
 	}
 
 	completeDelivery(command: CompleteDeliveryWorkflowCommand): WorkflowCommandResult {

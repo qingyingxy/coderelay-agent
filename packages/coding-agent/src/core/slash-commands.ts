@@ -55,6 +55,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "<spawn|show|send|wait|interrupt|retry> <id> [details]",
 	},
 	{
+		name: "team",
+		description: "Show the governed Agent Team, mailbox, or Task Proposals",
+		argumentHint: "[messages|proposals]",
+	},
+	{
 		name: "jobs",
 		description: "List background Jobs or dispatch ready Command Tasks",
 		argumentHint: "[dispatch [max-concurrency]]",

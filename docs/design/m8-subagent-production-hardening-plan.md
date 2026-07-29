@@ -574,13 +574,30 @@ Scheduler/Controller 校验后：
 
 | ID | 状态 | 任务 | 验收标准 |
 |---|---|---|---|
-| R17.1 | `TODO` | Team View | 直接投影 Workflow Task Graph，不复制状态 |
-| R17.2 | `TODO` | Agent Mailbox | 消息可寻址、有界、持久化、可审计 |
-| R17.3 | `TODO` | Task Proposal | Agent 提议不能绕过 Controller 创建 Task |
-| R17.4 | `TODO` | 协作调度策略 | 依赖、预算、角色和权限统一准入 |
-| R17.5 | `TODO` | Team CLI | 显示成员、消息、提议和处理结果 |
-| R17.6 | `TODO` | 自由度保护测试 | 消息风暴、循环委派、越权和重复提议被阻止 |
-| R17.7 | `TODO` | Team 效果评测 | 只有证明质量收益后才作为默认策略候选 |
+| R17.1 | `DONE` | Team View | 直接投影 Workflow Task Graph，不复制状态 |
+| R17.2 | `DONE` | Agent Mailbox | 消息可寻址、有界、持久化、可审计 |
+| R17.3 | `DONE` | Task Proposal | Agent 提议不能绕过 Controller 创建 Task |
+| R17.4 | `DONE` | 协作调度策略 | 依赖、预算、角色和权限统一准入 |
+| R17.5 | `DONE` | Team CLI | 显示成员、消息、提议和处理结果 |
+| R17.6 | `DONE` | 自由度保护测试 | 消息风暴、循环委派、越权和重复提议被阻止 |
+| R17.7 | `DONE` | Team 效果评测 | 只有证明质量收益后才作为默认策略候选 |
+
+### 9.6 R17 实现记录
+
+- `GovernedAgentTeam` 只持久化消息、Task Proposal 和处理结果；Team View 每次从 Agent Registry 与 Workflow Controller 读取成员和 Task，不存在可独立修改的 Team Task 状态。
+- 邮箱强制绑定 Workflow、来源 Agent、Task、Attempt 和目标 Agent/角色；正文、Artifact 引用、窗口频率和可见数量有界，消息写入独立的追加式 Team Event Log。
+- 终态 Agent、跨 Workflow 目标、重复消息、消息风暴和形成环路的 `handoff_request` 会在写入前被拒绝。消息结构不提供权限、预算和 Writer Lease 修改字段。
+- Task Proposal 保存目标、原因、依赖、角色、读写模式、风险和验证方法。提交只产生 `pending` Proposal；只有 Controller/Scheduler 决策可接受、合并、拒绝或要求批准。
+- 接受 Proposal 时由 `WorkflowController.createProposedTask()` 再次校验已批准 Plan、Workflow 状态、依赖、风险批准和角色/读写模式，并创建带 `sourceProposalId` 的正式 Task；预算继续使用 Workflow 与内置 Agent Profile 的交集。
+- Scheduler 仍从唯一 Task Graph 选择任务；Task 的推荐角色只影响 Profile 选择，实际权限继续由 Task Access Mode、Profile Ceiling、Workflow Budget 和 Writer Lease 共同收紧。
+- `/team`、`/team messages` 和 `/team proposals` 只展示权威 Task 投影、成员、邮箱和处理结果，不提供直接修改 Task 状态的旁路。
+- Agent Team 默认候选门禁要求重复样本、明确质量收益、无协作退化、成本受控和自动决策解释完整。R17 完成机制门禁不等于已经证明真实模型收益，因此默认自动策略仍不启用 Agent Team。
+
+当前明确边界：
+
+- Team Event Log 与 Workflow Event Log 分开持久化，但 Proposal 只有通过 Controller 生成 `task.created` 后才成为权威执行状态。
+- R17 仍使用单 Writer；多个写入 Agent、独立 Worktree、冲突 Attempt 和自动集成属于 R18。
+- 受控邮箱和 Proposal Core API 已可由 Runtime/SDK 使用；是否向特定远程 Agent Backend 暴露对应模型工具，必须继续经过该 Backend 的身份绑定和权限审查。
 
 ## 10. R18：多 Writer Worktree 与自动集成
 

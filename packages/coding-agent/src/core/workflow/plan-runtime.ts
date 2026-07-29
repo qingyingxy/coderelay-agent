@@ -5,6 +5,7 @@ import type { Job } from "../jobs/types.ts";
 import type { SessionManager } from "../session-manager.ts";
 import { aggregateHandoffs } from "../subagents/handoff.ts";
 import type { SubagentService } from "../subagents/subagent-service.ts";
+import type { TeamTaskProposal } from "../subagents/team-types.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
 import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
@@ -47,7 +48,7 @@ export interface StartPlanRuntimeInput {
 }
 
 export interface StartSubagentTaskInput {
-	readonly profileRole?: Extract<AgentProfileRole, "explorer" | "worker" | "reviewer">;
+	readonly profileRole?: Extract<AgentProfileRole, "planner" | "explorer" | "worker" | "reviewer">;
 	readonly profile?: AgentProfile;
 	readonly profileSource?: "builtin" | "global" | "project" | "runtime";
 	readonly profileSourcePath?: string;
@@ -451,7 +452,14 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		if (task.kind === "control" || task.kind === "command") {
 			throw new Error(`Task ${task.id} cannot run in a Subagent`);
 		}
-		const profileRole = input.profileRole ?? (task.accessMode === "writer" ? "worker" : "explorer");
+		const recommendedProfileRole =
+			task.recommendedAgentRole === "coordinator"
+				? "planner"
+				: task.recommendedAgentRole === "repair"
+					? "worker"
+					: task.recommendedAgentRole;
+		const profileRole =
+			input.profileRole ?? recommendedProfileRole ?? (task.accessMode === "writer" ? "worker" : "explorer");
 		const profile = input.profile ?? BUILTIN_AGENT_PROFILES[profileRole];
 		if (task.accessMode === "writer" && profile.role !== "worker") {
 			throw new Error(`Writer Task ${task.id} requires a worker Agent Profile`);
@@ -639,6 +647,40 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			this.#controller.listAttempts(task.id),
 			this.verifications.filter(({ taskId }) => taskId === task.id),
 		);
+	}
+
+	createTeamProposalTask(proposal: TeamTaskProposal, admission: { readonly highRiskApproved: boolean }): Task {
+		const workflow = this.workflow;
+		if (proposal.workflowId !== workflow.id) {
+			throw new Error(`Task Proposal ${proposal.id} does not belong to Workflow ${workflow.id}`);
+		}
+		const existing = this.tasks.find(({ sourceProposalId }) => sourceProposalId === proposal.id);
+		if (existing) {
+			return existing;
+		}
+		const taskId = `task-${randomUUID()}`;
+		this.#controller.createProposedTask({
+			commandId: this.#createId("command"),
+			workflowId: workflow.id,
+			proposalId: proposal.id,
+			taskId,
+			sourceAgentId: proposal.sourceAgentId,
+			parentTaskId: proposal.sourceTaskId,
+			title: proposal.objective,
+			description: `${proposal.reason}\n\nRisk: ${proposal.risk}`,
+			dependencyIds: proposal.suggestedDependencyIds,
+			accessMode: proposal.accessMode,
+			requiredAgentRole: proposal.requiredRole,
+			riskLevel: proposal.riskLevel,
+			highRiskApproved: admission.highRiskApproved,
+			verification: proposal.verification,
+		});
+		this.refreshTaskReadiness();
+		const task = this.#controller.getTask(taskId);
+		if (!task) {
+			throw new Error(`Controller did not create Task ${taskId} for Proposal ${proposal.id}`);
+		}
+		return task;
 	}
 
 	refreshTaskReadiness(): void {

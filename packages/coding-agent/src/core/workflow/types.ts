@@ -89,6 +89,7 @@ export type AttemptTerminalStatus = Extract<
 export type VerificationStatus = "not_started" | "running" | "passed" | "failed" | "skipped";
 export type TaskKind = "agent" | "command" | "control" | "repair";
 export type TaskAccessMode = "read_only" | "writer";
+export type TaskAgentRole = "coordinator" | "explorer" | "worker" | "reviewer" | "repair";
 export type ExecutorKind = "main_agent" | "subagent" | "job";
 
 export const PLAN_STATUSES = ["draft", "awaiting_approval", "approved", "rejected", "superseded"] as const;
@@ -288,6 +289,8 @@ export interface Task extends EntityMetadata {
 	readonly parentTaskId?: TaskId;
 	readonly sourcePlanId?: PlanId;
 	readonly sourcePlanStepId?: PlanStepId;
+	readonly sourceProposalId?: string;
+	readonly recommendedAgentRole?: TaskAgentRole;
 	readonly repairForVerificationId?: VerificationId;
 	readonly repairIteration?: number;
 	readonly repairReasonCode?: RepairDecisionReasonCode;
