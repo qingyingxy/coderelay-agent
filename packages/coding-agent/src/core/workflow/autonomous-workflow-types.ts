@@ -1,3 +1,4 @@
+import type { DecisionReasonCode } from "./decision-reasons.ts";
 import type { ExecutionMode, WorkflowStatus } from "./types.ts";
 
 export const WORKFLOW_AUTOMATION_WAIT_REASONS = [
@@ -31,14 +32,17 @@ export type WorkflowAutomationAction =
 			readonly taskId: string;
 			readonly executorKind: "subagent" | "job";
 			readonly resourceId: string;
+			readonly reasonCode: DecisionReasonCode;
 	  }
 	| {
 			readonly kind: "verification";
 			readonly deliveryFingerprint: string;
+			readonly reasonCode: DecisionReasonCode;
 	  }
 	| {
 			readonly kind: "repair";
 			readonly taskId: string;
+			readonly reasonCode: DecisionReasonCode;
 	  };
 
 export interface WorkflowAutomationResult {
@@ -47,6 +51,7 @@ export interface WorkflowAutomationResult {
 	readonly terminal: boolean;
 	readonly waitingReason?: WorkflowAutomationWaitReason;
 	readonly actions: readonly WorkflowAutomationAction[];
+	readonly decisionReasonCodes: readonly DecisionReasonCode[];
 }
 
 export type AutonomousWorkflowEvent =
@@ -56,6 +61,7 @@ export type AutonomousWorkflowEvent =
 			readonly taskId: string;
 			readonly executorKind: "subagent" | "job";
 			readonly resourceId: string;
+			readonly reasonCode: DecisionReasonCode;
 	  }
 	| {
 			readonly type: "workflow_dispatch_settled";
@@ -69,15 +75,18 @@ export type AutonomousWorkflowEvent =
 			readonly type: "workflow_verification_started";
 			readonly workflowId: string;
 			readonly deliveryFingerprint: string;
+			readonly reasonCode: DecisionReasonCode;
 	  }
 	| {
 			readonly type: "workflow_repair_created";
 			readonly workflowId: string;
 			readonly taskId: string;
+			readonly reasonCode: DecisionReasonCode;
 	  }
 	| {
 			readonly type: "workflow_automation_waiting";
 			readonly workflowId: string;
 			readonly reason: WorkflowAutomationWaitReason;
 			readonly status: WorkflowStatus;
+			readonly reasonCode: DecisionReasonCode;
 	  };

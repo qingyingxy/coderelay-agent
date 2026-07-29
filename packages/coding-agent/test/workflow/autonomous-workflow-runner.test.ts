@@ -174,6 +174,11 @@ describe("AutonomousWorkflowRunner", () => {
 			waitingReason: "terminal",
 		});
 		expect(result.actions.map(({ kind }) => kind)).toEqual(["dispatch", "verification"]);
+		expect(result.decisionReasonCodes).toEqual([
+			"scheduler.selected",
+			"automation.verification_all_tasks_succeeded",
+			"automation.terminal",
+		]);
 		expect(plan.workflow.status).toBe("completed");
 		expect(plan.verifications).toEqual(
 			expect.arrayContaining([expect.objectContaining({ requirementId: "tests", status: "passed" })]),
@@ -219,6 +224,9 @@ describe("AutonomousWorkflowRunner", () => {
 			"dispatch",
 			"verification",
 		]);
+		expect(result.actions.find(({ kind }) => kind === "repair")).toMatchObject({
+			reasonCode: "repair.verification_failed",
+		});
 		expect(plan.tasks.filter(({ kind }) => kind === "repair")).toHaveLength(1);
 		expect(
 			plan.verifications.filter(({ requirementId }) => requirementId === "tests").map(({ status }) => status),

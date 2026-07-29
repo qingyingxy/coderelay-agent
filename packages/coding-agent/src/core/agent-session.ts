@@ -131,6 +131,7 @@ import { createWorkflowAutomationPolicy, requiresPlanMode } from "./workflow/aut
 import { AutonomousWorkflowRunner } from "./workflow/autonomous-workflow-runner.ts";
 import type { AutonomousWorkflowEvent, WorkflowAutomationResult } from "./workflow/autonomous-workflow-types.ts";
 import type { RequiredClarification } from "./workflow/clarification-gate.ts";
+import type { DecisionExplanation } from "./workflow/decision-reasons.ts";
 import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
 import {
 	createModeAdvisorPromptEnvelope,
@@ -209,8 +210,21 @@ export type AgentSessionEvent =
 			willRetry: boolean;
 			errorMessage?: string;
 	  }
-	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
+	| {
+			type: "auto_retry_start";
+			attempt: number;
+			maxAttempts: number;
+			delayMs: number;
+			errorMessage: string;
+			reasonCode: "retry.transient_error";
+	  }
+	| {
+			type: "auto_retry_end";
+			success: boolean;
+			attempt: number;
+			finalError?: string;
+			reasonCode: "retry.succeeded" | "retry.exhausted" | "retry.cancelled";
+	  }
 	| {
 			type: "summarization_retry_scheduled";
 			attempt: number;
@@ -225,7 +239,6 @@ export type AgentSessionEvent =
 			reason: "manual" | "threshold" | "overflow";
 	  }
 	| { type: "summarization_retry_finished" }
-	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "bash_execution_update"; id?: string; delta: string }
 	| {
 			type: "workflow_mode_decided";
@@ -764,6 +777,7 @@ export class AgentSession {
 						type: "auto_retry_end",
 						success: true,
 						attempt: this._retryAttempt,
+						reasonCode: "retry.succeeded",
 					});
 					this._retryAttempt = 0;
 				}
@@ -1479,9 +1493,21 @@ export class AgentSession {
 		const automationStatus = this._workflowAutomationEnabled
 			? `automation:${this._autonomousWorkflowRunner?.isRunning ? "running" : (waitingReason ?? "idle")}`
 			: "automation:off";
+		const automationDecision: DecisionExplanation | undefined = waitingReason
+			? {
+					category: "automation",
+					reasonCode: `automation.${waitingReason}`,
+					summary: `Automatic Workflow progression stopped at ${waitingReason}`,
+					entityId: view.workflow.id,
+				}
+			: undefined;
 		return {
 			...structuredClone(view),
 			statusLine: `${view.statusLine} | mode:${this._workflowMode} | ${automationStatus}`,
+			reportLines: automationDecision
+				? [...view.reportLines, `- ${automationDecision.reasonCode}: ${automationDecision.summary}`]
+				: view.reportLines,
+			decisions: automationDecision ? [...view.decisions, automationDecision] : view.decisions,
 			automation: {
 				enabled: this._workflowAutomationEnabled,
 				mode: this._workflowMode,
@@ -1851,6 +1877,7 @@ export class AgentSession {
 				success: false,
 				attempt: this._retryAttempt,
 				finalError: msg.errorMessage,
+				reasonCode: "retry.exhausted",
 			});
 			this._retryAttempt = 0;
 		}
@@ -4000,6 +4027,7 @@ export class AgentSession {
 			maxAttempts: settings.maxRetries,
 			delayMs,
 			errorMessage: message.errorMessage || "Unknown error",
+			reasonCode: "retry.transient_error",
 		});
 
 		// Remove error message from agent state (keep in session for history)
@@ -4021,6 +4049,7 @@ export class AgentSession {
 				success: false,
 				attempt,
 				finalError: "Retry cancelled",
+				reasonCode: "retry.cancelled",
 			});
 			return false;
 		} finally {

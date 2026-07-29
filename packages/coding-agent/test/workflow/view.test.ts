@@ -62,9 +62,40 @@ describe("WorkflowView", () => {
 		);
 		expect(executionView.tasks.filter(({ kind }) => kind !== "control")).toHaveLength(2);
 		expect(executionView.schemaVersion).toBe(1);
+		expect(executionView.decisions).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					category: "mode",
+					reasonCode: "mode.user_plan",
+				}),
+			]),
+		);
+		expect(executionView.reportLines).toEqual(expect.arrayContaining([expect.stringContaining("mode.user_plan")]));
 		expect(JSON.parse(JSON.stringify(executionView))).toMatchObject({
 			workflow: { id: "workflow-view", status: "executing" },
 			plan: { id: "plan-view", status: "approved" },
+		});
+	});
+
+	it("can fail an approved Workflow before its root Control Task starts", () => {
+		const runtime = PlanWorkflowRuntime.start(SessionManager.inMemory(), {
+			workflowId: "workflow-pre-dispatch-failure",
+			rootTaskId: "task-root-failure",
+			planId: "plan-failure",
+			request: {
+				text: "Exercise pre-dispatch failure",
+				cwd: "C:/repo",
+				attachments: [],
+			},
+		});
+		runtime.submit(CONTENT);
+		runtime.approve();
+
+		runtime.failDelivery("Automatic dispatch failed before Task start");
+
+		expect(runtime.workflow).toMatchObject({
+			status: "failed",
+			result: { reason: "Automatic dispatch failed before Task start" },
 		});
 	});
 });

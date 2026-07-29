@@ -188,9 +188,16 @@ export class DeliveryRuntime {
 							? `Verification ${failedVerification.requirementId} repeated the same failure`
 							: undefined;
 			if (stopReason) {
+				const reasonCode =
+					options.allowRepair === false
+						? "repair.disabled"
+						: latestRepair?.status === "succeeded" && repairChangedFiles?.size === 0
+							? "repair.no_changes"
+							: "repair.repeated_failure";
 				port.failDelivery(stopReason);
 				return {
 					status: "failed",
+					reasonCode,
 					diff,
 					verifications: port.verifications,
 					risks,
@@ -202,6 +209,7 @@ export class DeliveryRuntime {
 				const repairTask = port.createRepair(failedVerification.id);
 				return {
 					status: "repair_created",
+					reasonCode: "repair.verification_failed",
 					diff,
 					verifications: port.verifications,
 					repairTask,
@@ -211,9 +219,17 @@ export class DeliveryRuntime {
 				};
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
+				const errorCode =
+					typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+						? error.code
+						: undefined;
 				port.failDelivery(reason);
 				return {
 					status: "failed",
+					reasonCode:
+						errorCode === "controller.repair_budget_exhausted"
+							? "repair.budget_exhausted"
+							: "repair.repeated_failure",
 					diff,
 					verifications: port.verifications,
 					risks,

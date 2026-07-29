@@ -114,6 +114,7 @@ function createWorkflowView(): WorkflowView {
 		jobs: [],
 		statusLine: "direct | completed | root: task-print",
 		reportLines: ["direct | completed | root: task-print", "Summary: Print Workflow completed"],
+		decisions: [],
 		budgetStatus: "Budget: within limits",
 		availableActions: ["resume"],
 	};

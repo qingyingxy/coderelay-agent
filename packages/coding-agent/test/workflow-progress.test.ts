@@ -10,6 +10,7 @@ function workflowView(input: {
 	verifications?: ReadonlyArray<Record<string, unknown>>;
 	blockedReason?: { message: string };
 	waitingReason?: string;
+	decisions?: ReadonlyArray<{ reasonCode: string; summary: string }>;
 }): WorkflowView {
 	return {
 		workflow: {
@@ -21,6 +22,7 @@ function workflowView(input: {
 		jobs: input.jobs ?? [],
 		verifications: input.verifications ?? [],
 		automation: input.waitingReason ? { waitingReason: input.waitingReason } : undefined,
+		decisions: input.decisions ?? [],
 	} as unknown as WorkflowView;
 }
 
@@ -106,6 +108,28 @@ describe("formatWorkflowProgress", () => {
 		expect(lines).toContain("  Isolation: unverified · current · no artifact");
 		expect(lines.at(-1)).toContain("/agent transcript");
 		expect(lines.join("\n")).not.toMatch(/%|ETA/);
+	});
+
+	it("shows stable decision reasons only in the expanded panel", () => {
+		const view = workflowView({
+			tasks: [{ id: "one", kind: "agent", status: "ready", title: "Inspect code" }],
+			decisions: [
+				{
+					reasonCode: "scheduler.writer_unavailable",
+					summary: "The repository Writer Lease is unavailable",
+				},
+			],
+		});
+
+		expect(formatWorkflowProgress(view)).not.toEqual(
+			expect.arrayContaining([expect.stringContaining("scheduler.writer_unavailable")]),
+		);
+		expect(formatWorkflowProgress(view, true)).toEqual(
+			expect.arrayContaining([
+				"Decision reasons:",
+				"  scheduler.writer_unavailable: The repository Writer Lease is unavailable",
+			]),
+		);
 	});
 
 	it("shows authoritative Recovery Attempt context", () => {

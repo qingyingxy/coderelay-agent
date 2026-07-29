@@ -1,6 +1,8 @@
 import type { Job } from "../jobs/types.ts";
 import type { AgentInstance } from "../subagents/types.ts";
 import type { WorkflowAutomationWaitReason } from "./autonomous-workflow-types.ts";
+import { type DecisionExplanation, resolveModeDecisionReasonCode } from "./decision-reasons.ts";
+import type { TaskSchedulingDecision } from "./scheduler.ts";
 import type { Attempt, ExecutionMode, Plan, Task, VerificationResult, Workflow } from "./types.ts";
 import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
 
@@ -30,6 +32,7 @@ export interface WorkflowView {
 	readonly jobs: readonly Job[];
 	readonly statusLine: string;
 	readonly reportLines: readonly string[];
+	readonly decisions: readonly DecisionExplanation[];
 	readonly budgetStatus: string;
 	readonly availableActions: readonly WorkflowViewAction[];
 	readonly stopReason?: string;
@@ -78,12 +81,67 @@ export function deriveWorkflowViewActions(workflow: Workflow, tasks: readonly Ta
 }
 
 export function buildWorkflowView(
-	input: Omit<WorkflowView, "schemaVersion" | "availableActions" | "stopReason">,
+	input: Omit<WorkflowView, "schemaVersion" | "availableActions" | "stopReason" | "decisions"> & {
+		readonly schedulingDecisions?: readonly TaskSchedulingDecision[];
+	},
 ): WorkflowView {
+	const { schedulingDecisions = [], ...view } = input;
+	const decisions: DecisionExplanation[] = [];
+	if (view.workflow.modeDecision) {
+		const mode = view.workflow.modeDecision;
+		decisions.push({
+			category: "mode",
+			reasonCode: mode.reasonCode ?? resolveModeDecisionReasonCode(mode.mode, mode.source),
+			summary: mode.reason,
+			entityId: view.workflow.id,
+		});
+	}
+	for (const agent of view.agents) {
+		if (agent.creationReasonCode) {
+			decisions.push({
+				category: "agent",
+				reasonCode: agent.creationReasonCode,
+				summary: `Created ${agent.profileName} Agent for Task ${agent.taskId}`,
+				entityId: agent.id,
+			});
+		}
+		if (agent.backendReasonCode) {
+			decisions.push({
+				category: "backend",
+				reasonCode: agent.backendReasonCode,
+				summary: agent.backendReason ?? `Selected ${agent.backend} Backend`,
+				entityId: agent.id,
+			});
+		}
+	}
+	for (const task of view.tasks) {
+		if (task.repairReasonCode) {
+			decisions.push({
+				category: "repair",
+				reasonCode: task.repairReasonCode,
+				summary: `Created Repair Task ${task.id} for Verification ${task.repairForVerificationId}`,
+				entityId: task.id,
+			});
+		}
+	}
+	for (const decision of schedulingDecisions) {
+		decisions.push({
+			category: "scheduler",
+			reasonCode: decision.reasonCode,
+			summary: decision.summary,
+			entityId: decision.taskId,
+		});
+	}
+	const decisionLines =
+		decisions.length === 0
+			? []
+			: ["Decision reasons:", ...decisions.map(({ reasonCode, summary }) => `- ${reasonCode}: ${summary}`)];
 	return {
 		schemaVersion: WORKFLOW_SCHEMA_VERSION,
-		...structuredClone(input),
-		availableActions: deriveWorkflowViewActions(input.workflow, input.tasks),
-		stopReason: input.workflow.result?.reason,
+		...structuredClone(view),
+		reportLines: [...view.reportLines, ...decisionLines],
+		decisions,
+		availableActions: deriveWorkflowViewActions(view.workflow, view.tasks),
+		stopReason: view.workflow.result?.reason,
 	};
 }

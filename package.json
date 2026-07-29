@@ -36,6 +36,7 @@
 		"demo:job-runtime": "tsx packages/coding-agent/examples/sdk/19-background-job-runtime-demo.ts",
 		"demo:delivery-recovery": "tsx packages/coding-agent/examples/sdk/20-delivery-recovery-demo.ts",
 		"eval:cli-agent": "tsx packages/coding-agent/examples/sdk/21-cli-agent-evaluation.ts",
+		"eval:cli-agent:model": "tsx packages/coding-agent/examples/sdk/24-real-model-evaluation.ts",
 		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
 		"demo:autonomous-workflow": "tsx packages/coding-agent/examples/sdk/23-autonomous-workflow-showcase.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",

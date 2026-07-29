@@ -1,0 +1,70 @@
+{
+	"schemaVersion": 1,
+	"id": "pi-r16-real-model",
+	"version": "1.0.0",
+	"tasks": [
+		{
+			"id": "slug-normalization",
+			"title": "Repair localized slug normalization",
+			"repositoryFixture": "fixtures/slug-normalization",
+			"repositoryBaseline": "sha256:06b4b56c6c135d6dbf5fb89f0fbd0b81f2ef77efb46af5662293c6edf6524b7f",
+			"prompt": "Fix the slug normalization bug. Preserve the public API, add or adjust tests only when necessary, and run the configured verification command.",
+			"promptVersion": "r16-v1",
+			"verificationCommands": ["node --test"],
+			"successCriteria": [
+				"All whitespace groups become one dash",
+				"Leading and trailing separators are removed",
+				"The fixed test suite passes"
+			],
+			"expectedReviewerFindings": ["slug-repeated-whitespace"],
+			"budget": {
+				"maxCost": 2,
+				"maxTurns": 20,
+				"maxDurationMs": 300000,
+				"maxAgents": 4
+			}
+		},
+		{
+			"id": "counter-store-invariants",
+			"title": "Restore counter store invariants",
+			"repositoryFixture": "fixtures/counter-store-invariants",
+			"repositoryBaseline": "sha256:a1f1f58cf7ea694f733e886e8fa432f6d06a59a0a034db2b81757ceccb0a6809",
+			"prompt": "Repair the counter store so invalid decrements are rejected without mutating state and subscribers observe only committed values. Keep the exported API stable and run the configured verification command.",
+			"promptVersion": "r16-v1",
+			"verificationCommands": ["node --test"],
+			"successCriteria": [
+				"Counter values never become negative",
+				"Rejected operations do not notify subscribers",
+				"The fixed test suite passes"
+			],
+			"expectedReviewerFindings": ["mutation-before-validation", "invalid-notification"],
+			"budget": {
+				"maxCost": 2,
+				"maxTurns": 20,
+				"maxDurationMs": 300000,
+				"maxAgents": 4
+			}
+		},
+		{
+			"id": "path-boundary",
+			"title": "Harden workspace path boundaries",
+			"repositoryFixture": "fixtures/path-boundary",
+			"repositoryBaseline": "sha256:079c3ade8416620153344aec20d79ecb21c02273a75ee63d62c0e51f91611cc1",
+			"prompt": "Fix the workspace path authorization bug so sibling paths that merely share a string prefix are rejected. Preserve valid nested paths and cross-platform behavior, then run the configured verification command.",
+			"promptVersion": "r16-v1",
+			"verificationCommands": ["node --test"],
+			"successCriteria": [
+				"Nested workspace paths are accepted",
+				"Sibling prefix-collision paths are rejected",
+				"The fixed test suite passes"
+			],
+			"expectedReviewerFindings": ["path-prefix-boundary"],
+			"budget": {
+				"maxCost": 2,
+				"maxTurns": 20,
+				"maxDurationMs": 300000,
+				"maxAgents": 4
+			}
+		}
+	]
+}

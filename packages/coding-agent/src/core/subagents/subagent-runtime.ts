@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { validateAgentProfile } from "../workflow/agent-profile.ts";
+import type { AgentCreationReasonCode, BackendSelectionReasonCode } from "../workflow/decision-reasons.ts";
 import {
 	assertBudgetAvailable,
 	evaluateBudget,
@@ -323,7 +324,12 @@ export class SubagentRuntime implements SubagentService {
 			task: input.taskPermission,
 		});
 		const budget = inheritBudgetLimits(parentBudget, workflowBudget, input.taskBudget, input.profile.defaultBudget);
-		const { backend, reason: backendReason } = this.#selectBackend(input, effectivePermissions, budget);
+		const {
+			backend,
+			reason: backendReason,
+			reasonCode: backendReasonCode,
+		} = this.#selectBackend(input, effectivePermissions, budget);
+		const creationReasonCode = this.#resolveCreationReasonCode(input);
 		const sessionFactory = this.#sessionFactories.get(backend);
 		if (!sessionFactory) {
 			throw new SubagentRuntimeError("subagent.backend_unsupported", `Subagent backend ${backend} is unavailable`);
@@ -386,6 +392,8 @@ export class SubagentRuntime implements SubagentService {
 			scope: input.scope ?? "task",
 			backend,
 			backendReason,
+			backendReasonCode,
+			creationReasonCode,
 			enforcementPlan,
 			sandbox,
 			workspace,
@@ -999,7 +1007,7 @@ export class SubagentRuntime implements SubagentService {
 		input: SpawnSubagentInput,
 		permissions: SpawnSubagentInput["parentPermission"],
 		budget: BudgetLimit,
-	): { backend: AgentBackend; reason: string } {
+	): { backend: AgentBackend; reason: string; reasonCode: BackendSelectionReasonCode } {
 		const inProcessSafe =
 			input.profile.role !== "worker" &&
 			!permissions.write &&
@@ -1016,18 +1024,46 @@ export class SubagentRuntime implements SubagentService {
 					"In-process Subagents must be read-only, offline, command-free, non-worker, and unable to nest",
 				);
 			}
-			return { backend: "in-process", reason: "Explicit safe in-process request" };
+			return {
+				backend: "in-process",
+				reason: "Explicit safe in-process request",
+				reasonCode: "backend.explicit_in_process",
+			};
 		}
 		if (input.backend === "auto" && inProcessSafe && this.#sessionFactories.has("in-process")) {
-			return { backend: "in-process", reason: "Auto-selected for a statically safe read-only Agent" };
+			return {
+				backend: "in-process",
+				reason: "Auto-selected for a statically safe read-only Agent",
+				reasonCode: "backend.auto_safe_in_process",
+			};
 		}
 		return {
 			backend: "rpc",
+			reasonCode: input.backend === "auto" ? "backend.auto_rpc_fallback" : "backend.default_rpc",
 			reason:
 				input.backend === "auto"
 					? "RPC safety fallback because in-process was unavailable or ineligible"
 					: "RPC is the default isolated backend",
 		};
+	}
+
+	#resolveCreationReasonCode(input: SpawnSubagentInput): AgentCreationReasonCode {
+		if (input.creationReasonCode) {
+			return input.creationReasonCode;
+		}
+		if (input.recoveryOfAgentId) {
+			return "agent.recovery_required";
+		}
+		if (input.retryOfAgentId) {
+			return "agent.retry_requested";
+		}
+		if (input.profile.role === "reviewer") {
+			return "agent.review_requested";
+		}
+		if (input.profile.role === "explorer") {
+			return "agent.exploration_requested";
+		}
+		return "agent.delegation_requested";
 	}
 
 	#persistState(event: AgentRuntimeEvent): void {
@@ -1300,6 +1336,7 @@ export class SubagentRuntime implements SubagentService {
 			profileSourcePath: agent.profileSourcePath,
 			scope: agent.scope,
 			backend: agent.backend,
+			creationReasonCode: agent.creationReasonCode,
 			parentPermission: agent.effectivePermissions,
 			workflowPermission: agent.effectivePermissions,
 			taskPermission: agent.effectivePermissions,

@@ -14,6 +14,7 @@ describe("ModeDecision", () => {
 		).toEqual({
 			mode: "plan",
 			source: "agent",
+			reasonCode: "mode.agent_plan",
 			reason: "The task affects several dependent modules",
 			riskLevel: "medium",
 			decidedAt: NOW,

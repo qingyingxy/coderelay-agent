@@ -94,21 +94,25 @@ export class AutonomousWorkflowRunner {
 					return this.#waiting("verification_disabled", actions);
 				}
 				const fingerprint = this.#runtime.deliveryFingerprint;
-				actions.push({ kind: "verification", deliveryFingerprint: fingerprint });
+				const reasonCode = "automation.verification_all_tasks_succeeded" as const;
+				actions.push({ kind: "verification", deliveryFingerprint: fingerprint, reasonCode });
 				this.#onEvent?.({
 					type: "workflow_verification_started",
 					workflowId: workflow.id,
 					deliveryFingerprint: fingerprint,
+					reasonCode,
 				});
 				const delivery = await this.#deliveryRuntime.run(this.#runtime, {
 					allowRepair: this.#policy.autoRepair,
 				});
 				if (delivery.status === "repair_created" && delivery.repairTask) {
-					actions.push({ kind: "repair", taskId: delivery.repairTask.id });
+					const repairReasonCode = delivery.reasonCode ?? "repair.verification_failed";
+					actions.push({ kind: "repair", taskId: delivery.repairTask.id, reasonCode: repairReasonCode });
 					this.#onEvent?.({
 						type: "workflow_repair_created",
 						workflowId: workflow.id,
 						taskId: delivery.repairTask.id,
+						reasonCode: repairReasonCode,
 					});
 					continue;
 				}
@@ -168,6 +172,7 @@ export class AutonomousWorkflowRunner {
 					taskId: execution.taskId,
 					executorKind: execution.executorKind,
 					resourceId: execution.resourceId,
+					reasonCode: "scheduler.selected",
 				};
 				actions.push(action);
 				this.#onExecution?.(execution);
@@ -177,6 +182,7 @@ export class AutonomousWorkflowRunner {
 					taskId: execution.taskId,
 					executorKind: execution.executorKind,
 					resourceId: execution.resourceId,
+					reasonCode: action.reasonCode,
 				});
 			}
 			const settled = await Promise.allSettled(executions.map(({ completion }) => completion));
@@ -207,6 +213,7 @@ export class AutonomousWorkflowRunner {
 			workflowId: workflow.id,
 			reason,
 			status: workflow.status,
+			reasonCode: `automation.${reason}`,
 		});
 		return {
 			workflowId: workflow.id,
@@ -214,6 +221,7 @@ export class AutonomousWorkflowRunner {
 			terminal: isWorkflowTerminalStatus(workflow.status),
 			waitingReason: reason,
 			actions: [...actions],
+			decisionReasonCodes: [...actions.map(({ reasonCode }) => reasonCode), `automation.${reason}` as const],
 		};
 	}
 }

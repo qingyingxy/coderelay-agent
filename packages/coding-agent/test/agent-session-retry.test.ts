@@ -136,24 +136,33 @@ describe("AgentSession retry", () => {
 	it("retries after a transient error and succeeds", async () => {
 		const created = await createSession({ failCount: 1 });
 		const events: string[] = [];
+		const reasonCodes: string[] = [];
 		created.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") events.push(`start:${event.attempt}`);
 			if (event.type === "auto_retry_end") events.push(`end:success=${event.success}`);
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+				reasonCodes.push(event.reasonCode);
+			}
 		});
 
 		await created.session.prompt("Test");
 
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
+		expect(reasonCodes).toEqual(["retry.transient_error", "retry.succeeded"]);
 		expect(created.session.isRetrying).toBe(false);
 	});
 
 	it("exhausts max retries and emits failure", async () => {
 		const created = await createSession({ failCount: 99, maxRetries: 2 });
 		const events: string[] = [];
+		const reasonCodes: string[] = [];
 		created.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") events.push(`start:${event.attempt}`);
 			if (event.type === "auto_retry_end") events.push(`end:success=${event.success}`);
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+				reasonCodes.push(event.reasonCode);
+			}
 		});
 
 		await created.session.prompt("Test");
@@ -162,6 +171,7 @@ describe("AgentSession retry", () => {
 		expect(events).toContain("start:1");
 		expect(events).toContain("start:2");
 		expect(events).toContain("end:success=false");
+		expect(reasonCodes).toEqual(["retry.transient_error", "retry.transient_error", "retry.exhausted"]);
 		expect(created.session.isRetrying).toBe(false);
 	});
 

@@ -49,6 +49,7 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.ts";
 export * from "./core/delivery/index.ts";
+export * from "./core/evaluation/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {

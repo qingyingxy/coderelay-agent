@@ -1,3 +1,4 @@
+import { resolveModeDecisionReasonCode } from "./decision-reasons.ts";
 import type { ModeSelection } from "./mode-selector.ts";
 import type { IsoDateTime, ModeDecision, RiskLevel } from "./types.ts";
 
@@ -34,6 +35,7 @@ export function createModeDecision(input: CreateModeDecisionInput): ModeDecision
 	return {
 		mode: input.selection.mode,
 		source: input.selection.source,
+		reasonCode: resolveModeDecisionReasonCode(input.selection.mode, input.selection.source),
 		reason,
 		riskLevel: input.riskLevel,
 		decidedAt: input.decidedAt,

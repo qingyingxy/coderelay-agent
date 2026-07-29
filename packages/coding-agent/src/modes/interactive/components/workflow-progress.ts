@@ -144,6 +144,13 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 					: [],
 			),
 		);
+		const decisions = (view.decisions ?? []).slice(-6);
+		if (decisions.length > 0) {
+			lines.push(
+				"Decision reasons:",
+				...decisions.map(({ reasonCode, summary }) => `  ${reasonCode}: ${sanitize(summary)}`),
+			);
+		}
 		if (activeAgents.length > 0) {
 			lines.push("Agent actions: /agent show · /agent transcript · /agent send · /agent interrupt · /agent resume");
 		}

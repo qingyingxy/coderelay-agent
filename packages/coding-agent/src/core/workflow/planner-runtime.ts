@@ -5,17 +5,78 @@ import {
 	type PromptEnvelopeExecutionResult,
 } from "./prompt-agent-session-adapter.ts";
 import { createPromptEnvelope, type PromptEnvelope, type PromptTaskContext } from "./prompt-envelope.ts";
-import type { IsoDateTime, Plan, PlanContent } from "./types.ts";
+import {
+	FILE_INTENT_ACTIONS,
+	type FileIntentAction,
+	type IsoDateTime,
+	type Plan,
+	type PlanContent,
+	type PlanRisk,
+	type PlanStep,
+	type VerificationKind,
+	type VerificationRequirement,
+} from "./types.ts";
 
 const PLANNER_OUTPUT_SCHEMA = {
 	type: "object",
 	required: ["goal", "assumptions", "steps", "risks", "verificationRequirements"],
 	properties: {
 		goal: { type: "string" },
-		assumptions: { type: "array" },
-		steps: { type: "array" },
-		risks: { type: "array" },
-		verificationRequirements: { type: "array" },
+		assumptions: { type: "array", items: { type: "string" } },
+		steps: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["id", "title", "description", "dependsOn", "fileIntents", "verificationRequirementIds"],
+				properties: {
+					id: { type: "string" },
+					kind: { type: "string", enum: ["agent", "command"] },
+					command: { type: "string" },
+					title: { type: "string" },
+					description: { type: "string" },
+					dependsOn: { type: "array", items: { type: "string" } },
+					fileIntents: {
+						type: "array",
+						items: {
+							type: "object",
+							required: ["path", "action", "reason"],
+							properties: {
+								path: { type: "string" },
+								action: { type: "string", enum: FILE_INTENT_ACTIONS },
+								reason: { type: "string" },
+							},
+						},
+					},
+					verificationRequirementIds: { type: "array", items: { type: "string" } },
+				},
+			},
+		},
+		risks: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["level", "description", "mitigation"],
+				properties: {
+					level: { type: "string", enum: ["low", "medium", "high"] },
+					description: { type: "string" },
+					mitigation: { type: "string" },
+				},
+			},
+		},
+		verificationRequirements: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["id", "kind", "description", "required"],
+				properties: {
+					id: { type: "string" },
+					kind: { type: "string", enum: ["diff", "review", "test", "build", "manual"] },
+					description: { type: "string" },
+					required: { type: "boolean" },
+					command: { type: "string" },
+				},
+			},
+		},
 	},
 } as const;
 
@@ -158,6 +219,94 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function invalidShape(path: string): never {
+	throw new PlannerRuntimeError("planner.output_invalid_shape", `Planner response has an invalid ${path}`);
+}
+
+function nonEmptyString(value: unknown, path: string): string {
+	return typeof value === "string" && value.trim() ? value : invalidShape(path);
+}
+
+function stringArray(value: unknown, path: string): readonly string[] {
+	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+		return invalidShape(path);
+	}
+	return [...value];
+}
+
+function parsePlanStep(value: unknown, index: number): PlanStep {
+	const path = `steps[${index}]`;
+	if (!isRecord(value)) return invalidShape(path);
+	const kind = value.kind;
+	if (kind !== undefined && kind !== "agent" && kind !== "command") {
+		return invalidShape(`${path}.kind`);
+	}
+	const command = value.command;
+	if (command !== undefined && (typeof command !== "string" || !command.trim())) {
+		return invalidShape(`${path}.command`);
+	}
+	if (!Array.isArray(value.fileIntents)) return invalidShape(`${path}.fileIntents`);
+	const fileIntents = value.fileIntents.map((intent, intentIndex) => {
+		const intentPath = `${path}.fileIntents[${intentIndex}]`;
+		if (!isRecord(intent)) return invalidShape(intentPath);
+		const action = intent.action;
+		if (typeof action !== "string" || !FILE_INTENT_ACTIONS.includes(action as FileIntentAction)) {
+			return invalidShape(`${intentPath}.action`);
+		}
+		return {
+			path: nonEmptyString(intent.path, `${intentPath}.path`),
+			action: action as FileIntentAction,
+			reason: nonEmptyString(intent.reason, `${intentPath}.reason`),
+		};
+	});
+	return {
+		id: nonEmptyString(value.id, `${path}.id`),
+		kind,
+		command,
+		title: nonEmptyString(value.title, `${path}.title`),
+		description: nonEmptyString(value.description, `${path}.description`),
+		dependsOn: stringArray(value.dependsOn, `${path}.dependsOn`),
+		fileIntents,
+		verificationRequirementIds: stringArray(value.verificationRequirementIds, `${path}.verificationRequirementIds`),
+	};
+}
+
+function parsePlanRisk(value: unknown, index: number): PlanRisk {
+	const path = `risks[${index}]`;
+	if (!isRecord(value)) return invalidShape(path);
+	if (value.level !== "low" && value.level !== "medium" && value.level !== "high") {
+		return invalidShape(`${path}.level`);
+	}
+	return {
+		level: value.level,
+		description: nonEmptyString(value.description, `${path}.description`),
+		mitigation: nonEmptyString(value.mitigation, `${path}.mitigation`),
+	};
+}
+
+const VERIFICATION_KINDS: readonly VerificationKind[] = ["diff", "review", "test", "build", "manual"];
+
+function parseVerificationRequirement(value: unknown, index: number): VerificationRequirement {
+	const path = `verificationRequirements[${index}]`;
+	if (!isRecord(value)) return invalidShape(path);
+	const kind = value.kind;
+	if (typeof kind !== "string" || !VERIFICATION_KINDS.includes(kind as VerificationKind)) {
+		return invalidShape(`${path}.kind`);
+	}
+	if (typeof value.required !== "boolean") return invalidShape(`${path}.required`);
+	const command = value.command;
+	if (command !== undefined && (typeof command !== "string" || !command.trim())) {
+		return invalidShape(`${path}.command`);
+	}
+	return {
+		id: nonEmptyString(value.id, `${path}.id`),
+		kind: kind as VerificationKind,
+		description: nonEmptyString(value.description, `${path}.description`),
+		required: value.required,
+		command,
+	};
+}
+
 export function parsePlannerPlanContent(text: string): PlanContent {
 	let value: unknown;
 	try {
@@ -181,5 +330,19 @@ export function parsePlannerPlanContent(text: string): PlanContent {
 	) {
 		throw new PlannerRuntimeError("planner.output_invalid_shape", "Planner response does not match PlanContent");
 	}
-	return structuredClone(value) as unknown as PlanContent;
+	if (
+		value.assumptions.some((assumption) => typeof assumption !== "string" || !assumption.trim()) ||
+		value.steps.some((step) => !isRecord(step)) ||
+		value.risks.some((risk) => !isRecord(risk)) ||
+		value.verificationRequirements.some((requirement) => !isRecord(requirement))
+	) {
+		throw new PlannerRuntimeError("planner.output_invalid_shape", "Planner response does not match PlanContent");
+	}
+	return {
+		goal: nonEmptyString(value.goal, "goal"),
+		assumptions: stringArray(value.assumptions, "assumptions"),
+		steps: value.steps.map(parsePlanStep),
+		risks: value.risks.map(parsePlanRisk),
+		verificationRequirements: value.verificationRequirements.map(parseVerificationRequirement),
+	};
 }

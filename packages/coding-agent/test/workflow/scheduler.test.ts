@@ -90,6 +90,39 @@ describe("Task Scheduler", () => {
 		expect(() => new TaskScheduler({ maxConcurrency: 0 })).toThrow(TaskSchedulerError);
 	});
 
+	it("explains selected and queued Tasks with stable Reason Codes", () => {
+		const scheduler = new TaskScheduler({
+			maxConcurrency: 2,
+			maxConcurrentAgents: 1,
+			maxConcurrentJobs: 1,
+			writerAvailable: false,
+		});
+		const evaluation = scheduler.evaluate([
+			task("reader-1", "ready"),
+			task("reader-2", "ready"),
+			task("writer", "ready", { accessMode: "writer" }),
+		]);
+
+		expect(evaluation.dispatches.map(({ taskId }) => taskId)).toEqual(["reader-1"]);
+		expect(evaluation.decisions).toEqual([
+			expect.objectContaining({
+				taskId: "reader-1",
+				selected: true,
+				reasonCode: "scheduler.selected",
+			}),
+			expect.objectContaining({
+				taskId: "reader-2",
+				selected: false,
+				reasonCode: "scheduler.agent_capacity_exhausted",
+			}),
+			expect.objectContaining({
+				taskId: "writer",
+				selected: false,
+				reasonCode: "scheduler.writer_unavailable",
+			}),
+		]);
+	});
+
 	it("hands a dispatch to the matching executor", async () => {
 		const executed: string[] = [];
 		const agentTask = task("agent", "ready");

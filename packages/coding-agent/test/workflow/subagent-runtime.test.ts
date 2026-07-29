@@ -285,6 +285,12 @@ describe("SubagentRuntime", () => {
 		expect(agent).toMatchObject({
 			backend: "in-process",
 			backendReason: "Auto-selected for a statically safe read-only Agent",
+			backendReasonCode: "backend.auto_safe_in_process",
+			creationReasonCode: "agent.exploration_requested",
+		});
+		expect(subject.events(agent.id)[0]).toMatchObject({
+			eventName: "subagent_created",
+			reasonCodes: ["agent.exploration_requested", "backend.auto_safe_in_process"],
 		});
 		expect(rpcFactory.sessions).toHaveLength(0);
 		expect(inProcessFactory.sessions).toHaveLength(1);

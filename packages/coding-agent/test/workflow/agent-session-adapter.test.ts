@@ -327,6 +327,7 @@ describe("AgentSessionAdapter", () => {
 			maxAttempts: 3,
 			delayMs: 1,
 			errorMessage: "overloaded_error",
+			reasonCode: "retry.transient_error",
 		});
 		session.emit({ type: "agent_start" });
 		emitRun(

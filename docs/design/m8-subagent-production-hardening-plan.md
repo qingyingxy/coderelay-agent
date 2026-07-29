@@ -1,6 +1,6 @@
 # M8：Subagent 生产加固与受治理团队实施计划
 
-> 状态：实施中（R14-R15 已完成；R16-R18 待实施）
+> 状态：实施中（R14-R16 已完成；R17-R18 待实施）
 > 范围：R14-R18
 > 前置：R13 Subagent Runtime 融合
 > 目标：在不破坏 Workflow 权威状态的前提下，把现有 Subagent 从“功能完整”推进到“隔离可靠、可恢复、可评测、可协作”
@@ -475,12 +475,28 @@ R14 仍然只允许一个 Writer：
 
 | ID | 状态 | 任务 | 验收标准 |
 |---|---|---|---|
-| R16.1 | `TODO` | 固定真实任务集 | 任务、仓库基线、验证命令和成功标准可重复 |
-| R16.2 | `TODO` | 单 Agent 基线 | 记录模型、Prompt、成本和失败样本 |
-| R16.3 | `TODO` | 多 Agent 对照 | 使用相同任务和预算进行公平比较 |
-| R16.4 | `TODO` | 决策事件 | 自动 Mode、Agent、Backend、Repair 都有 Reason Code |
-| R16.5 | `TODO` | 评测报告 | 同时展示成功率、成本、失败类型和限制 |
-| R16.6 | `TODO` | 回归门禁 | 新策略不能在无解释的情况下显著降低质量或扩大成本 |
+| R16.1 | `DONE` | 固定真实任务集 | 任务、仓库基线、验证命令和成功标准可重复 |
+| R16.2 | `DONE` | 单 Agent 基线 | 记录模型、Prompt、成本和失败样本 |
+| R16.3 | `DONE` | 多 Agent 对照 | 使用相同任务和预算进行公平比较 |
+| R16.4 | `DONE` | 决策事件 | 自动 Mode、Agent、Backend、Repair 都有 Reason Code |
+| R16.5 | `DONE` | 评测报告 | 同时展示成功率、成本、失败类型和限制 |
+| R16.6 | `DONE` | 回归门禁 | 新策略不能在无解释的情况下显著降低质量或扩大成本 |
+
+### 8.5 R16 当前实现
+
+- `evals/r16/task-set.json` 固定三个带缺陷的独立 Git Fixture，保存任务 Prompt、成功标准、验证命令、预算和内容 SHA-256。
+- `npm run eval:cli-agent:model` 使用当前活动 Provider/Model 创建全新仓库，支持单 Agent、Explorer、Reviewer、Planner/Worker/Reviewer 和自动策略。
+- 比较器拒绝不同 Task Set、Model、Prompt、仓库基线或预算进入同一报告；策略要求的 Agent 未真正创建时记录为 `strategy_protocol`，不会误算多 Agent 成功。
+- 报告同时统计成功率、验证、Reviewer 发现、Repair、无效委派、Handoff、Token、费用、Turn、时长、成功成本和边际收益，并输出 JSON 与 Markdown。
+- Mode、Agent 创建、Backend 选择、Scheduler 选择/排队、Automation 等待、Retry 和 Repair 使用稳定 Reason Code；详细 Workflow View 展示解释，默认进度面板仍不增加百分比或预计时间。
+- 回归门禁拒绝不可比较报告、显著成功率/验证回归、无质量收益的成本扩张和未解释自动决策。
+- 真实 `deepseek/deepseek-v4-pro` 烟测验证了固定任务、外部测试、用量统计、失败分类和 Reason Code 链路；评测过程中发现并修复 Planner 嵌套输出校验与执行前 Workflow 失败边界。
+
+当前明确边界：
+
+- 单次烟测不代表策略质量结论；正式结论需要完整矩阵和重复运行。
+- Reviewer 发现率使用固定缺陷关键词匹配结构化 Handoff，可能低估语义等价表述。
+- 时长预算主动终止；Token 和费用预算在 Run 完成后审计，尚不执行流式硬中断。
 
 ## 9. R17：受治理的 Agent Team
 

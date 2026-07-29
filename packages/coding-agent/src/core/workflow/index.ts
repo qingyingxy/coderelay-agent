@@ -5,6 +5,7 @@ export * from "./autonomous-workflow-runner.ts";
 export * from "./autonomous-workflow-types.ts";
 export * from "./clarification-gate.ts";
 export * from "./controller.ts";
+export * from "./decision-reasons.ts";
 export * from "./direct-plan-upgrade.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";

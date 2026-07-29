@@ -1325,6 +1325,7 @@ export class WorkflowController {
 			sourcePlanId: workflow.currentPlanId,
 			repairForVerificationId: verification.id,
 			repairIteration: iteration,
+			repairReasonCode: "repair.verification_failed",
 			kind: "repair",
 			accessMode: "writer",
 			title: command.title?.trim() || `Repair ${verification.requirementId}`,
@@ -1654,8 +1655,8 @@ export class WorkflowController {
 		const occurredAt = this.#now();
 		const events: WorkflowEventDraft[] = [];
 		let causationId: string | undefined;
-		const deliveryControlTask = task.kind === "control" && workflow.status === "verifying";
-		if (!deliveryControlTask && !isTaskTerminalStatus(task.status)) {
+		const workflowControlTask = task.kind === "control";
+		if (!workflowControlTask && !isTaskTerminalStatus(task.status)) {
 			if (task.status !== "running" && task.status !== "verifying" && task.status !== "blocked") {
 				fail("controller.task_not_failable", `Task ${task.id} cannot fail from ${task.status}`);
 			}

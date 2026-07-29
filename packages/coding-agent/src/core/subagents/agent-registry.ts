@@ -320,6 +320,10 @@ export class AgentRegistry {
 	}
 
 	#emit(instance: AgentInstance, type: AgentRuntimeEventType, message?: string): void {
+		const reasonCodes =
+			type === "created"
+				? [instance.creationReasonCode, instance.backendReasonCode].filter((reasonCode) => reasonCode !== undefined)
+				: undefined;
 		const event: AgentRuntimeEvent = {
 			sequence: ++this.#sequence,
 			agentId: instance.id,
@@ -330,6 +334,7 @@ export class AgentRegistry {
 			eventName: this.#stableEventName(type),
 			occurredAt: this.#now(),
 			message,
+			reasonCodes,
 		};
 		this.#events.push(event);
 		for (const listener of this.#listeners) {

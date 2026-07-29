@@ -1,4 +1,5 @@
 import type { Handoff } from "../subagents/types.ts";
+import type { RepairDecisionReasonCode } from "../workflow/decision-reasons.ts";
 import type {
 	AttemptId,
 	FileModificationRecord,
@@ -83,6 +84,7 @@ export interface DeliveryWorkflowPort {
 
 export interface DeliveryRunResult {
 	readonly status: "completed" | "repair_created" | "failed";
+	readonly reasonCode?: RepairDecisionReasonCode;
 	readonly diff: DeliveryDiff;
 	readonly verifications: readonly VerificationResult[];
 	readonly repairTask?: Task;

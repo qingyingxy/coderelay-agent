@@ -1,3 +1,4 @@
+import type { SchedulingReasonCode } from "./decision-reasons.ts";
 import type { AttemptId, ExecutorKind, Task, TaskAccessMode, TaskId, WorkflowId } from "./types.ts";
 
 export interface TaskDependencyBlock {
@@ -15,6 +16,18 @@ export interface TaskDispatch {
 	readonly taskId: TaskId;
 	readonly executorKind: ExecutorKind;
 	readonly accessMode: TaskAccessMode;
+}
+
+export interface TaskSchedulingDecision {
+	readonly taskId: TaskId;
+	readonly selected: boolean;
+	readonly reasonCode: SchedulingReasonCode;
+	readonly summary: string;
+}
+
+export interface TaskSchedulingEvaluation {
+	readonly dispatches: readonly TaskDispatch[];
+	readonly decisions: readonly TaskSchedulingDecision[];
 }
 
 export interface TaskExecutionRequest {
@@ -157,6 +170,90 @@ export class TaskScheduler {
 	}
 
 	select(tasks: readonly Task[]): readonly TaskDispatch[] {
+		return this.evaluate(tasks).dispatches;
+	}
+
+	evaluate(tasks: readonly Task[]): TaskSchedulingEvaluation {
+		const dispatches = this.#select(tasks);
+		const selectedIds = new Set(dispatches.map(({ taskId }) => taskId));
+		const active = tasks.filter(({ status }) => status === "running" || status === "verifying");
+		const ready = tasks.filter(({ status, kind }) => status === "ready" && kind !== "control");
+		const availableSlots = Math.max(0, this.#maxConcurrency - active.length);
+		const activeAgentCount = active.filter(
+			({ assignment }) => assignment?.executorKind === "main_agent" || assignment?.executorKind === "subagent",
+		).length;
+		const activeJobCount = active.filter(({ assignment }) => assignment?.executorKind === "job").length;
+		const selectedAgentCount = dispatches.filter(({ executorKind: kind }) => kind !== "job").length;
+		const selectedJobCount = dispatches.filter(({ executorKind: kind }) => kind === "job").length;
+		const decisions = ready.map((task): TaskSchedulingDecision => {
+			if (selectedIds.has(task.id)) {
+				return {
+					taskId: task.id,
+					selected: true,
+					reasonCode: "scheduler.selected",
+					summary: `Task ${task.id} selected for ${executorKind(task, this.#agentExecutorKind)}`,
+				};
+			}
+			if (active.some(({ accessMode }) => accessMode === "writer")) {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.writer_active",
+					summary: "A Writer Task is active, so no additional Task can start",
+				};
+			}
+			if (availableSlots === 0) {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.global_capacity_exhausted",
+					summary: "Global Scheduler capacity is exhausted",
+				};
+			}
+			if (active.length > 0 && task.accessMode === "writer") {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.read_only_parallel_only",
+					summary: "Only read-only Tasks may join an active parallel batch",
+				};
+			}
+			if (task.accessMode === "writer" && !this.#writerAvailable) {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.writer_unavailable",
+					summary: "The repository Writer Lease is unavailable",
+				};
+			}
+			const kind = executorKind(task, this.#agentExecutorKind);
+			if (kind === "job" && activeJobCount + selectedJobCount >= this.#maxConcurrentJobs) {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.job_capacity_exhausted",
+					summary: "Job Runtime capacity is exhausted",
+				};
+			}
+			if (kind !== "job" && activeAgentCount + selectedAgentCount >= this.#maxConcurrentAgents) {
+				return {
+					taskId: task.id,
+					selected: false,
+					reasonCode: "scheduler.agent_capacity_exhausted",
+					summary: "Agent Runtime capacity is exhausted",
+				};
+			}
+			return {
+				taskId: task.id,
+				selected: false,
+				reasonCode: "scheduler.global_capacity_exhausted",
+				summary: "A higher-priority ready Task consumed the remaining Scheduler capacity",
+			};
+		});
+		return { dispatches, decisions };
+	}
+
+	#select(tasks: readonly Task[]): readonly TaskDispatch[] {
 		const active = tasks.filter(({ status }) => status === "running" || status === "verifying");
 		if (active.some(({ accessMode }) => accessMode === "writer")) {
 			return [];

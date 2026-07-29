@@ -1,4 +1,9 @@
 import type { AgentProfile } from "../workflow/agent-profile.ts";
+import type {
+	AgentCreationReasonCode,
+	BackendSelectionReasonCode,
+	DecisionReasonCode,
+} from "../workflow/decision-reasons.ts";
 import type { PermissionSet } from "../workflow/runtime-policy.ts";
 import type {
 	AgentId,
@@ -93,6 +98,8 @@ export interface AgentInstance {
 	readonly scope: AgentScope;
 	readonly backend: AgentBackend;
 	readonly backendReason?: string;
+	readonly backendReasonCode?: BackendSelectionReasonCode;
+	readonly creationReasonCode?: AgentCreationReasonCode;
 	readonly enforcementPlan?: AgentEnforcementPlan;
 	readonly sandbox?: SandboxVerification;
 	readonly workspace?: AgentWorkspace;
@@ -213,6 +220,7 @@ export interface AgentRuntimeEvent {
 	readonly eventName: StableSubagentEventName;
 	readonly occurredAt: IsoDateTime;
 	readonly message?: string;
+	readonly reasonCodes?: readonly DecisionReasonCode[];
 }
 
 export type AgentTranscriptEntryType = "prompt" | "steer" | "assistant" | "activity" | "interrupt" | "resume";
@@ -245,6 +253,7 @@ export interface SpawnSubagentInput {
 	readonly scope?: AgentScope;
 	/** Requested Session backend policy. `auto` remains safety-first and falls back to RPC. */
 	readonly backend?: AgentBackendPolicy;
+	readonly creationReasonCode?: AgentCreationReasonCode;
 	readonly parentAgentId?: AgentId;
 	readonly parentPermission: PermissionSet;
 	readonly workflowPermission: PermissionSet;

@@ -19,7 +19,7 @@ import {
 	sumResourceUsage,
 } from "./runtime-policy.ts";
 import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY } from "./runtime-registry.ts";
-import { type TaskDispatch, TaskScheduler } from "./scheduler.ts";
+import { type TaskDispatch, TaskScheduler, type TaskSchedulingDecision } from "./scheduler.ts";
 import { WorkflowStore } from "./stores.ts";
 import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
@@ -81,6 +81,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 	readonly #workflowId: string;
 	readonly #createId: (kind: "command" | "plan") => string;
 	readonly #snapshotStore: SessionWorkflowSnapshotStore;
+	#lastSchedulingDecisions: readonly TaskSchedulingDecision[] = [];
 
 	private constructor(
 		controller: WorkflowController,
@@ -274,6 +275,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			statusLine,
 			reportLines,
 			budgetStatus: this.budgetStatusLine,
+			schedulingDecisions: this.#lastSchedulingDecisions,
 		});
 	}
 
@@ -313,34 +315,38 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 
 	selectDispatches(maxConcurrency: number): readonly TaskDispatch[] {
 		const budget = this.workflow.budget;
-		return new TaskScheduler({
+		const evaluation = new TaskScheduler({
 			maxConcurrency,
 			maxConcurrentAgents: budget.maxConcurrentAgents,
 			maxConcurrentJobs: budget.maxConcurrentJobs,
-		}).select(this.tasks);
+		}).evaluate(this.tasks);
+		this.#lastSchedulingDecisions = evaluation.decisions;
+		return evaluation.dispatches;
 	}
 
 	selectSubagentDispatches(maxConcurrency: number): readonly TaskDispatch[] {
 		const budget = this.workflow.budget;
-		return new TaskScheduler({
+		const evaluation = new TaskScheduler({
 			maxConcurrency,
 			maxConcurrentAgents: budget.maxConcurrentAgents,
 			maxConcurrentJobs: 0,
 			agentExecutorKind: "subagent",
 			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
-		}).select(this.tasks);
+		}).evaluate(this.tasks);
+		this.#lastSchedulingDecisions = evaluation.decisions;
+		return evaluation.dispatches;
 	}
 
 	selectJobDispatches(maxConcurrency: number): readonly TaskDispatch[] {
 		const budget = this.workflow.budget;
-		return new TaskScheduler({
+		const evaluation = new TaskScheduler({
 			maxConcurrency,
 			maxConcurrentAgents: 0,
 			maxConcurrentJobs: budget.maxConcurrentJobs,
 			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
-		})
-			.select(this.tasks)
-			.filter(({ executorKind }) => executorKind === "job");
+		}).evaluate(this.tasks);
+		this.#lastSchedulingDecisions = evaluation.decisions;
+		return evaluation.dispatches.filter(({ executorKind }) => executorKind === "job");
 	}
 
 	async startJobTask(runtime: JobRuntime, taskId: string): Promise<JobTaskExecution> {
@@ -491,6 +497,12 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					profileSource: input.profileSource ?? (input.profile ? "runtime" : "builtin"),
 					profileSourcePath: input.profileSourcePath,
 					scope: "task",
+					creationReasonCode:
+						task.kind === "repair"
+							? "agent.repair_task_ready"
+							: task.accessMode === "writer"
+								? "agent.writer_task_ready"
+								: "agent.read_only_task_ready",
 					parentAgentId: input.parentAgentId,
 					parentPermission: input.parentPermission ?? FULL_PERMISSION_SET,
 					workflowPermission: input.workflowPermission ?? FULL_PERMISSION_SET,
@@ -575,7 +587,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 	): Promise<readonly WorkflowTaskExecution[]> {
 		this.refreshTaskReadiness();
 		const budget = this.workflow.budget;
-		const dispatches = new TaskScheduler({
+		const evaluation = new TaskScheduler({
 			maxConcurrency,
 			maxConcurrentAgents: Math.min(
 				budget.maxConcurrentAgents ?? maxConcurrency,
@@ -584,7 +596,9 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			maxConcurrentJobs: Math.min(budget.maxConcurrentJobs ?? maxConcurrency, jobRuntime.availableSlots),
 			agentExecutorKind: "subagent",
 			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
-		}).select(this.tasks);
+		}).evaluate(this.tasks);
+		this.#lastSchedulingDecisions = evaluation.decisions;
+		const dispatches = evaluation.dispatches;
 		const executions: WorkflowTaskExecution[] = [];
 		try {
 			for (const dispatch of dispatches) {

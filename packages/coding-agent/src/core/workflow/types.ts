@@ -1,3 +1,5 @@
+import type { ModeDecisionReasonCode, RepairDecisionReasonCode } from "./decision-reasons.ts";
+
 export const WORKFLOW_SCHEMA_VERSION = 1;
 
 export type WorkflowId = string;
@@ -109,6 +111,7 @@ export interface UserRequest {
 export interface ModeDecision {
 	readonly mode: ResolvedExecutionMode;
 	readonly source: ModeDecisionSource;
+	readonly reasonCode?: ModeDecisionReasonCode;
 	readonly reason: string;
 	readonly riskLevel: RiskLevel;
 	readonly decidedAt: IsoDateTime;
@@ -287,6 +290,7 @@ export interface Task extends EntityMetadata {
 	readonly sourcePlanStepId?: PlanStepId;
 	readonly repairForVerificationId?: VerificationId;
 	readonly repairIteration?: number;
+	readonly repairReasonCode?: RepairDecisionReasonCode;
 	readonly kind: TaskKind;
 	readonly command?: string;
 	readonly accessMode: TaskAccessMode;

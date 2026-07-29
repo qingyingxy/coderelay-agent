@@ -89,5 +89,29 @@ describe("Planner runtime", () => {
 
 		expect(content.goal).toBe("Implement Plan Mode");
 		expect(() => parsePlannerPlanContent("I would inspect the repository first.")).toThrow(PlannerRuntimeError);
+		expect(() =>
+			parsePlannerPlanContent(
+				JSON.stringify({
+					goal: "Invalid nested content",
+					assumptions: [],
+					steps: [
+						{
+							id: "inspect",
+							title: "Inspect",
+							dependsOn: [],
+							fileIntents: [],
+							verificationRequirementIds: [],
+						},
+					],
+					risks: [],
+					verificationRequirements: [],
+				}),
+			),
+		).toThrowError(
+			expect.objectContaining({
+				code: "planner.output_invalid_shape",
+				message: "Planner response has an invalid steps[0].description",
+			}),
+		);
 	});
 });

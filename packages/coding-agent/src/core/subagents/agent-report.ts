@@ -40,6 +40,7 @@ export function formatAgentDetails(
 		`attempt: ${agent.attemptId} | retry: ${agent.retryCount}${agent.retryOfAgentId ? ` of ${agent.retryOfAgentId}` : ""}`,
 		`profile source: ${agent.profileSource ?? "unknown"}${agent.profileSourcePath ? ` | ${agent.profileSourcePath}` : ""}`,
 		`backend: ${agent.backend}${agent.backendReason ? ` | ${agent.backendReason}` : ""}`,
+		`decision: ${agent.creationReasonCode ?? "legacy"} | backend: ${agent.backendReasonCode ?? "legacy"}`,
 		`enforcement: ${agent.sandbox?.assurance ?? "unverified"} | ${agent.enforcementPlan?.mode ?? "unknown"} | ${agent.enforcementPlan?.digest.slice(0, 12) ?? "(no plan)"}`,
 		`workspace: ${agent.workspace?.id ?? "(current)"} | ${agent.workspace?.kind ?? "current"} | ${agent.workspace?.assurance ?? "shared"} | ${agent.workspace?.path ?? "(not recorded)"}`,
 		`repository: ${agent.workspace?.repositoryIdentity ?? "(not recorded)"}`,
