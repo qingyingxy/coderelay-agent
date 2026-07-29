@@ -8,6 +8,42 @@ import type {
 	WorkspaceRecoveryVerification,
 } from "./types.ts";
 
+export interface WorkspaceProviderCapabilities {
+	readonly isolatedWriters: boolean;
+	readonly conflictAnalysis: boolean;
+	readonly reversibleIntegration: boolean;
+}
+
+export type ArtifactConflictReason =
+	| "dependency_missing"
+	| "path_overlap"
+	| "lockfile_overlap"
+	| "generated_file_overlap"
+	| "patch_rejected"
+	| "baseline_unavailable";
+
+export interface ArtifactConflict {
+	readonly reason: ArtifactConflictReason;
+	readonly path?: string;
+	readonly conflictingArtifactIds: readonly string[];
+	readonly summary: string;
+}
+
+export interface ArtifactConflictAnalysis {
+	readonly artifactId: string;
+	readonly targetFingerprint: string;
+	readonly baselineMatched: boolean;
+	readonly changedSinceBaseline: readonly string[];
+	readonly conflicts: readonly ArtifactConflict[];
+}
+
+export interface ArtifactApplyReceipt {
+	readonly artifactId: string;
+	readonly targetFingerprintBefore: string;
+	readonly targetFingerprintAfter: string;
+	readonly appliedAt: string;
+}
+
 export interface WorkspacePrepareRequest {
 	readonly agentId: string;
 	readonly backend: AgentBackend;
@@ -16,12 +52,19 @@ export interface WorkspacePrepareRequest {
 }
 
 export interface WorkspaceProvider {
+	readonly capabilities?: WorkspaceProviderCapabilities;
 	prepare(request: WorkspacePrepareRequest): Promise<AgentWorkspace>;
 	createArtifact?(
 		workspace: AgentWorkspace,
 		modifications: readonly SubagentModification[],
 	): Promise<WorkspaceArtifact | undefined>;
 	integrateArtifact?(artifact: WorkspaceArtifact): Promise<WorkspaceArtifact>;
+	analyzeArtifact?(
+		artifact: WorkspaceArtifact,
+		integratedArtifacts: readonly WorkspaceArtifact[],
+	): Promise<ArtifactConflictAnalysis>;
+	applyArtifact?(artifact: WorkspaceArtifact): Promise<ArtifactApplyReceipt>;
+	rollbackArtifact?(artifact: WorkspaceArtifact, receipt: ArtifactApplyReceipt): Promise<void>;
 	release(workspace: AgentWorkspace): Promise<void>;
 	recover?(workspaces: readonly AgentWorkspace[]): Promise<void>;
 	validateRecovery?(workspace: AgentWorkspace, artifact?: WorkspaceArtifact): Promise<WorkspaceRecoveryVerification>;

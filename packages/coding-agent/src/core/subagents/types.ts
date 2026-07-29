@@ -48,7 +48,14 @@ export interface AgentWorkspace {
 	readonly assurance?: "shared" | "isolated";
 }
 
-export type WorkspaceArtifactStatus = "created" | "integrated" | "failed";
+export type WorkspaceArtifactStatus =
+	| "created"
+	| "queued"
+	| "integrating"
+	| "integrated"
+	| "conflicted"
+	| "rolled_back"
+	| "failed";
 
 export interface WorkspaceArtifact {
 	readonly id: string;
@@ -59,9 +66,17 @@ export interface WorkspaceArtifact {
 	readonly patchPath: string;
 	readonly patchDigest?: string;
 	readonly changedFiles: readonly string[];
+	readonly workflowId?: WorkflowId;
+	readonly taskId?: TaskId;
+	readonly attemptId?: AttemptId;
+	readonly agentId?: AgentId;
+	readonly dependencyArtifactIds?: readonly string[];
 	readonly status: WorkspaceArtifactStatus;
 	readonly createdAt: IsoDateTime;
 	readonly integratedAt?: IsoDateTime;
+	readonly rolledBackAt?: IsoDateTime;
+	readonly integrationAttemptId?: string;
+	readonly conflictAttemptId?: string;
 	readonly error?: string;
 }
 
@@ -104,6 +119,7 @@ export interface AgentInstance {
 	readonly sandbox?: SandboxVerification;
 	readonly workspace?: AgentWorkspace;
 	readonly artifact?: WorkspaceArtifact;
+	readonly dependencyArtifactIds?: readonly string[];
 	readonly sessionId?: string;
 	readonly sessionReleasedAt?: IsoDateTime;
 	readonly status: AgentInstanceStatus;
@@ -265,6 +281,7 @@ export interface SpawnSubagentInput {
 	readonly retryOfAgentId?: AgentId;
 	readonly recoveryOfAgentId?: AgentId;
 	readonly recoveryContext?: AgentRecoveryContext;
+	readonly dependencyArtifactIds?: readonly string[];
 }
 
 export interface RetrySubagentInput {

@@ -11,6 +11,9 @@ import type {
 	WorkspaceRecoveryVerification,
 } from "./types.ts";
 import {
+	type ArtifactApplyReceipt,
+	type ArtifactConflict,
+	type ArtifactConflictAnalysis,
 	CurrentWorkspaceProvider,
 	type WorkspacePrepareRequest,
 	type WorkspaceProvider,
@@ -160,6 +163,11 @@ function processIsActive(pid: number): boolean {
 }
 
 export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
+	readonly capabilities = {
+		isolatedWriters: true,
+		conflictAnalysis: true,
+		reversibleIntegration: true,
+	} as const;
 	readonly #baseDirectory: string;
 	readonly #artifactDirectory: string;
 	readonly #createId: () => string;
@@ -355,6 +363,119 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		return integrated;
 	}
 
+	async analyzeArtifact(
+		artifact: WorkspaceArtifact,
+		integratedArtifacts: readonly WorkspaceArtifact[],
+	): Promise<ArtifactConflictAnalysis> {
+		const metadata = await this.#requireMetadataById(artifact.workspaceId);
+		const targetFingerprint = await workingTreeFingerprint(metadata.targetRoot);
+		const baselineMatched = targetFingerprint === metadata.baselineFingerprint;
+		const conflicts: ArtifactConflict[] = [];
+		let changedSinceBaseline: readonly string[] = [];
+		try {
+			const changedOutput = await git(metadata.targetRoot, [
+				"diff",
+				"--name-only",
+				"-z",
+				artifact.baselineCommit,
+				"--",
+				".",
+			]);
+			changedSinceBaseline = [
+				...new Set([...changedOutput.split("\0").filter(Boolean), ...(await untrackedFiles(metadata.targetRoot))]),
+			].sort();
+		} catch {
+			conflicts.push({
+				reason: "baseline_unavailable",
+				conflictingArtifactIds: [],
+				summary: `Artifact baseline ${artifact.baselineCommit} is unavailable`,
+			});
+		}
+		const integratedIds = new Set(integratedArtifacts.map(({ id }) => id));
+		for (const dependencyId of artifact.dependencyArtifactIds ?? []) {
+			if (!integratedIds.has(dependencyId)) {
+				conflicts.push({
+					reason: "dependency_missing",
+					conflictingArtifactIds: [],
+					summary: `Dependency Artifact ${dependencyId} has not been integrated`,
+				});
+			}
+		}
+		const changedSet = new Set(changedSinceBaseline);
+		for (const path of artifact.changedFiles.filter((candidate) => changedSet.has(candidate))) {
+			const conflictingArtifactIds = integratedArtifacts
+				.filter(({ changedFiles }) => changedFiles.includes(path))
+				.map(({ id }) => id);
+			const normalized = path.replaceAll("\\", "/").toLowerCase();
+			const reason = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock)$/.test(normalized)
+				? "lockfile_overlap"
+				: /(^|\/)(generated|dist|build|coverage)(\/|$)|\.generated\./.test(normalized)
+					? "generated_file_overlap"
+					: "path_overlap";
+			conflicts.push({
+				reason,
+				path,
+				conflictingArtifactIds,
+				summary: `Target path ${path} changed after the Artifact baseline`,
+			});
+		}
+		if (conflicts.length === 0) {
+			try {
+				await this.#verifyArtifactDigest(artifact);
+				const patch = await readFile(artifact.patchPath, "utf8");
+				if (patch) {
+					await git(metadata.targetRoot, ["apply", "--check", "--binary", artifact.patchPath]);
+				}
+			} catch (error) {
+				conflicts.push({
+					reason: "patch_rejected",
+					conflictingArtifactIds: [],
+					summary: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return {
+			artifactId: artifact.id,
+			targetFingerprint,
+			baselineMatched,
+			changedSinceBaseline,
+			conflicts,
+		};
+	}
+
+	async applyArtifact(artifact: WorkspaceArtifact): Promise<ArtifactApplyReceipt> {
+		const metadata = await this.#requireMetadataById(artifact.workspaceId);
+		await this.#verifyArtifactDigest(artifact);
+		const targetFingerprintBefore = await workingTreeFingerprint(metadata.targetRoot);
+		const patch = await readFile(artifact.patchPath, "utf8");
+		if (patch) {
+			await git(metadata.targetRoot, ["apply", "--check", "--binary", artifact.patchPath]);
+			await git(metadata.targetRoot, ["apply", "--binary", artifact.patchPath]);
+		}
+		return {
+			artifactId: artifact.id,
+			targetFingerprintBefore,
+			targetFingerprintAfter: await workingTreeFingerprint(metadata.targetRoot),
+			appliedAt: new Date(this.#now()).toISOString(),
+		};
+	}
+
+	async rollbackArtifact(artifact: WorkspaceArtifact, receipt: ArtifactApplyReceipt): Promise<void> {
+		const metadata = await this.#requireMetadataById(artifact.workspaceId);
+		const patch = await readFile(artifact.patchPath, "utf8");
+		if (patch) {
+			await git(metadata.targetRoot, ["apply", "--check", "--reverse", "--binary", artifact.patchPath]);
+			await git(metadata.targetRoot, ["apply", "--reverse", "--binary", artifact.patchPath]);
+		}
+		const restoredFingerprint = await workingTreeFingerprint(metadata.targetRoot);
+		if (restoredFingerprint !== receipt.targetFingerprintBefore) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.rollback_mismatch",
+				`Artifact ${artifact.id} rollback did not restore the target baseline`,
+			);
+		}
+	}
+
 	async release(workspace: AgentWorkspace): Promise<void> {
 		if (workspace.kind !== "git-worktree") {
 			await this.#fallback.release(workspace);
@@ -510,6 +631,16 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 
 	async #writeMetadata(metadata: GitWorkspaceMetadata): Promise<void> {
 		await writeFile(this.#metadataPath(metadata), JSON.stringify(metadata, null, 2), "utf8");
+	}
+
+	async #verifyArtifactDigest(artifact: WorkspaceArtifact): Promise<void> {
+		const patch = await readFile(artifact.patchPath, "utf8");
+		if (artifact.patchDigest && createHash("sha256").update(patch).digest("hex") !== artifact.patchDigest) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.artifact_digest_mismatch",
+				`Artifact ${artifact.id} Patch digest does not match`,
+			);
+		}
 	}
 
 	async #metadataFor(workspace: AgentWorkspace): Promise<GitWorkspaceMetadata | undefined> {

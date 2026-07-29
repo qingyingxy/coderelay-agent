@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M0-M7、R0-R17 已完成；M8 正在实施，R18 待实施
+> 状态：M0-M8、R0-R18 已完成
 > 最后更新：2026-07-29
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -406,7 +406,7 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | R15 | `DONE` | 持久化、Retention 与恢复 | 有界 Transcript、Secret 脱敏、版本化 Checkpoint、Artifact 校验和 Recovery Attempt 已完成 |
 | R16 | `DONE` | 真实模型评测与调度解释 | 固定真实任务矩阵、质量/成本报告、Reason Code 和回归门禁已完成 |
 | R17 | `DONE` | 受治理的 Agent Team | Workflow Task Graph 只读投影、受控邮箱、Controller Proposal 准入、Team CLI 和默认候选门禁已完成 |
-| R18 | `TODO` | 多 Writer 与自动集成 | Patch 串行集成、冲突 Attempt、可回滚并执行合并后验证 |
+| R18 | `DONE` | 多 Writer 与自动集成 | 隔离 Workspace Lease、Repository Integration Lease、冲突 Attempt、回滚和合并后验证已完成 |
 
 ## 7. 里程碑
 
@@ -420,7 +420,7 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | M5：作品版本 | `DONE` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 | M6：自动 Workflow | `DONE` | R12 | 自动 Mode、调度、验证和有界 Repair 可以无手动推进地形成闭环 |
 | M7：Subagent 融合 | `DONE` | R13 | 自定义 Agent、统一 Runtime、混合 Backend、Transcript 和控制能力不绕过 Workflow |
-| M8：生产加固 | `IMPLEMENTING` | R14-R18 | R14-R17 已完成；待实现多 Writer 集成 |
+| M8：生产加固 | `DONE` | R14-R18 | 隔离、恢复、评测、受治理 Team 和 opt-in 多 Writer 集成均已完成 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -564,12 +564,13 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-29 | R15 持久化、Retention 与任务级恢复完成 | Transcript 和事件按大小与时间形成物理压缩的版本化 Checkpoint；Secret 写入前脱敏；重启通过 Workspace/Artifact 校验和新的 Recovery Attempt 继续 |
 | 2026-07-29 | R16 真实模型评测与调度解释完成 | 固定真实任务集和五策略对照 Runner 已接入；报告量化质量、成本、失败和边际收益；自动决策使用稳定 Reason Code，并由公平性检查和回归门禁约束 |
 | 2026-07-29 | R17 受治理的 Agent Team 完成 | Team View 直接投影 Workflow Task Graph；邮箱和 Proposal 有界、持久、可审计；Controller 统一依赖、风险、角色、预算和权限准入；CLI 与自由度保护测试完成；默认策略继续受效果门禁限制 |
+| 2026-07-29 | R18 多 Writer Worktree 与自动集成完成 | Writer 使用独立 Worktree Lease；Artifact 通过 Repository Integration Lease 串行应用；重叠生成 Conflict Resolution Attempt；合并后 Review、受影响测试或全局验证失败会回滚并校验目标指纹 |
 
 ## 12. 后续维护
 
-M0-M7、R0-R17 已完成。M8 的 R18 按正式阶段推进：
+M0-M8、R0-R18 已完成。后续维护遵守以下规则：
 
 1. 用 `npm run demo:autonomous-workflow` 验证确定性自动闭环。
 2. 真实模型任务效果单独评测，不与机制正确性测试混合统计。
-3. R18 必须遵守 M8 的阶段门禁，不能先开放多 Writer 再补隔离、集成和回滚。
+3. 多 Writer 保持 opt-in，只有效果门禁证明收益后才能成为默认策略。
 4. 自动流程协议变更必须同步更新 RPC Schema、Workflow View、恢复测试和本路线图。

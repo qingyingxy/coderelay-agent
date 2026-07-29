@@ -21,6 +21,14 @@ import { GitWorktreeWorkspaceProvider } from "./git-worktree-workspace-provider.
 import { parseHandoff } from "./handoff.ts";
 import { DEFAULT_WORKSPACE_INTEGRATION_QUEUE, type WorkspaceIntegrationQueue } from "./integration-queue.ts";
 import {
+	type ConflictResolutionAttempt,
+	type IntegrationAttempt,
+	MultiWriterIntegrationError,
+	type MultiWriterIntegrationPersistence,
+	MultiWriterIntegrationRuntime,
+	type PostIntegrationVerifier,
+} from "./multi-writer-integration.ts";
+import {
 	BaselineSandboxBackend,
 	providerEnvironmentKeys,
 	type SandboxBackend,
@@ -94,6 +102,14 @@ export interface SubagentRuntimeOptions {
 	readonly sandboxBackend?: SandboxBackend;
 	readonly enforcementMode?: EnforcementMode;
 	readonly integrationQueue?: WorkspaceIntegrationQueue;
+	readonly multiWriter?: {
+		readonly maxConcurrentWriters: number;
+		readonly verifier: PostIntegrationVerifier;
+		readonly persistence?: MultiWriterIntegrationPersistence;
+		readonly integrationLeaseRegistry?: WriterLeaseRegistry;
+		readonly integrationLeaseTtlMs?: number;
+		readonly integrationLeaseWaitMs?: number;
+	};
 	readonly retentionPolicy?: SubagentRetentionPolicy;
 	readonly redactor?: SecretRedactor;
 }
@@ -193,6 +209,8 @@ export class SubagentRuntime implements SubagentService {
 	readonly #sandboxBackend: SandboxBackend;
 	readonly #enforcementMode: EnforcementMode;
 	readonly #integrationQueue: WorkspaceIntegrationQueue;
+	readonly #multiWriterIntegration: MultiWriterIntegrationRuntime | undefined;
+	readonly #maxConcurrentWriters: number;
 	readonly #retentionPolicy: SubagentRetentionPolicy;
 	readonly #redactor: SecretRedactor;
 	readonly #unsubscribeRegistry: () => void;
@@ -242,6 +260,25 @@ export class SubagentRuntime implements SubagentService {
 		this.#sandboxBackend = options.sandboxBackend ?? new BaselineSandboxBackend();
 		this.#enforcementMode = options.enforcementMode ?? parseEnforcementMode(process.env.PI_SUBAGENT_ENFORCEMENT);
 		this.#integrationQueue = options.integrationQueue ?? DEFAULT_WORKSPACE_INTEGRATION_QUEUE;
+		this.#maxConcurrentWriters = options.multiWriter?.maxConcurrentWriters ?? 1;
+		if (!Number.isInteger(this.#maxConcurrentWriters) || this.#maxConcurrentWriters < 1) {
+			throw new SubagentRuntimeError(
+				"subagent.invalid_writer_concurrency",
+				"Subagent maxConcurrentWriters must be a positive integer",
+			);
+		}
+		this.#multiWriterIntegration = options.multiWriter
+			? new MultiWriterIntegrationRuntime({
+					workspaceProvider: this.#workspaceProvider,
+					verifier: options.multiWriter.verifier,
+					queue: this.#integrationQueue,
+					persistence: options.multiWriter.persistence,
+					integrationLeaseRegistry: options.multiWriter.integrationLeaseRegistry,
+					integrationLeaseTtlMs: options.multiWriter.integrationLeaseTtlMs,
+					integrationLeaseWaitMs: options.multiWriter.integrationLeaseWaitMs,
+					now: () => new Date(this.#now()).toISOString(),
+				})
+			: undefined;
 		this.#retentionPolicy = options.retentionPolicy ?? DEFAULT_SUBAGENT_RETENTION_POLICY;
 		this.#redactor = options.redactor ?? new SecretRedactor();
 		validateSubagentRetentionPolicy(this.#retentionPolicy);
@@ -263,6 +300,22 @@ export class SubagentRuntime implements SubagentService {
 	availableSlots(workflowId: string): number {
 		const liveAgents = this.registry.list(workflowId).filter(({ status }) => LIVE_AGENT_STATUSES.has(status));
 		return Math.max(0, this.#maxAgents - liveAgents.length);
+	}
+
+	parallelWriterCapacity(): number {
+		return this.#multiWriterIntegration ? this.#maxConcurrentWriters : 1;
+	}
+
+	integrationAttempts(workflowId?: string): readonly IntegrationAttempt[] {
+		return (this.#multiWriterIntegration?.attempts() ?? []).filter(
+			({ artifact }) => workflowId === undefined || artifact.workflowId === workflowId,
+		);
+	}
+
+	conflictAttempts(workflowId?: string): readonly ConflictResolutionAttempt[] {
+		return (this.#multiWriterIntegration?.conflicts() ?? []).filter(
+			({ sourceArtifact }) => workflowId === undefined || sourceArtifact.workflowId === workflowId,
+		);
 	}
 
 	async spawn(input: SpawnSubagentInput): Promise<AgentInstance> {
@@ -403,6 +456,7 @@ export class SubagentRuntime implements SubagentService {
 			retryOfAgentId: input.retryOfAgentId,
 			recoveryOfAgentId: input.recoveryOfAgentId,
 			recoveryContext: input.recoveryContext,
+			dependencyArtifactIds: input.dependencyArtifactIds ? [...input.dependencyArtifactIds] : undefined,
 			effectivePermissions,
 			budget,
 			usage: zeroUsage(),
@@ -476,7 +530,10 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const input = this.#requireInput(agentId);
 		const lease = this.#writerLeaseRegistry.acquire({
-			workspace: agent.workspace?.repositoryIdentity ?? input.cwd,
+			workspace:
+				this.#multiWriterIntegration && agent.workspace?.assurance === "isolated"
+					? agent.workspace.id
+					: (agent.workspace?.repositoryIdentity ?? input.cwd),
 			workflowId: agent.workflowId,
 			taskId: agent.taskId,
 			attemptId: agent.attemptId,
@@ -815,7 +872,7 @@ export class SubagentRuntime implements SubagentService {
 					createdAt: new Date(this.#now()).toISOString(),
 				}),
 			);
-			const artifact = await this.#finalizeWorkspace(agentId);
+			const artifact = await this.#finalizeWorkspace(agentId, parsedHandoff);
 			const handoff: Handoff = artifact
 				? {
 						...parsedHandoff,
@@ -1433,17 +1490,43 @@ export class SubagentRuntime implements SubagentService {
 		].join("\n");
 	}
 
-	async #finalizeWorkspace(agentId: AgentId): Promise<WorkspaceArtifact | undefined> {
+	async #finalizeWorkspace(agentId: AgentId, handoff: Handoff): Promise<WorkspaceArtifact | undefined> {
 		const agent = this.#requireAgent(agentId);
 		const workspace = agent.workspace;
 		if (!workspace || !this.#workspaceProvider.createArtifact) {
 			return undefined;
 		}
-		const artifact = await this.#workspaceProvider.createArtifact(workspace, this.#modifications.get(agentId) ?? []);
-		if (!artifact) {
+		const created = await this.#workspaceProvider.createArtifact(workspace, this.#modifications.get(agentId) ?? []);
+		if (!created) {
 			return undefined;
 		}
+		const artifact: WorkspaceArtifact = {
+			...created,
+			workflowId: agent.workflowId,
+			taskId: agent.taskId,
+			attemptId: agent.attemptId,
+			agentId: agent.id,
+			dependencyArtifactIds: agent.dependencyArtifactIds ? [...agent.dependencyArtifactIds] : undefined,
+		};
 		this.registry.setArtifact(agentId, artifact);
+		if (this.#multiWriterIntegration) {
+			try {
+				const integrated = await this.#multiWriterIntegration.integrate({ artifact, handoff });
+				this.registry.setArtifact(agentId, integrated);
+				return integrated;
+			} catch (error) {
+				const failed =
+					error instanceof MultiWriterIntegrationError
+						? error.artifact
+						: {
+								...artifact,
+								status: "failed" as const,
+								error: error instanceof Error ? error.message : String(error),
+							};
+				this.registry.setArtifact(agentId, failed);
+				throw error;
+			}
+		}
 		if (!this.#workspaceProvider.integrateArtifact) {
 			return artifact;
 		}

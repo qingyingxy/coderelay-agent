@@ -115,13 +115,17 @@ import {
 	formatAgentList,
 	formatAgentRunResult,
 	formatAgentTeam,
+	formatConflictAttempts,
+	formatIntegrationAttempts,
 	formatTeamMessages,
 	formatTeamProposals,
 	GovernedAgentTeam,
 	RpcSubagentSessionFactory,
 	SessionAgentTeamPersistence,
+	SessionMultiWriterIntegrationPersistence,
 	SessionSubagentPersistence,
 	SubagentRuntime,
+	type SubagentRuntimeOptions,
 	type SubagentService,
 	type SubagentSessionFactory,
 	SubagentToolController,
@@ -309,6 +313,8 @@ export interface AgentSessionConfig {
 	agentTeam?: GovernedAgentTeam;
 	/** Optional same-process backend. Runtime policy still limits it to safe read-only Agents. */
 	inProcessSubagentSessionFactory?: SubagentSessionFactory;
+	/** Opt-in multi-Writer integration. Default remains one Writer until evaluation proves a benefit. */
+	multiWriter?: Omit<NonNullable<SubagentRuntimeOptions["multiWriter"]>, "persistence">;
 	/** Optional background Job Runtime override used by tests and embedders. */
 	jobRuntime?: JobRuntime;
 	/** Optional read-only delivery Reviewer override used by tests and embedders. */
@@ -429,6 +435,7 @@ export class AgentSession {
 	private _subagentRuntime: SubagentService | undefined;
 	private _agentTeam: GovernedAgentTeam | undefined;
 	private _inProcessSubagentSessionFactory: SubagentSessionFactory | undefined;
+	private _multiWriter: AgentSessionConfig["multiWriter"];
 	private _subagentToolsInstalled = false;
 	private _subagentTaskCompletions = new Map<string, Promise<AgentRunResult>>();
 	private _jobRuntime: JobRuntime | undefined;
@@ -513,6 +520,7 @@ export class AgentSession {
 		this._subagentRuntime = config.subagentRuntime;
 		this._agentTeam = config.agentTeam;
 		this._inProcessSubagentSessionFactory = config.inProcessSubagentSessionFactory;
+		this._multiWriter = config.multiWriter;
 		this._jobRuntime = config.jobRuntime;
 		this._deliveryReviewer = config.deliveryReviewer;
 
@@ -1542,6 +1550,12 @@ export class AgentSession {
 			sessionFactory: new RpcSubagentSessionFactory(),
 			inProcessSessionFactory: this._inProcessSubagentSessionFactory,
 			persistence: new SessionSubagentPersistence(this.sessionManager),
+			multiWriter: this._multiWriter
+				? {
+						...this._multiWriter,
+						persistence: new SessionMultiWriterIntegrationPersistence(this.sessionManager),
+					}
+				: undefined,
 		});
 		return this._subagentRuntime;
 	}
@@ -2167,6 +2181,7 @@ export class AgentSession {
 			commandName !== "/tasks" &&
 			commandName !== "/task" &&
 			commandName !== "/team" &&
+			commandName !== "/integration" &&
 			commandName !== "/agents" &&
 			commandName !== "/agent" &&
 			commandName !== "/jobs" &&
@@ -2317,6 +2332,22 @@ export class AgentSession {
 						: action === "proposals"
 							? formatTeamProposals(team.proposals(runtime.workflow.id))
 							: formatAgentTeam(team.view(runtime.workflow.id));
+			}
+		} else if (commandName === "/integration") {
+			const runtime = this._planWorkflowRuntime;
+			if (!runtime) {
+				lines = ["No Plan Workflow exists."];
+			} else if (args.length > 1 || (args[0] !== undefined && args[0] !== "conflicts")) {
+				lines = ["Usage: /integration | /integration conflicts"];
+			} else {
+				const subagents = this._getSubagentRuntime();
+				lines =
+					args[0] === "conflicts"
+						? formatConflictAttempts(subagents.conflictAttempts(runtime.workflow.id))
+						: formatIntegrationAttempts(
+								subagents.integrationAttempts(runtime.workflow.id),
+								subagents.parallelWriterCapacity(),
+							);
 			}
 		} else if (commandName === "/agents") {
 			const planRuntime = this._planWorkflowRuntime;

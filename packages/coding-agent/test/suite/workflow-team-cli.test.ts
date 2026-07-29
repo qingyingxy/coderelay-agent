@@ -48,6 +48,8 @@ describe("Agent Team CLI", () => {
 		await harness.session.prompt("/team");
 		await harness.session.prompt("/team messages");
 		await harness.session.prompt("/team proposals");
+		await harness.session.prompt("/integration");
+		await harness.session.prompt("/integration conflicts");
 
 		const output = harness
 			.eventsOfType("message_end")
@@ -59,6 +61,8 @@ describe("Agent Team CLI", () => {
 		expect(output).toContain("Tasks 0/1");
 		expect(output).toContain("Team messages: (none)");
 		expect(output).toContain("Team proposals: (none)");
+		expect(output).toContain("Integration attempts: (none) | Writer capacity: 1");
+		expect(output).toContain("Conflict Resolution Attempts: (none)");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 });

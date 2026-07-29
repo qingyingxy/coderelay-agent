@@ -34,6 +34,7 @@ export type BackendSelectionReasonCode = (typeof BACKEND_SELECTION_REASON_CODES)
 export const SCHEDULING_REASON_CODES = [
 	"scheduler.selected",
 	"scheduler.writer_active",
+	"scheduler.writer_capacity_exhausted",
 	"scheduler.global_capacity_exhausted",
 	"scheduler.agent_capacity_exhausted",
 	"scheduler.job_capacity_exhausted",

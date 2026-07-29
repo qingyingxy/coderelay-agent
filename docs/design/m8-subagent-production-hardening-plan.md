@@ -654,13 +654,30 @@ Writer B ─→ Artifact B ┘
 
 | ID | 状态 | 任务 | 验收标准 |
 |---|---|---|---|
-| R18.1 | `TODO` | 多 Workspace Writer Lease | Writer 只能修改自己的 Worktree |
-| R18.2 | `TODO` | Repository Integration Lease | Artifact 串行进入目标工作区 |
-| R18.3 | `TODO` | 重叠与依赖分析 | 明确可自动集成和必须人工/Agent 解决的情况 |
-| R18.4 | `TODO` | Conflict Attempt | 冲突保留双方历史，不覆盖原 Attempt |
-| R18.5 | `TODO` | 可回滚集成 | 应用失败或验证失败后恢复目标基线 |
-| R18.6 | `TODO` | 合并后验证 | 局部通过不能绕过全局 Completion Gate |
-| R18.7 | `TODO` | 多 Writer 评测 | 只对收益高于额外成本的任务启用 |
+| R18.1 | `DONE` | 多 Workspace Writer Lease | Writer 只能修改自己的 Worktree |
+| R18.2 | `DONE` | Repository Integration Lease | Artifact 串行进入目标工作区 |
+| R18.3 | `DONE` | 重叠与依赖分析 | 明确可自动集成和必须人工/Agent 解决的情况 |
+| R18.4 | `DONE` | Conflict Attempt | 冲突保留双方历史，不覆盖原 Attempt |
+| R18.5 | `DONE` | 可回滚集成 | 应用失败或验证失败后恢复目标基线 |
+| R18.6 | `DONE` | 合并后验证 | 局部通过不能绕过全局 Completion Gate |
+| R18.7 | `DONE` | 多 Writer 评测 | 只对收益高于额外成本的任务启用 |
+
+### 10.6 R18 实现记录
+
+- 多 Writer 是显式 opt-in 能力。启用时，Scheduler 只并发使用隔离 Git Worktree 的 Subagent Writer，并受 `maxConcurrentWriters`、Agent 并发和 Workflow Budget 共同限制；未配置合并后验证器时继续保持单 Writer。
+- Workspace Writer Lease 的键从目标仓库切换为隔离 Worktree ID，因此多个 Writer 不能互相写入对方工作区。共享工作区和 Command Job 仍使用原有单 Writer 规则。
+- `MultiWriterIntegrationRuntime` 按 Repository Identity 排队，并在应用 Artifact 前获取独立的 Repository Integration Lease；Workspace 写入所有权和 Repository 集成所有权是两种不同 Lease。
+- Artifact 保存 Workflow、Task、Attempt、Agent 和依赖 Artifact 绑定。集成前检查内容摘要、共同基线、依赖顺序、目标变更路径、Patch 适用性，以及锁文件和生成文件的特殊重叠。
+- 非重叠 Artifact 即使来自同一旧基线也可以按确定性队列顺序应用。重叠、依赖缺失或 Patch 不可应用时不会静默选择一方，而是生成持久化 `ConflictResolutionAttempt`，保留来源与冲突 Artifact、双方 Handoff、共同基线、目标指纹和分析结果。
+- Artifact 应用后必须由 `PostIntegrationVerifier` 分别证明 Review、受影响测试和全局验证通过。任一门禁失败即反向应用该 Artifact，并校验目标工作区恢复到应用前指纹；回滚失败会升级为明确的终止错误。
+- `/integration` 展示集成 Attempt、Artifact、状态和 Writer 容量；`/integration conflicts` 展示 Conflict Resolution Attempt，不提供绕过队列直接应用 Patch 的命令。
+- 多 Writer 默认候选门禁要求重复运行、显著时长收益、成功率不回退、成本受控、冲突率受控且所有失败验证都证明可回滚。实现完成不等于默认启用。
+
+当前明确边界：
+
+- Conflict Resolution Attempt 保存冲突输入和处理结果，但不会自动猜测冲突内容；解决者必须产出新的不可变 Resolution Artifact，再重新进入同一集成和验证流程。
+- Repository Integration Lease 已提供跨进程原子互斥；进程内队列负责确定性顺序。外部进程长期占用 Lease 时会明确失败，不会在无界等待中隐藏阻塞。
+- 合并后验证通过注入的 Verifier Port 执行，CLI 默认配置不伪造 Review/Test 结果，因此默认仍是单 Writer。
 
 ## 11. CLI 与可观察性
 
@@ -675,6 +692,8 @@ Writer B ─→ Artifact B ┘
 /team
 /team messages
 /team proposals
+/integration
+/integration conflicts
 ```
 
 默认常驻面板保持简洁：

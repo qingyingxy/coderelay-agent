@@ -48,6 +48,8 @@ export interface TaskSchedulerOptions {
 	readonly maxConcurrentAgents?: number;
 	readonly maxConcurrentJobs?: number;
 	readonly writerAvailable?: boolean;
+	readonly allowParallelWriters?: boolean;
+	readonly maxConcurrentWriters?: number;
 	readonly agentExecutorKind?: Extract<ExecutorKind, "main_agent" | "subagent">;
 }
 
@@ -145,6 +147,8 @@ export class TaskScheduler {
 	readonly #maxConcurrentAgents: number;
 	readonly #maxConcurrentJobs: number;
 	readonly #writerAvailable: boolean;
+	readonly #allowParallelWriters: boolean;
+	readonly #maxConcurrentWriters: number;
 	readonly #agentExecutorKind: Extract<ExecutorKind, "main_agent" | "subagent">;
 
 	constructor(options: TaskSchedulerOptions) {
@@ -155,12 +159,16 @@ export class TaskScheduler {
 		this.#maxConcurrentAgents = options.maxConcurrentAgents ?? options.maxConcurrency;
 		this.#maxConcurrentJobs = options.maxConcurrentJobs ?? options.maxConcurrency;
 		this.#writerAvailable = options.writerAvailable ?? true;
+		this.#allowParallelWriters = options.allowParallelWriters ?? false;
+		this.#maxConcurrentWriters = options.maxConcurrentWriters ?? 1;
 		this.#agentExecutorKind = options.agentExecutorKind ?? "main_agent";
 		if (
 			!Number.isInteger(this.#maxConcurrentAgents) ||
 			this.#maxConcurrentAgents < 0 ||
 			!Number.isInteger(this.#maxConcurrentJobs) ||
-			this.#maxConcurrentJobs < 0
+			this.#maxConcurrentJobs < 0 ||
+			!Number.isInteger(this.#maxConcurrentWriters) ||
+			this.#maxConcurrentWriters < 1
 		) {
 			throw new TaskSchedulerError(
 				"scheduler.invalid_executor_concurrency",
@@ -195,11 +203,35 @@ export class TaskScheduler {
 				};
 			}
 			if (active.some(({ accessMode }) => accessMode === "writer")) {
+				if (this.#allowParallelWriters && task.accessMode !== "writer") {
+					return {
+						taskId: task.id,
+						selected: false,
+						reasonCode: "scheduler.global_capacity_exhausted",
+						summary: "A higher-priority Task consumed the remaining Scheduler capacity",
+					};
+				}
+				if (
+					this.#allowParallelWriters &&
+					task.accessMode === "writer" &&
+					active.filter(({ accessMode }) => accessMode === "writer").length < this.#maxConcurrentWriters
+				) {
+					return {
+						taskId: task.id,
+						selected: false,
+						reasonCode: "scheduler.agent_capacity_exhausted",
+						summary: "Agent capacity prevented another isolated Writer from starting",
+					};
+				}
 				return {
 					taskId: task.id,
 					selected: false,
-					reasonCode: "scheduler.writer_active",
-					summary: "A Writer Task is active, so no additional Task can start",
+					reasonCode: this.#allowParallelWriters
+						? "scheduler.writer_capacity_exhausted"
+						: "scheduler.writer_active",
+					summary: this.#allowParallelWriters
+						? "Isolated Writer capacity is exhausted"
+						: "A Writer Task is active, so no additional Task can start",
 				};
 			}
 			if (availableSlots === 0) {
@@ -254,6 +286,9 @@ export class TaskScheduler {
 	}
 
 	#select(tasks: readonly Task[]): readonly TaskDispatch[] {
+		if (this.#allowParallelWriters) {
+			return this.#selectWithIsolatedWriters(tasks);
+		}
 		const active = tasks.filter(({ status }) => status === "running" || status === "verifying");
 		if (active.some(({ accessMode }) => accessMode === "writer")) {
 			return [];
@@ -322,5 +357,59 @@ export class TaskScheduler {
 			executorKind: executorKind(task, this.#agentExecutorKind),
 			accessMode: task.accessMode,
 		}));
+	}
+
+	#selectWithIsolatedWriters(tasks: readonly Task[]): readonly TaskDispatch[] {
+		const active = tasks.filter(({ status }) => status === "running" || status === "verifying");
+		if (active.some((task) => task.accessMode === "writer" && task.assignment?.executorKind !== "subagent")) {
+			return [];
+		}
+		const availableSlots = Math.max(0, this.#maxConcurrency - active.length);
+		if (availableSlots === 0) {
+			return [];
+		}
+		const activeAgentCount = active.filter(
+			({ assignment }) => assignment?.executorKind === "main_agent" || assignment?.executorKind === "subagent",
+		).length;
+		const activeJobCount = active.filter(({ assignment }) => assignment?.executorKind === "job").length;
+		let availableAgentSlots = Math.max(0, this.#maxConcurrentAgents - activeAgentCount);
+		let availableJobSlots = Math.max(0, this.#maxConcurrentJobs - activeJobCount);
+		let availableWriterSlots = Math.max(
+			0,
+			this.#maxConcurrentWriters - active.filter(({ accessMode }) => accessMode === "writer").length,
+		);
+		const selected: TaskDispatch[] = [];
+		for (const task of tasks.filter(({ status, kind }) => status === "ready" && kind !== "control")) {
+			if (selected.length >= availableSlots) {
+				break;
+			}
+			const kind = executorKind(task, this.#agentExecutorKind);
+			if (task.accessMode === "writer") {
+				if (kind !== "subagent" || !this.#writerAvailable || availableWriterSlots === 0) {
+					continue;
+				}
+			}
+			if (kind === "job") {
+				if (availableJobSlots === 0) {
+					continue;
+				}
+				availableJobSlots--;
+			} else {
+				if (availableAgentSlots === 0) {
+					continue;
+				}
+				availableAgentSlots--;
+			}
+			if (task.accessMode === "writer") {
+				availableWriterSlots--;
+			}
+			selected.push({
+				workflowId: task.workflowId,
+				taskId: task.id,
+				executorKind: kind,
+				accessMode: task.accessMode,
+			});
+		}
+		return selected;
 	}
 }

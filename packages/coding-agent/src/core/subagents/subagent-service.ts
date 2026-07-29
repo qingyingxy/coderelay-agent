@@ -1,4 +1,5 @@
 import type { AgentId, HandoffId, WorkflowId } from "../workflow/types.ts";
+import type { ConflictResolutionAttempt, IntegrationAttempt } from "./multi-writer-integration.ts";
 import type {
 	AgentInstance,
 	AgentRunResult,
@@ -17,6 +18,7 @@ import type {
  */
 export interface SubagentService {
 	availableSlots(workflowId: WorkflowId): number;
+	parallelWriterCapacity(): number;
 	spawn(input: SpawnSubagentInput): Promise<AgentInstance>;
 	reserveWriter(agentId: AgentId): string | undefined;
 	send(agentId: AgentId, message: string): Promise<void>;
@@ -30,6 +32,8 @@ export interface SubagentService {
 	getHandoff(handoffId: HandoffId): Handoff | undefined;
 	events(agentId?: AgentId): readonly AgentRuntimeEvent[];
 	getTranscript(agentId: AgentId): AgentTranscriptView;
+	integrationAttempts(workflowId?: WorkflowId): readonly IntegrationAttempt[];
+	conflictAttempts(workflowId?: WorkflowId): readonly ConflictResolutionAttempt[];
 	subscribe(listener: (event: AgentRuntimeEvent) => void): () => void;
 	cancelWorkflow(workflowId: WorkflowId, reason: string): Promise<readonly AgentRunResult[]>;
 	dispose(): Promise<void>;

@@ -325,14 +325,16 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		return evaluation.dispatches;
 	}
 
-	selectSubagentDispatches(maxConcurrency: number): readonly TaskDispatch[] {
+	selectSubagentDispatches(maxConcurrency: number, maxConcurrentWriters = 1): readonly TaskDispatch[] {
 		const budget = this.workflow.budget;
 		const evaluation = new TaskScheduler({
 			maxConcurrency,
 			maxConcurrentAgents: budget.maxConcurrentAgents,
 			maxConcurrentJobs: 0,
 			agentExecutorKind: "subagent",
-			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+			writerAvailable: maxConcurrentWriters > 1 || !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+			allowParallelWriters: maxConcurrentWriters > 1,
+			maxConcurrentWriters,
 		}).evaluate(this.tasks);
 		this.#lastSchedulingDecisions = evaluation.decisions;
 		return evaluation.dispatches;
@@ -490,6 +492,12 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			? (recoverySource.lastError ??
 				"Recovered after the previous runtime stopped before reporting a terminal state")
 			: undefined;
+		const dependencyArtifactIds = runtime
+			.list(workflow.id)
+			.filter(
+				(candidate) => task.dependencyIds.includes(candidate.taskId) && candidate.artifact?.status === "integrated",
+			)
+			.flatMap(({ artifact }) => (artifact ? [artifact.id] : []));
 		const agent = sourceAgentId
 			? await runtime.retry(sourceAgentId, {
 					attemptId,
@@ -512,6 +520,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 								? "agent.writer_task_ready"
 								: "agent.read_only_task_ready",
 					parentAgentId: input.parentAgentId,
+					dependencyArtifactIds,
 					parentPermission: input.parentPermission ?? FULL_PERMISSION_SET,
 					workflowPermission: input.workflowPermission ?? FULL_PERMISSION_SET,
 					taskPermission,
@@ -584,7 +593,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		maxConcurrency: number,
 	): Promise<readonly SubagentTaskExecution[]> {
 		this.refreshTaskReadiness();
-		const dispatches = this.selectSubagentDispatches(maxConcurrency);
+		const dispatches = this.selectSubagentDispatches(maxConcurrency, runtime.parallelWriterCapacity());
 		return Promise.all(dispatches.map(({ taskId }) => this.startSubagentTask(runtime, taskId)));
 	}
 
@@ -603,7 +612,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			),
 			maxConcurrentJobs: Math.min(budget.maxConcurrentJobs ?? maxConcurrency, jobRuntime.availableSlots),
 			agentExecutorKind: "subagent",
-			writerAvailable: !DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+			writerAvailable:
+				subagentRuntime.parallelWriterCapacity() > 1 ||
+				!DEFAULT_WRITER_LEASE_REGISTRY.get(this.workflow.request.cwd),
+			allowParallelWriters: subagentRuntime.parallelWriterCapacity() > 1,
+			maxConcurrentWriters: subagentRuntime.parallelWriterCapacity(),
 		}).evaluate(this.tasks);
 		this.#lastSchedulingDecisions = evaluation.decisions;
 		const dispatches = evaluation.dispatches;

@@ -60,6 +60,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		argumentHint: "[messages|proposals]",
 	},
 	{
+		name: "integration",
+		description: "Show Artifact integration and conflict-resolution state",
+		argumentHint: "[conflicts]",
+	},
+	{
 		name: "jobs",
 		description: "List background Jobs or dispatch ready Command Tasks",
 		argumentHint: "[dispatch [max-concurrency]]",
