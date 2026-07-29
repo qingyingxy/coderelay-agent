@@ -111,6 +111,8 @@ export interface PrepareTaskAttemptCommand extends WorkflowCommandBase {
 	readonly attemptId: AttemptId;
 	readonly assignment: TaskAssignment;
 	readonly writerLeaseId?: string;
+	readonly recoveryOfAttemptId?: AttemptId;
+	readonly recoveryReason?: string;
 }
 
 export interface RefreshTaskReadinessCommand extends WorkflowCommandBase {}
@@ -967,9 +969,30 @@ export class WorkflowController {
 			fail("controller.attempt_exists", `Attempt ${command.attemptId} already exists`);
 		}
 		const attempts = this.#store.listAttempts(task.id);
+		const recoveryAttempt = command.recoveryOfAttemptId
+			? this.#store.getAttempt(command.recoveryOfAttemptId)
+			: undefined;
+		if (
+			command.recoveryOfAttemptId &&
+			(!recoveryAttempt ||
+				recoveryAttempt.taskId !== task.id ||
+				recoveryAttempt.workflowId !== workflow.id ||
+				recoveryAttempt.status !== "interrupted")
+		) {
+			fail(
+				"controller.recovery_attempt_invalid",
+				`Recovery source Attempt ${command.recoveryOfAttemptId} must be interrupted and belong to Task ${task.id}`,
+			);
+		}
+		if (recoveryAttempt && !command.recoveryReason?.trim()) {
+			fail("controller.recovery_reason_required", "Recovery Attempt requires a reason");
+		}
 		const taskUsage = attempts.reduce((usage, attempt) => addUsage(usage, attempt.usage), task.usage);
+		const retryCount = recoveryAttempt
+			? Math.max(0, attempts.filter(({ recoveryOfAttemptId }) => recoveryOfAttemptId === undefined).length - 1)
+			: attempts.length;
 		assertBudgetAvailable(task.budget, taskUsage, {
-			retries: attempts.length,
+			retries: retryCount,
 		});
 		const workflowTasks = this.#store.listTasks(workflow.id);
 		const activeAssignments = workflowTasks
@@ -1005,6 +1028,8 @@ export class WorkflowController {
 			executorKind: command.assignment.executorKind,
 			agentId: command.assignment.agentId,
 			jobId: command.assignment.jobId,
+			recoveryOfAttemptId: recoveryAttempt?.id,
+			recoveryReason: recoveryAttempt ? command.recoveryReason?.trim() : undefined,
 			usage: zeroUsage(),
 		};
 		const attemptCreatedId = this.#eventId();

@@ -5,6 +5,7 @@ import type {
 	SpawnSubagentInput,
 	SubagentModification,
 	WorkspaceArtifact,
+	WorkspaceRecoveryVerification,
 } from "./types.ts";
 
 export interface WorkspacePrepareRequest {
@@ -23,6 +24,7 @@ export interface WorkspaceProvider {
 	integrateArtifact?(artifact: WorkspaceArtifact): Promise<WorkspaceArtifact>;
 	release(workspace: AgentWorkspace): Promise<void>;
 	recover?(workspaces: readonly AgentWorkspace[]): Promise<void>;
+	validateRecovery?(workspace: AgentWorkspace, artifact?: WorkspaceArtifact): Promise<WorkspaceRecoveryVerification>;
 	cleanupOrphans?(ownedWorkspaceIds: ReadonlySet<string>): Promise<readonly string[]>;
 }
 
@@ -46,4 +48,12 @@ export class CurrentWorkspaceProvider implements WorkspaceProvider {
 	}
 
 	async release(_workspace: AgentWorkspace): Promise<void> {}
+
+	async validateRecovery(): Promise<WorkspaceRecoveryVerification> {
+		return {
+			status: "available",
+			checkedAt: new Date().toISOString(),
+			details: ["Current Workspace remains available but is shared with the parent process"],
+		};
+	}
 }

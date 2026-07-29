@@ -10,6 +10,8 @@ import {
 	openSync,
 	readdirSync,
 	readSync,
+	renameSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "fs";
@@ -988,6 +990,20 @@ export class SessionManager {
 		}
 	}
 
+	private _rewriteFileAtomically(): void {
+		if (!this.persist || !this.sessionFile) return;
+		const temporaryPath = `${this.sessionFile}.rewrite-${randomUUID()}.tmp`;
+		try {
+			writeFileSync(temporaryPath, this.fileEntries.map((entry) => `${JSON.stringify(entry)}\n`).join(""), {
+				flag: "wx",
+			});
+			renameSync(temporaryPath, this.sessionFile);
+		} catch (error) {
+			rmSync(temporaryPath, { force: true });
+			throw error;
+		}
+	}
+
 	isPersisted(): boolean {
 		return this.persist;
 	}
@@ -1130,6 +1146,54 @@ export class SessionManager {
 		};
 		this._appendEntry(entry);
 		return entry.id;
+	}
+
+	/**
+	 * Physically retain only selected entries for one custom type.
+	 *
+	 * Children of removed custom entries are reparented to the nearest retained
+	 * ancestor so message history and other extension state keep a valid tree.
+	 */
+	compactCustomEntries(customType: string, retainedEntryIds: ReadonlySet<string>): number {
+		const removed = new Set(
+			this.fileEntries
+				.filter(
+					(entry): entry is CustomEntry =>
+						entry.type === "custom" && entry.customType === customType && !retainedEntryIds.has(entry.id),
+				)
+				.map(({ id }) => id),
+		);
+		if (removed.size === 0) {
+			return 0;
+		}
+		const entriesById = new Map(
+			this.fileEntries
+				.filter((entry): entry is SessionEntry => entry.type !== "session")
+				.map((entry) => [entry.id, entry]),
+		);
+		const retainedEntries: FileEntry[] = [];
+		for (const entry of this.fileEntries) {
+			if (entry.type !== "session" && removed.has(entry.id)) {
+				continue;
+			}
+			if (entry.type === "label" && removed.has(entry.targetId)) {
+				continue;
+			}
+			if (entry.type === "session" || !entry.parentId || !removed.has(entry.parentId)) {
+				retainedEntries.push(entry);
+				continue;
+			}
+			let parentId: string | null = entry.parentId;
+			while (parentId && removed.has(parentId)) {
+				parentId = entriesById.get(parentId)?.parentId ?? null;
+			}
+			retainedEntries.push({ ...entry, parentId });
+		}
+		this.fileEntries = retainedEntries;
+		this._buildIndex();
+		this._rewriteFileAtomically();
+		this.flushed = this.persist;
+		return removed.size;
 	}
 
 	/** Append a session info entry (e.g., display name). Returns entry id. */
@@ -1296,7 +1360,8 @@ export class SessionManager {
 	/**
 	 * Get all session entries (excludes header). Returns a shallow copy.
 	 * The session is append-only: use appendXXX() to add entries, branch() to
-	 * change the leaf pointer. Entries cannot be modified or deleted.
+	 * change the leaf pointer. Core message entries cannot be modified or deleted;
+	 * extension-owned custom records may be compacted through compactCustomEntries().
 	 */
 	getEntries(): SessionEntry[] {
 		return this.fileEntries.filter((e): e is SessionEntry => e.type !== "session");

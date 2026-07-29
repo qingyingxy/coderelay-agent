@@ -1,6 +1,6 @@
 # M8：Subagent 生产加固与受治理团队实施计划
 
-> 状态：实施中（R14 已完成；R15-R18 待实施）
+> 状态：实施中（R14-R15 已完成；R16-R18 待实施）
 > 范围：R14-R18
 > 前置：R13 Subagent Runtime 融合
 > 目标：在不破坏 Workflow 权威状态的前提下，把现有 Subagent 从“功能完整”推进到“隔离可靠、可恢复、可评测、可协作”
@@ -42,7 +42,7 @@ R14 真实执行隔离 + 单 Writer Worktree
 - 成功必须产生结构化 Handoff，并进入 Delivery Verification。
 - Transcript、Agent 事件、前后台控制、steer、interrupt 和 terminal-only resume 已接入。
 
-### 2.2 R14 完成后的剩余缺口
+### 2.2 R15 完成后的剩余缺口
 
 #### 基线 Backend 不是完整操作系统 Sandbox
 
@@ -53,14 +53,6 @@ R14 已将有效权限编译为稳定 Enforcement Plan，并落实 RPC 最小环
 #### 高级 Workspace 集成尚未开放
 
 R14 已实现单 Writer Git Worktree、Patch Artifact、基线校验和串行 Integration Queue。多个 Writer、自动冲突 Attempt、验证失败自动回滚仍属于 R18，不在 R14 范围内。
-
-#### Transcript 没有完整 Retention
-
-Transcript 可以持久化和查询，但尚未形成大小上限、压缩、过期、脱敏和迁移策略。长期会话可能导致内存和 Session 记录持续增长。
-
-#### 恢复以安全中断为主
-
-进程异常后，未知活动 Agent 会恢复为 `interrupted`。该语义正确，但目前不能根据稳定检查点自动创建新 Attempt 并继续未完成工作。
 
 #### 缺少真实模型对比评测
 
@@ -400,13 +392,31 @@ R14 仍然只允许一个 Writer：
 
 | ID | 状态 | 任务 | 验收标准 |
 |---|---|---|---|
-| R15.1 | `TODO` | Transcript Retention | 大小、时间、压缩和删除策略可配置且有界 |
-| R15.2 | `TODO` | Secret Redactor | 凭据不会进入 Transcript、事件和错误报告 |
-| R15.3 | `TODO` | Persistence Schema 版本 | 支持迁移、拒绝未知版本和损坏检测 |
-| R15.4 | `TODO` | Checkpoint 与 Compaction | 可重放结果与压缩前一致 |
-| R15.5 | `TODO` | Recovery Attempt | 中断任务从稳定事实创建新 Attempt |
-| R15.6 | `TODO` | Workspace/Artifact 恢复 | Worktree 和 Patch 可以校验、继续或安全放弃 |
-| R15.7 | `TODO` | 故障注入测试 | 覆盖进程退出、部分写入、损坏记录和重复恢复 |
+| R15.1 | `DONE` | Transcript Retention | 大小、时间、压缩和删除策略可配置且有界 |
+| R15.2 | `DONE` | Secret Redactor | 凭据不会进入 Transcript、事件和错误报告 |
+| R15.3 | `DONE` | Persistence Schema 版本 | 支持迁移、拒绝未知版本和损坏检测 |
+| R15.4 | `DONE` | Checkpoint 与 Compaction | 可重放结果与压缩前一致 |
+| R15.5 | `DONE` | Recovery Attempt | 中断任务从稳定事实创建新 Attempt |
+| R15.6 | `DONE` | Workspace/Artifact 恢复 | Worktree 和 Patch 可以校验、继续或安全放弃 |
+| R15.7 | `DONE` | 故障注入测试 | 覆盖进程退出、部分写入、损坏记录和重复恢复 |
+
+### 7.6 R15 当前实现
+
+- `SubagentRetentionPolicy` 同时限制活动/已释放 Transcript 的条数、单条字符数、总字符数、保留时间、事件数和 Checkpoint 周期。
+- 高频活动和历史尾部压缩进稳定 Checkpoint；Session 只保留最新 Subagent Checkpoint，并使用临时文件替换方式物理压缩旧记录。
+- `SecretRedactor` 在文本进入 Runtime Transcript、Handoff、错误状态和 Persistence Envelope 前运行，同时覆盖已知环境凭据、Bearer、常见 Token 格式和敏感字段。
+- Subagent Persistence 使用 Schema v2 Envelope；旧的无版本记录显式迁移，未知版本、损坏记录和损坏 Worktree 元数据直接拒绝。
+- Checkpoint 保存 Agent、Handoff、事件尾部、有界 Transcript 和 Spawn Input；恢复结果与压缩前的终态结果一致。
+- 重启时活动 Agent 保留为历史 `interrupted`，Scheduler 为原 Task 创建新的 Recovery Attempt；旧 Attempt 不覆盖，基础设施恢复不消耗模型重试次数。
+- Recovery Context 包含来源 Agent/Attempt、最后 Prompt/Assistant、Handoff、Artifact 和 Workspace 校验状态，并在新 Agent Prompt 中明确要求重新验证。
+- 中断 Worktree 可先捕获为不可变 Patch Artifact；Artifact 使用 SHA-256 摘要验证，来源 Worktree 只有在产物安全保留后才释放。
+- `/agent show`、Task Details 和展开进度面板显示 Recovery 来源、原因以及 Workspace 的 `available`、`artifact-only`、`unavailable` 或 `invalid` 状态。
+
+当前明确边界：
+
+- Recovery 恢复的是权威任务事实和稳定产物，不承诺 Provider 能继续原模型 Session。
+- 损坏或摘要不匹配的 Workspace/Artifact 不会自动应用；系统保留诊断并从新的隔离 Workspace 继续。
+- R15 不改变仓库级单 Writer 限制，也不开放 R18 的自动冲突解决和回滚合并。
 
 ## 8. R16：真实模型评测与调度解释
 

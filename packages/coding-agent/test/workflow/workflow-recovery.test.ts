@@ -148,6 +148,7 @@ describe("Workflow Snapshot and recovery", () => {
 			workflowId: "workflow-2",
 			rootTaskId: "root",
 			planId: "plan",
+			budget: { maxRetries: 0 },
 			request: { text: "Recover", cwd: "C:/repo", attachments: [] },
 		});
 		controller.submitPlanForApproval({
@@ -217,6 +218,22 @@ describe("Workflow Snapshot and recovery", () => {
 		});
 		expect(recovered.getTask(agentTask.id)?.status).toBe("ready");
 		expect(recovered.getTask(jobTask.id)?.status).toBe("ready");
+		recovered.prepareTaskAttempt({
+			commandId: "prepare-recovery",
+			workflowId: "workflow-2",
+			taskId: agentTask.id,
+			attemptId: "attempt-agent-recovery",
+			assignment: { executorKind: "subagent", agentId: "agent-2" },
+			recoveryOfAttemptId: "attempt-agent",
+			recoveryReason: "Restarted",
+		});
+		expect(recovered.listAttempts(agentTask.id)[1]).toMatchObject({
+			id: "attempt-agent-recovery",
+			number: 2,
+			status: "queued",
+			recoveryOfAttemptId: "attempt-agent",
+			recoveryReason: "Restarted",
+		});
 	});
 
 	it("releases only a recovered Workflow's stale Writer Lease", () => {

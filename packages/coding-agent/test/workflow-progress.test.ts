@@ -108,6 +108,33 @@ describe("formatWorkflowProgress", () => {
 		expect(lines.join("\n")).not.toMatch(/%|ETA/);
 	});
 
+	it("shows authoritative Recovery Attempt context", () => {
+		const lines = formatWorkflowProgress(
+			workflowView({
+				tasks: [{ id: "one", kind: "agent", status: "running", title: "Resume inspection" }],
+				agents: [
+					{
+						id: "agent-2",
+						taskId: "one",
+						status: "running",
+						profileName: "explorer",
+						backend: "rpc",
+						usage: { turns: 0, inputTokens: 0, outputTokens: 0 },
+						recoveryContext: {
+							sourceAttemptId: "attempt-1",
+							reason: "CLI restarted",
+							workspace: { status: "artifact-only" },
+						},
+					},
+				],
+			}),
+			true,
+		);
+
+		expect(lines).toContain("Current: Resume inspection · Recovery Agent explorer");
+		expect(lines).toContain("  Recovery: Attempt attempt-1 · artifact-only · CLI restarted");
+	});
+
 	it("hides terminal workflows", () => {
 		expect(formatWorkflowProgress(workflowView({ status: "completed" }))).toEqual([]);
 	});

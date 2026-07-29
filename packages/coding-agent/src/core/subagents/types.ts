@@ -52,11 +52,31 @@ export interface WorkspaceArtifact {
 	readonly baselineCommit: string;
 	readonly resultCommit: string;
 	readonly patchPath: string;
+	readonly patchDigest?: string;
 	readonly changedFiles: readonly string[];
 	readonly status: WorkspaceArtifactStatus;
 	readonly createdAt: IsoDateTime;
 	readonly integratedAt?: IsoDateTime;
 	readonly error?: string;
+}
+
+export interface WorkspaceRecoveryVerification {
+	readonly status: "available" | "artifact-only" | "unavailable" | "invalid";
+	readonly checkedAt: IsoDateTime;
+	readonly details: readonly string[];
+}
+
+export interface AgentRecoveryContext {
+	readonly sourceAgentId: AgentId;
+	readonly sourceAttemptId: AttemptId;
+	readonly reason: string;
+	readonly checkpointAt: IsoDateTime;
+	readonly lastPrompt?: string;
+	readonly lastAssistantText?: string;
+	readonly handoff?: Handoff;
+	readonly artifact?: WorkspaceArtifact;
+	readonly artifactPatch?: string;
+	readonly workspace: WorkspaceRecoveryVerification;
 }
 
 export interface AgentInstance {
@@ -83,6 +103,8 @@ export interface AgentInstance {
 	readonly depth: number;
 	readonly retryCount: number;
 	readonly retryOfAgentId?: AgentId;
+	readonly recoveryOfAgentId?: AgentId;
+	readonly recoveryContext?: AgentRecoveryContext;
 	readonly effectivePermissions: PermissionSet;
 	readonly budget: BudgetLimit;
 	readonly usage: ResourceUsage;
@@ -232,11 +254,14 @@ export interface SpawnSubagentInput {
 	readonly taskBudget: BudgetLimit;
 	readonly retryCount?: number;
 	readonly retryOfAgentId?: AgentId;
+	readonly recoveryOfAgentId?: AgentId;
+	readonly recoveryContext?: AgentRecoveryContext;
 }
 
 export interface RetrySubagentInput {
 	readonly attemptId: AttemptId;
 	readonly autoStart?: boolean;
+	readonly recoveryReason?: string;
 }
 
 export interface SubagentSessionConfig {

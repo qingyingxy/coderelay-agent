@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { validateAgentProfile } from "../workflow/agent-profile.ts";
 import {
 	assertBudgetAvailable,
@@ -25,11 +26,24 @@ import {
 	type SandboxHandle,
 } from "./sandbox-backend.ts";
 import { resolveSubagentModelName } from "./subagent-model.ts";
-import type { SubagentPersistence } from "./subagent-persistence.ts";
+import {
+	SUBAGENT_CHECKPOINT_SCHEMA_VERSION,
+	type SubagentCheckpoint,
+	type SubagentPersistence,
+	type SubagentPersistenceRecord,
+} from "./subagent-persistence.ts";
+import {
+	compactTranscript,
+	DEFAULT_SUBAGENT_RETENTION_POLICY,
+	SecretRedactor,
+	type SubagentRetentionPolicy,
+	validateSubagentRetentionPolicy,
+} from "./subagent-retention.ts";
 import type { SubagentService } from "./subagent-service.ts";
 import type {
 	AgentBackend,
 	AgentInstance,
+	AgentRecoveryContext,
 	AgentRunResult,
 	AgentRuntimeEvent,
 	AgentTranscriptEntry,
@@ -42,6 +56,7 @@ import type {
 	SubagentSession,
 	SubagentSessionFactory,
 	WorkspaceArtifact,
+	WorkspaceRecoveryVerification,
 } from "./types.ts";
 import type { WorkspaceProvider } from "./workspace-provider.ts";
 
@@ -78,6 +93,8 @@ export interface SubagentRuntimeOptions {
 	readonly sandboxBackend?: SandboxBackend;
 	readonly enforcementMode?: EnforcementMode;
 	readonly integrationQueue?: WorkspaceIntegrationQueue;
+	readonly retentionPolicy?: SubagentRetentionPolicy;
+	readonly redactor?: SecretRedactor;
 }
 
 export class SubagentRuntimeError extends Error {
@@ -175,6 +192,8 @@ export class SubagentRuntime implements SubagentService {
 	readonly #sandboxBackend: SandboxBackend;
 	readonly #enforcementMode: EnforcementMode;
 	readonly #integrationQueue: WorkspaceIntegrationQueue;
+	readonly #retentionPolicy: SubagentRetentionPolicy;
+	readonly #redactor: SecretRedactor;
 	readonly #unsubscribeRegistry: () => void;
 	readonly #resourceRecovery: Promise<void>;
 	readonly #sessions = new Map<AgentId, SubagentSession>();
@@ -196,7 +215,9 @@ export class SubagentRuntime implements SubagentService {
 	readonly #transcripts = new Map<AgentId, AgentTranscriptEntry[]>();
 	readonly #releasedWorkspaceAgents = new Set<AgentId>();
 	readonly #sandboxHandles = new Map<AgentId, SandboxHandle>();
+	readonly #workspaceRecovery = new Map<AgentId, WorkspaceRecoveryVerification>();
 	#transcriptSequence = 0;
+	#persistenceRecordsSinceCheckpoint = 0;
 
 	constructor(options: SubagentRuntimeOptions) {
 		const sessionFactories = new Map<AgentBackend, SubagentSessionFactory>([["rpc", options.sessionFactory]]);
@@ -220,10 +241,16 @@ export class SubagentRuntime implements SubagentService {
 		this.#sandboxBackend = options.sandboxBackend ?? new BaselineSandboxBackend();
 		this.#enforcementMode = options.enforcementMode ?? parseEnforcementMode(process.env.PI_SUBAGENT_ENFORCEMENT);
 		this.#integrationQueue = options.integrationQueue ?? DEFAULT_WORKSPACE_INTEGRATION_QUEUE;
+		this.#retentionPolicy = options.retentionPolicy ?? DEFAULT_SUBAGENT_RETENTION_POLICY;
+		this.#redactor = options.redactor ?? new SecretRedactor();
+		validateSubagentRetentionPolicy(this.#retentionPolicy);
 		if (!Number.isInteger(this.#maxAgents) || this.#maxAgents < 1) {
 			throw new SubagentRuntimeError("subagent.invalid_max_agents", "Subagent maxAgents must be positive");
 		}
 		this.#restorePersistedState();
+		if (this.#persistence?.compact && this.registry.list().length > 0) {
+			this.#persistence.compact(this.#createCheckpoint());
+		}
 		this.#resourceRecovery = this.#recoverResources();
 		this.#unsubscribeRegistry = this.registry.subscribe((event) => {
 			if (event.type !== "progress") {
@@ -366,6 +393,8 @@ export class SubagentRuntime implements SubagentService {
 			depth,
 			retryCount: input.retryCount ?? 0,
 			retryOfAgentId: input.retryOfAgentId,
+			recoveryOfAgentId: input.recoveryOfAgentId,
+			recoveryContext: input.recoveryContext,
 			effectivePermissions,
 			budget,
 			usage: zeroUsage(),
@@ -419,7 +448,7 @@ export class SubagentRuntime implements SubagentService {
 			);
 			return this.#requireAgent(agentId);
 		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
+			const message = this.#redactor.redactText(error instanceof Error ? error.message : String(error));
 			this.registry.fail(agentId, message);
 			await session.stop().catch(() => undefined);
 			await this.#cleanupAgent(agentId);
@@ -546,6 +575,7 @@ export class SubagentRuntime implements SubagentService {
 
 	async #interrupt(agentId: AgentId, reason: string): Promise<AgentRunResult> {
 		const agent = this.#requireAgent(agentId);
+		const safeReason = this.#redactor.redactText(reason);
 		const existingResult = this.#lastResults.get(agentId);
 		if (existingResult && agent.status === "idle") {
 			await this.release(agentId);
@@ -558,15 +588,15 @@ export class SubagentRuntime implements SubagentService {
 					status: agent.status === "failed" ? "failed" : "interrupted",
 					usage: agent.usage,
 					modifications: [],
-					error: agent.lastError ?? reason,
+					error: agent.lastError ?? safeReason,
 				},
 			);
 		}
 		this.#interrupting.add(agentId);
-		this.#interruptReasons.set(agentId, reason);
-		this.#recordTranscript(agentId, "interrupt", reason);
+		this.#interruptReasons.set(agentId, safeReason);
+		this.#recordTranscript(agentId, "interrupt", safeReason);
 		if (agent.status !== "stopping") {
-			this.registry.transition(agentId, "stopping", reason);
+			this.registry.transition(agentId, "stopping", safeReason);
 		}
 		const session = this.#requireSession(agentId);
 		if (this.#runPromises.has(agentId)) {
@@ -575,7 +605,7 @@ export class SubagentRuntime implements SubagentService {
 		}
 		await session.stop();
 		this.#releaseWriter(agentId);
-		this.registry.transition(agentId, "stopped", reason);
+		this.registry.transition(agentId, "stopped", safeReason);
 		await this.#cleanupAgent(agentId);
 		const result: AgentRunResult = {
 			agentId,
@@ -583,19 +613,21 @@ export class SubagentRuntime implements SubagentService {
 			usage: agent.usage,
 			modifications: [],
 			artifact: agent.artifact,
-			error: reason,
+			error: safeReason,
 		};
 		this.#lastResults.set(agentId, result);
 		return structuredClone(result);
 	}
 
 	async retry(agentId: AgentId, input: RetrySubagentInput): Promise<AgentInstance> {
+		await this.#resourceRecovery;
 		const source = this.#requireAgent(agentId);
 		if (source.status !== "failed" && source.status !== "interrupted" && source.status !== "stopped") {
 			throw new SubagentRuntimeError("subagent.retry_not_allowed", `Agent ${agentId} is ${source.status}`);
 		}
 		const maximum = source.budget.maxRetries ?? 0;
-		if (source.retryCount >= maximum) {
+		const recoveryReason = input.recoveryReason?.trim();
+		if (!recoveryReason && source.retryCount >= maximum) {
 			throw new RuntimePolicyError(
 				"runtime_policy.retry_exhausted",
 				`Agent ${agentId} exhausted ${maximum} retries`,
@@ -603,26 +635,59 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const existingRetry = this.registry
 			.list(source.workflowId)
-			.find(({ retryOfAgentId }) => retryOfAgentId === source.id);
+			.find((agent) =>
+				recoveryReason ? agent.recoveryOfAgentId === source.id : agent.retryOfAgentId === source.id,
+			);
 		if (existingRetry) {
 			throw new RuntimePolicyError(
-				"runtime_policy.retry_exists",
-				`Agent ${agentId} already has retry Agent ${existingRetry.id}`,
+				recoveryReason ? "runtime_policy.recovery_exists" : "runtime_policy.retry_exists",
+				`Agent ${agentId} already has ${recoveryReason ? "recovery" : "retry"} Agent ${existingRetry.id}`,
 			);
 		}
 		const spawnInput = this.#requireInput(agentId);
+		let recoveryContext = recoveryReason ? await this.#buildRecoveryContext(source, recoveryReason) : undefined;
+		if (recoveryContext?.artifact && source.workspace?.kind === "git-worktree") {
+			try {
+				await this.#workspaceProvider.release(source.workspace);
+				this.#releasedWorkspaceAgents.add(source.id);
+				recoveryContext = {
+					...recoveryContext,
+					workspace: {
+						status: "artifact-only",
+						checkedAt: new Date(this.#now()).toISOString(),
+						details: [...recoveryContext.workspace.details, "Source Worktree released after Artifact capture"],
+					},
+				};
+			} catch (error) {
+				recoveryContext = {
+					...recoveryContext,
+					workspace: {
+						...recoveryContext.workspace,
+						details: [
+							...recoveryContext.workspace.details,
+							`Source Worktree retained because release failed: ${this.#redactor.redactText(error instanceof Error ? error.message : String(error))}`,
+						],
+					},
+				};
+			}
+		}
 		const retried = await this.spawn({
 			...spawnInput,
 			attemptId: input.attemptId,
-			retryCount: source.retryCount + 1,
-			retryOfAgentId: source.id,
+			retryCount: recoveryReason ? source.retryCount : source.retryCount + 1,
+			retryOfAgentId: recoveryReason ? undefined : source.id,
+			recoveryOfAgentId: recoveryReason ? source.id : undefined,
+			recoveryContext,
 		});
 		if (input.autoStart ?? true) {
 			const prompt = this.#lastPrompts.get(agentId);
 			if (!prompt) {
 				throw new SubagentRuntimeError("subagent.retry_prompt_missing", `Agent ${agentId} has no prompt to retry`);
 			}
-			await this.send(retried.id, prompt);
+			await this.send(
+				retried.id,
+				recoveryContext ? `${this.#formatRecoveryContext(recoveryContext)}\n\n${prompt}` : prompt,
+			);
 		}
 		return retried;
 	}
@@ -732,14 +797,16 @@ export class SubagentRuntime implements SubagentService {
 			if (!text) {
 				throw new SubagentRuntimeError("subagent.output_missing", `Agent ${agentId} returned no output`);
 			}
-			const parsedHandoff = parseHandoff(text, {
-				id: this.#createId("handoff"),
-				workflowId: agent.workflowId,
-				taskId: agent.taskId,
-				attemptId: agent.attemptId,
-				agentId,
-				createdAt: new Date(this.#now()).toISOString(),
-			});
+			const parsedHandoff = this.#redactor.redact(
+				parseHandoff(text, {
+					id: this.#createId("handoff"),
+					workflowId: agent.workflowId,
+					taskId: agent.taskId,
+					attemptId: agent.attemptId,
+					agentId,
+					createdAt: new Date(this.#now()).toISOString(),
+				}),
+			);
 			const artifact = await this.#finalizeWorkspace(agentId);
 			const handoff: Handoff = artifact
 				? {
@@ -777,7 +844,7 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	async #failRun(agentId: AgentId, error: unknown, startedAt: number): Promise<AgentRunResult> {
-		const fallbackMessage = error instanceof Error ? error.message : String(error);
+		const fallbackMessage = this.#redactor.redactText(error instanceof Error ? error.message : String(error));
 		const message = this.#interrupting.has(agentId)
 			? (this.#interruptReasons.get(agentId) ?? fallbackMessage)
 			: fallbackMessage;
@@ -915,17 +982,17 @@ export class SubagentRuntime implements SubagentService {
 		if (!entries) {
 			return;
 		}
-		entries.push({
+		const entry: AgentTranscriptEntry = {
 			sequence: ++this.#transcriptSequence,
 			agentId,
 			type,
-			text,
+			text: this.#redactor.redactText(text),
 			occurredAt: new Date(this.#now()).toISOString(),
-		});
-		const entry = entries.at(-1);
-		if (entry) {
-			this.#persistence?.append({ kind: "transcript", entry });
-		}
+		};
+		entries.push(entry);
+		const released = this.registry.get(agentId)?.sessionReleasedAt !== undefined;
+		this.#transcripts.set(agentId, [...compactTranscript(entries, this.#retentionPolicy, released, this.#now())]);
+		this.#appendPersistence({ kind: "transcript", entry });
 	}
 
 	#selectBackend(
@@ -968,12 +1035,22 @@ export class SubagentRuntime implements SubagentService {
 		if (!agent) {
 			return;
 		}
-		this.#persistence?.append({
+		if (event.type === "session_released") {
+			this.#transcripts.set(agent.id, [
+				...compactTranscript(this.#transcripts.get(agent.id) ?? [], this.#retentionPolicy, true, this.#now()),
+			]);
+		}
+		this.#appendPersistence({
 			kind: "state",
 			agent,
 			event,
 			handoff: agent.handoffId ? this.registry.getHandoff(agent.handoffId) : undefined,
+			spawnInput: this.#spawnInputs.get(agent.id),
 		});
+		if (event.type === "session_released" && this.#persistence?.compact) {
+			this.#persistence.compact(this.#createCheckpoint());
+			this.#persistenceRecordsSinceCheckpoint = 0;
+		}
 	}
 
 	#restorePersistedState(): void {
@@ -981,19 +1058,51 @@ export class SubagentRuntime implements SubagentService {
 			return;
 		}
 		const records = this.#persistence.load();
+		let checkpoint: SubagentCheckpoint | undefined;
+		for (let index = records.length - 1; index >= 0; index--) {
+			const record = records[index];
+			if (record?.kind === "checkpoint") {
+				checkpoint = record.checkpoint;
+				break;
+			}
+		}
 		const states = records.filter((record) => record.kind === "state");
 		const latestAgents = new Map<AgentId, AgentInstance>();
 		const handoffs = new Map<HandoffId, Handoff>();
-		const events: AgentRuntimeEvent[] = [];
+		const events = new Map<string, AgentRuntimeEvent>();
+		const spawnInputs = new Map<AgentId, SpawnSubagentInput>();
+		const transcripts = new Map<AgentId, AgentTranscriptEntry[]>();
+		if (checkpoint) {
+			for (const agent of checkpoint.agents) {
+				latestAgents.set(agent.id, agent);
+			}
+			for (const handoff of checkpoint.handoffs) {
+				handoffs.set(handoff.id, handoff);
+			}
+			for (const event of checkpoint.events) {
+				events.set(`${event.agentId}:${event.sequence}`, event);
+			}
+			for (const entry of checkpoint.transcripts) {
+				const agentEntries = transcripts.get(entry.agentId) ?? [];
+				agentEntries.push(entry);
+				transcripts.set(entry.agentId, agentEntries);
+			}
+			for (const persisted of checkpoint.spawnInputs) {
+				spawnInputs.set(persisted.agentId, persisted.input);
+			}
+		}
 		for (const record of states) {
 			latestAgents.set(record.agent.id, record.agent);
-			events.push(record.event);
+			events.set(`${record.event.agentId}:${record.event.sequence}`, record.event);
 			if (record.handoff) {
 				handoffs.set(record.handoff.id, record.handoff);
 			}
+			if (record.spawnInput) {
+				spawnInputs.set(record.agent.id, record.spawnInput);
+			}
 		}
 		const recoveredAt = new Date(this.#now()).toISOString();
-		let sequence = Math.max(0, ...events.map((event) => event.sequence));
+		let sequence = Math.max(0, ...[...events.values()].map((event) => event.sequence));
 		const recoveryEvents: AgentRuntimeEvent[] = [];
 		const agents = [...latestAgents.values()].map((agent) => {
 			const wasActive = ACTIVE_AGENT_STATUSES.has(agent.status) || agent.status === "stopping";
@@ -1031,16 +1140,40 @@ export class SubagentRuntime implements SubagentService {
 			}
 			return recovered;
 		});
-		events.push(...recoveryEvents);
-		this.registry.restore(agents, [...handoffs.values()], events);
+		for (const event of recoveryEvents) {
+			events.set(`${event.agentId}:${event.sequence}`, event);
+		}
+		this.registry.restore(
+			agents,
+			[...handoffs.values()],
+			[...events.values()].sort((left, right) => left.sequence - right.sequence),
+		);
+		for (const agent of agents) {
+			const spawnInput = spawnInputs.get(agent.id) ?? this.#reconstructSpawnInput(agent);
+			if (!spawnInput) {
+				continue;
+			}
+			this.#spawnInputs.set(agent.id, spawnInput);
+			this.#workflowBudgets.set(
+				agent.workflowId,
+				inheritBudgetLimits(this.#workflowBudgets.get(agent.workflowId) ?? spawnInput.workflowBudget),
+			);
+			this.#workflowPermissions.set(
+				agent.workflowId,
+				this.#workflowPermissions.has(agent.workflowId)
+					? intersectPermissions(this.#workflowPermissions.get(agent.workflowId)!, spawnInput.workflowPermission)
+					: spawnInput.workflowPermission,
+			);
+		}
 		for (const event of recoveryEvents) {
 			const agent = this.registry.get(event.agentId);
 			if (agent) {
-				this.#persistence.append({
+				this.#appendPersistence({
 					kind: "state",
 					agent,
 					event,
 					handoff: agent.handoffId ? this.registry.getHandoff(agent.handoffId) : undefined,
+					spawnInput: this.#spawnInputs.get(agent.id),
 				});
 			}
 		}
@@ -1067,23 +1200,200 @@ export class SubagentRuntime implements SubagentService {
 			}
 		}
 		for (const record of records) {
-			if (record.kind !== "transcript") {
-				continue;
+			if (record.kind === "transcript") {
+				const entries = transcripts.get(record.entry.agentId) ?? [];
+				if (!entries.some(({ sequence: existing }) => existing === record.entry.sequence)) {
+					entries.push(record.entry);
+				}
+				transcripts.set(record.entry.agentId, entries);
 			}
-			const entries = this.#transcripts.get(record.entry.agentId) ?? [];
-			entries.push(record.entry);
-			this.#transcripts.set(record.entry.agentId, entries);
-			this.#transcriptSequence = Math.max(this.#transcriptSequence, record.entry.sequence);
+		}
+		for (const agent of agents) {
+			const entries = transcripts.get(agent.id) ?? [];
+			const compacted = compactTranscript(
+				entries.sort((left, right) => left.sequence - right.sequence),
+				this.#retentionPolicy,
+				agent.sessionReleasedAt !== undefined,
+				this.#now(),
+			);
+			this.#transcripts.set(agent.id, [...compacted]);
+			for (const entry of compacted) {
+				this.#transcriptSequence = Math.max(this.#transcriptSequence, entry.sequence);
+				if (entry.type === "prompt") {
+					this.#lastPrompts.set(agent.id, entry.text);
+				}
+			}
 		}
 	}
 
 	async #recoverResources(): Promise<void> {
-		const workspaces = this.registry
-			.list()
+		const agents = this.registry.list();
+		const workspaces = agents
 			.map(({ workspace }) => workspace)
 			.filter((workspace): workspace is NonNullable<typeof workspace> => workspace !== undefined);
 		await this.#workspaceProvider.recover?.(workspaces);
+		for (const agent of agents) {
+			if (!agent.workspace) {
+				continue;
+			}
+			const verification = this.#workspaceProvider.validateRecovery
+				? await this.#workspaceProvider.validateRecovery(agent.workspace, agent.artifact)
+				: {
+						status: "unavailable" as const,
+						checkedAt: new Date(this.#now()).toISOString(),
+						details: ["Workspace Provider does not implement recovery verification"],
+					};
+			this.#workspaceRecovery.set(agent.id, verification);
+		}
 		await this.#workspaceProvider.cleanupOrphans?.(new Set(workspaces.map(({ id }) => id)));
+	}
+
+	#appendPersistence(record: SubagentPersistenceRecord): void {
+		if (!this.#persistence) {
+			return;
+		}
+		this.#persistence.append(this.#redactor.redact(record));
+		this.#persistenceRecordsSinceCheckpoint++;
+		if (
+			this.#persistence.compact &&
+			this.#persistenceRecordsSinceCheckpoint >= this.#retentionPolicy.checkpointEveryRecords
+		) {
+			this.#persistence.compact(this.#createCheckpoint());
+			this.#persistenceRecordsSinceCheckpoint = 0;
+		}
+	}
+
+	#createCheckpoint(): SubagentCheckpoint {
+		const agents = this.registry.list();
+		return this.#redactor.redact({
+			schemaVersion: SUBAGENT_CHECKPOINT_SCHEMA_VERSION,
+			createdAt: new Date(this.#now()).toISOString(),
+			agents,
+			handoffs: this.registry.listHandoffs(),
+			events: this.registry.events().slice(-this.#retentionPolicy.maxEvents),
+			transcripts: agents.flatMap((agent) =>
+				compactTranscript(
+					this.#transcripts.get(agent.id) ?? [],
+					this.#retentionPolicy,
+					agent.sessionReleasedAt !== undefined,
+					this.#now(),
+				),
+			),
+			spawnInputs: agents.flatMap((agent) => {
+				const input = this.#spawnInputs.get(agent.id);
+				return input ? [{ agentId: agent.id, input }] : [];
+			}),
+		});
+	}
+
+	#reconstructSpawnInput(agent: AgentInstance): SpawnSubagentInput | undefined {
+		if (!agent.profile || !agent.workspace) {
+			return undefined;
+		}
+		return {
+			workflowId: agent.workflowId,
+			taskId: agent.taskId,
+			attemptId: agent.attemptId,
+			cwd: agent.workspace.repositoryRoot ?? agent.workspace.path,
+			profile: agent.profile,
+			profileSource: agent.profileSource,
+			profileSourcePath: agent.profileSourcePath,
+			scope: agent.scope,
+			backend: agent.backend,
+			parentPermission: agent.effectivePermissions,
+			workflowPermission: agent.effectivePermissions,
+			taskPermission: agent.effectivePermissions,
+			parentBudget: agent.budget,
+			workflowBudget: agent.budget,
+			taskBudget: agent.budget,
+			retryCount: agent.retryCount,
+			retryOfAgentId: agent.retryOfAgentId,
+			recoveryOfAgentId: agent.recoveryOfAgentId,
+			recoveryContext: agent.recoveryContext,
+		};
+	}
+
+	async #buildRecoveryContext(source: AgentInstance, reason: string): Promise<AgentRecoveryContext> {
+		let workspace = this.#workspaceRecovery.get(source.id);
+		if (!workspace && source.workspace) {
+			workspace = this.#workspaceProvider.validateRecovery
+				? await this.#workspaceProvider.validateRecovery(source.workspace, source.artifact)
+				: {
+						status: "unavailable",
+						checkedAt: new Date(this.#now()).toISOString(),
+						details: ["Workspace Provider does not implement recovery verification"],
+					};
+			this.#workspaceRecovery.set(source.id, workspace);
+		}
+		workspace ??= {
+			status: "unavailable",
+			checkedAt: new Date(this.#now()).toISOString(),
+			details: ["Source Agent has no persisted Workspace"],
+		};
+		let artifact = source.artifact;
+		if (!artifact && source.workspace && workspace.status === "available" && this.#workspaceProvider.createArtifact) {
+			try {
+				artifact = await this.#workspaceProvider.createArtifact(source.workspace, []);
+				if (artifact) {
+					this.registry.setArtifact(source.id, artifact);
+					this.#persistence?.compact?.(this.#createCheckpoint());
+					workspace = {
+						...workspace,
+						details: [...workspace.details, `Captured interrupted changes as Artifact ${artifact.id}`],
+					};
+				}
+			} catch (error) {
+				workspace = {
+					status: "invalid",
+					checkedAt: new Date(this.#now()).toISOString(),
+					details: [
+						...workspace.details,
+						`Failed to capture interrupted Workspace: ${this.#redactor.redactText(error instanceof Error ? error.message : String(error))}`,
+					],
+				};
+			}
+		}
+		const transcript = this.#transcripts.get(source.id) ?? [];
+		const lastPrompt = [...transcript].reverse().find(({ type }) => type === "prompt")?.text;
+		const lastAssistantText = [...transcript].reverse().find(({ type }) => type === "assistant")?.text;
+		let artifactPatch: string | undefined;
+		if (artifact && workspace.status !== "invalid") {
+			try {
+				const patch = await readFile(artifact.patchPath, "utf8");
+				const maximumPatchChars = 64 * 1024;
+				artifactPatch =
+					patch.length > maximumPatchChars
+						? `${patch.slice(0, maximumPatchChars)}\n[Recovery Patch truncated by ${patch.length - maximumPatchChars} chars]`
+						: patch;
+			} catch (error) {
+				workspace = {
+					...workspace,
+					details: [
+						...workspace.details,
+						`Artifact Patch could not be loaded into Recovery Context: ${this.#redactor.redactText(error instanceof Error ? error.message : String(error))}`,
+					],
+				};
+			}
+		}
+		return this.#redactor.redact({
+			sourceAgentId: source.id,
+			sourceAttemptId: source.attemptId,
+			reason,
+			checkpointAt: new Date(this.#now()).toISOString(),
+			lastPrompt,
+			lastAssistantText,
+			handoff: source.handoffId ? this.registry.getHandoff(source.handoffId) : undefined,
+			artifact,
+			artifactPatch,
+			workspace,
+		});
+	}
+
+	#formatRecoveryContext(context: AgentRecoveryContext): string {
+		return [
+			"Recovery Attempt context (stable persisted facts; revalidate before relying on them):",
+			JSON.stringify(context),
+		].join("\n");
 	}
 
 	async #finalizeWorkspace(agentId: AgentId): Promise<WorkspaceArtifact | undefined> {

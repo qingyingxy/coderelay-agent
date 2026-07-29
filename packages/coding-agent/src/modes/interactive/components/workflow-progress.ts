@@ -34,7 +34,7 @@ function taskExecutor(view: WorkflowView, taskId: string): string | undefined {
 			["starting", "idle", "running", "waiting", "stopping"].includes(candidate.status),
 	);
 	if (agent) {
-		return `Agent ${agent.profileName}`;
+		return agent.recoveryContext ? `Recovery Agent ${agent.profileName}` : `Agent ${agent.profileName}`;
 	}
 
 	const job = view.jobs.find(
@@ -133,6 +133,15 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 			...activeAgents.map(
 				(agent) =>
 					`  Isolation: ${agent.sandbox?.assurance ?? "unverified"} · ${agent.workspace?.kind ?? "current"} · ${agent.artifact?.status ?? "no artifact"}${agent.sandbox?.missingGuarantees.length ? ` · ${agent.sandbox.missingGuarantees.length} limitation(s)` : ""}`,
+			),
+		);
+		lines.push(
+			...activeAgents.flatMap((agent) =>
+				agent.recoveryContext
+					? [
+							`  Recovery: Attempt ${agent.recoveryContext.sourceAttemptId} · ${agent.recoveryContext.workspace.status} · ${sanitize(agent.recoveryContext.reason)}`,
+						]
+					: [],
 			),
 		);
 		if (activeAgents.length > 0) {

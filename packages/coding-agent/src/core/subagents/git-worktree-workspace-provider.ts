@@ -4,7 +4,12 @@ import { copyFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } fro
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { AgentWorkspace, SubagentModification, WorkspaceArtifact } from "./types.ts";
+import type {
+	AgentWorkspace,
+	SubagentModification,
+	WorkspaceArtifact,
+	WorkspaceRecoveryVerification,
+} from "./types.ts";
 import {
 	CurrentWorkspaceProvider,
 	type WorkspacePrepareRequest,
@@ -305,6 +310,7 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 			baselineCommit: metadata.integrationBaseCommit,
 			resultCommit,
 			patchPath,
+			patchDigest: createHash("sha256").update(patch).digest("hex"),
 			changedFiles: changedOutput.split("\0").filter(Boolean),
 			status: "created",
 			createdAt: new Date(this.#now()).toISOString(),
@@ -399,6 +405,68 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		}
 	}
 
+	async validateRecovery(
+		workspace: AgentWorkspace,
+		artifact?: WorkspaceArtifact,
+	): Promise<WorkspaceRecoveryVerification> {
+		const checkedAt = new Date(this.#now()).toISOString();
+		if (workspace.kind !== "git-worktree") {
+			return this.#fallback.validateRecovery
+				? this.#fallback.validateRecovery(workspace, artifact)
+				: {
+						status: "unavailable",
+						checkedAt,
+						details: ["Fallback Workspace Provider cannot verify recovery state"],
+					};
+		}
+		const details: string[] = [];
+		const metadata = await this.#metadataFor(workspace);
+		const worktreeAvailable = metadata ? await this.#directoryExists(this.#worktreeRoot(metadata)) : false;
+		if (worktreeAvailable) {
+			details.push("Git Worktree and recovery metadata are available");
+		} else {
+			details.push(metadata ? "Git Worktree is missing" : "Git Worktree recovery metadata is missing");
+		}
+		if (!artifact) {
+			return {
+				status: worktreeAvailable ? "available" : "unavailable",
+				checkedAt,
+				details,
+			};
+		}
+		if (!isWithin(this.#artifactDirectory, artifact.patchPath)) {
+			return {
+				status: "invalid",
+				checkedAt,
+				details: [...details, "Artifact path is outside the configured Artifact directory"],
+			};
+		}
+		let patch: string;
+		try {
+			patch = await readFile(artifact.patchPath, "utf8");
+		} catch {
+			return {
+				status: worktreeAvailable ? "available" : "unavailable",
+				checkedAt,
+				details: [...details, "Artifact Patch is missing"],
+			};
+		}
+		const digest = createHash("sha256").update(patch).digest("hex");
+		if (artifact.patchDigest && digest !== artifact.patchDigest) {
+			return {
+				status: "invalid",
+				checkedAt,
+				details: [...details, "Artifact Patch digest does not match persisted metadata"],
+			};
+		}
+		details.push(artifact.patchDigest ? "Artifact Patch digest verified" : "Legacy Artifact Patch is available");
+		return {
+			status: worktreeAvailable ? "available" : "artifact-only",
+			checkedAt,
+			details,
+		};
+	}
+
 	async cleanupOrphans(ownedWorkspaceIds: ReadonlySet<string>): Promise<readonly string[]> {
 		const cleaned: string[] = [];
 		if (!(await this.#directoryExists(this.#baseDirectory))) {
@@ -480,27 +548,46 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 	}
 
 	async #readMetadata(path: string): Promise<GitWorkspaceMetadata | undefined> {
+		let serialized: string;
 		try {
-			const value: unknown = JSON.parse(await readFile(path, "utf8"));
-			if (typeof value !== "object" || value === null || (value as Record<string, unknown>).schemaVersion !== 1) {
+			serialized = await readFile(path, "utf8");
+		} catch (error) {
+			if (error instanceof Error && "code" in error && error.code === "ENOENT") {
 				return undefined;
 			}
-			const metadata = value as GitWorkspaceMetadata;
-			if (
-				typeof metadata.workspace?.id !== "string" ||
-				typeof metadata.workspace?.path !== "string" ||
-				typeof metadata.targetRoot !== "string" ||
-				typeof metadata.branch !== "string" ||
-				typeof metadata.ownerPid !== "number" ||
-				typeof metadata.baselineFingerprint !== "string" ||
-				typeof metadata.integrationBaseCommit !== "string"
-			) {
-				return undefined;
-			}
-			return metadata;
-		} catch {
-			return undefined;
+			throw error;
 		}
+		let value: unknown;
+		try {
+			value = JSON.parse(serialized);
+		} catch (error) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.metadata_corrupt",
+				`Workspace metadata ${path} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (typeof value !== "object" || value === null || (value as Record<string, unknown>).schemaVersion !== 1) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.metadata_corrupt",
+				`Workspace metadata ${path} has an unsupported schema`,
+			);
+		}
+		const metadata = value as GitWorkspaceMetadata;
+		if (
+			typeof metadata.workspace?.id !== "string" ||
+			typeof metadata.workspace?.path !== "string" ||
+			typeof metadata.targetRoot !== "string" ||
+			typeof metadata.branch !== "string" ||
+			typeof metadata.ownerPid !== "number" ||
+			typeof metadata.baselineFingerprint !== "string" ||
+			typeof metadata.integrationBaseCommit !== "string"
+		) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.metadata_corrupt",
+				`Workspace metadata ${path} is missing required fields`,
+			);
+		}
+		return metadata;
 	}
 
 	async #directoryExists(path: string): Promise<boolean> {

@@ -1,6 +1,6 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M0-M7、R0-R14 已完成；M8 正在实施，R15-R18 待实施
+> 状态：M0-M7、R0-R15 已完成；M8 正在实施，R16-R18 待实施
 > 最后更新：2026-07-29
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
@@ -403,7 +403,7 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | 阶段 | 状态 | 范围 | 关键完成条件 |
 |---|---|---|---|
 | R14 | `DONE` | 真实隔离与单 Writer Worktree | Enforcement Plan、最小 RPC 环境、严格保障检查、独立 Worktree、Artifact 和串行集成已完成 |
-| R15 | `TODO` | 持久化、Retention 与恢复 | Transcript 有界，Secret 脱敏，中断任务可创建新 Attempt 继续 |
+| R15 | `DONE` | 持久化、Retention 与恢复 | 有界 Transcript、Secret 脱敏、版本化 Checkpoint、Artifact 校验和 Recovery Attempt 已完成 |
 | R16 | `TODO` | 真实模型评测与调度解释 | 量化单/多 Agent 质量和成本，每个自动决策有原因 |
 | R17 | `TODO` | 受治理的 Agent Team | 共享现有 Task Graph，消息和提议不能绕过 Controller |
 | R18 | `TODO` | 多 Writer 与自动集成 | Patch 串行集成、冲突 Attempt、可回滚并执行合并后验证 |
@@ -420,7 +420,7 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | M5：作品版本 | `DONE` | R11 | 完整 CLI、可重复评测、README、演示和简历证据 |
 | M6：自动 Workflow | `DONE` | R12 | 自动 Mode、调度、验证和有界 Repair 可以无手动推进地形成闭环 |
 | M7：Subagent 融合 | `DONE` | R13 | 自定义 Agent、统一 Runtime、混合 Backend、Transcript 和控制能力不绕过 Workflow |
-| M8：生产加固 | `IMPLEMENTING` | R14-R18 | R14 已完成；待实现恢复、评测、受治理团队和多 Writer 集成 |
+| M8：生产加固 | `IMPLEMENTING` | R14-R18 | R14-R15 已完成；待实现评测、受治理团队和多 Writer 集成 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -561,10 +561,11 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-29 | M7 Subagent Runtime 融合完成 | R13 统一自定义 Agent、工具入口、RPC/In-process Backend、Transcript、Resume、进度和 Workflow 权威绑定 |
 | 2026-07-29 | M8 生产加固完成设计 | R14-R18 依次建设真实隔离、单 Writer Worktree、持久化恢复、效果评测、受治理团队和多 Writer 集成 |
 | 2026-07-29 | R14 真实隔离与单 Writer Worktree 完成 | 有效权限编译为 Enforcement Plan；RPC 使用最小环境；strict 明确拒绝缺失保障；写入经独立 Worktree、Repository Writer Lease、Patch Artifact 和串行 Integration Queue 进入 Delivery Verification |
+| 2026-07-29 | R15 持久化、Retention 与任务级恢复完成 | Transcript 和事件按大小与时间形成物理压缩的版本化 Checkpoint；Secret 写入前脱敏；重启通过 Workspace/Artifact 校验和新的 Recovery Attempt 继续 |
 
 ## 12. 后续维护
 
-M0-M7、R0-R14 已完成。M8 的 R15-R18 按正式阶段推进：
+M0-M7、R0-R15 已完成。M8 的 R16-R18 按正式阶段推进：
 
 1. 用 `npm run demo:autonomous-workflow` 验证确定性自动闭环。
 2. 真实模型任务效果单独评测，不与机制正确性测试混合统计。

@@ -179,6 +179,76 @@ describe("GitWorktreeWorkspaceProvider", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("verifies retained Artifact integrity before recovery", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-recovery-integrity-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: join(root, "workspaces"),
+			artifactDirectory: join(root, "artifacts"),
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-integrity",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+			writeFileSync(join(workspace.path, "file.txt"), "agent result\n", "utf8");
+			const artifact = await provider.createArtifact(workspace, []);
+			expect(artifact).toBeDefined();
+			await expect(provider.validateRecovery(workspace, artifact)).resolves.toMatchObject({
+				status: "available",
+				details: expect.arrayContaining(["Artifact Patch digest verified"]),
+			});
+
+			writeFileSync(artifact!.patchPath, "tampered", "utf8");
+			await expect(provider.validateRecovery(workspace, artifact)).resolves.toMatchObject({
+				status: "invalid",
+			});
+			await provider.release(workspace);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects corrupt recovery metadata without deleting the Worktree", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-corrupt-metadata-"));
+		const repository = join(root, "repository");
+		const workspaceBase = join(root, "workspaces");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: workspaceBase,
+			artifactDirectory: join(root, "artifacts"),
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-corrupt",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+			const repositoryDirectory = readdirSync(workspaceBase)[0]!;
+			const metadataDirectory = join(workspaceBase, repositoryDirectory, "metadata");
+			const metadataFile = readdirSync(metadataDirectory).find((path) => path.endsWith(".json"))!;
+			writeFileSync(join(metadataDirectory, metadataFile), "{invalid", "utf8");
+			const recoveredProvider = new GitWorktreeWorkspaceProvider({
+				baseDirectory: workspaceBase,
+				artifactDirectory: join(root, "artifacts"),
+			});
+
+			await expect(recoveredProvider.cleanupOrphans(new Set())).rejects.toMatchObject({
+				code: "workspace.metadata_corrupt",
+			});
+			expect(existsSync(workspace.path)).toBe(true);
+			await provider.release(workspace);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("WorkspaceIntegrationQueue", () => {

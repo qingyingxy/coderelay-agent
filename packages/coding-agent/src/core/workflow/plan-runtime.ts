@@ -460,8 +460,28 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 						network: false,
 					};
 		const attemptId = `attempt-${randomUUID()}`;
-		const agent = input.retryAgentId
-			? await runtime.retry(input.retryAgentId, { attemptId, autoStart: false })
+		const recoverySource = input.retryAgentId
+			? undefined
+			: runtime
+					.list(workflow.id)
+					.filter(
+						(candidate) =>
+							candidate.taskId === task.id &&
+							candidate.attemptId === task.currentAttemptId &&
+							candidate.status === "interrupted",
+					)
+					.at(-1);
+		const sourceAgentId = input.retryAgentId ?? recoverySource?.id;
+		const recoveryReason = recoverySource
+			? (recoverySource.lastError ??
+				"Recovered after the previous runtime stopped before reporting a terminal state")
+			: undefined;
+		const agent = sourceAgentId
+			? await runtime.retry(sourceAgentId, {
+					attemptId,
+					autoStart: false,
+					recoveryReason,
+				})
 			: await runtime.spawn({
 					workflowId: workflow.id,
 					taskId: task.id,
@@ -497,6 +517,8 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					agentDepth: agent.depth,
 				},
 				writerLeaseId,
+				recoveryOfAttemptId: recoverySource?.attemptId,
+				recoveryReason,
 			});
 			this.#controller.handleRuntimeEvent({
 				type: "attempt_started",
@@ -517,6 +539,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 				`Access mode: ${task.accessMode}`,
 				`Verification requirements: ${task.verificationRequirements.map(({ description }) => description).join("; ")}`,
 			];
+			if (agent.recoveryContext) {
+				promptLines.push(
+					`Recovery context (stable persisted facts; revalidate before relying on them): ${JSON.stringify(agent.recoveryContext)}`,
+				);
+			}
 			if (dependencyHandoffs.length > 0) {
 				promptLines.push(`Dependency Handoff: ${JSON.stringify(aggregateHandoffs(dependencyHandoffs))}`);
 			}

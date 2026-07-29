@@ -314,6 +314,8 @@ export interface Attempt extends EntityMetadata {
 	readonly executorKind: ExecutorKind;
 	readonly agentId?: AgentId;
 	readonly jobId?: JobId;
+	readonly recoveryOfAttemptId?: AttemptId;
+	readonly recoveryReason?: string;
 	readonly startedAt?: IsoDateTime;
 	readonly endedAt?: IsoDateTime;
 	readonly usage: ResourceUsage;

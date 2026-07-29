@@ -70,7 +70,9 @@ export function formatTaskDetails(
 	}
 	for (const attempt of attempts) {
 		const owner = attempt.agentId ?? attempt.jobId ?? "(none)";
-		lines.push(`  #${attempt.number} ${attempt.id} | ${attempt.status} | ${attempt.executorKind}:${owner}`);
+		lines.push(
+			`  #${attempt.number} ${attempt.id} | ${attempt.status} | ${attempt.executorKind}:${owner}${attempt.recoveryOfAttemptId ? ` | recovery of ${attempt.recoveryOfAttemptId}` : ""}`,
+		);
 	}
 	for (const verification of verifications) {
 		lines.push(`  verify ${verification.requirementId} | ${verification.status} | ${verification.summary}`);

@@ -50,6 +50,12 @@ export function formatAgentDetails(
 	if (agent.lastError) {
 		lines.push(`error: ${agent.lastError}`);
 	}
+	if (agent.recoveryContext) {
+		lines.push(
+			`recovery: ${agent.recoveryContext.sourceAgentId} | attempt ${agent.recoveryContext.sourceAttemptId} | workspace ${agent.recoveryContext.workspace.status}`,
+			`recovery reason: ${agent.recoveryContext.reason}`,
+		);
+	}
 	if (agent.sandbox?.missingGuarantees.length) {
 		lines.push(`sandbox limitations: ${agent.sandbox.missingGuarantees.join("; ")}`);
 	}

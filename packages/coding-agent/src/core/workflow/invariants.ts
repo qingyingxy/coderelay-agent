@@ -491,6 +491,12 @@ export function validateAttempt(attempt: Attempt): readonly DomainViolation[] {
 	if (attempt.status !== "failed" && attempt.failure) {
 		violations.push(violation("attempt.unexpected_failure", "Only a failed attempt can have a failure record"));
 	}
+	if (attempt.recoveryOfAttemptId !== undefined && attempt.recoveryOfAttemptId.trim().length === 0) {
+		violations.push(violation("attempt.recovery_source_required", "Recovery Attempt source id is required"));
+	}
+	if (attempt.recoveryOfAttemptId && !attempt.recoveryReason?.trim()) {
+		violations.push(violation("attempt.recovery_reason_required", "Recovery Attempt requires a reason"));
+	}
 
 	return violations;
 }

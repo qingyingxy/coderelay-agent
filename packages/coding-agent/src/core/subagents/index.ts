@@ -10,6 +10,7 @@ export * from "./rpc-session.ts";
 export * from "./sandbox-backend.ts";
 export * from "./subagent-model.ts";
 export * from "./subagent-persistence.ts";
+export * from "./subagent-retention.ts";
 export * from "./subagent-runtime.ts";
 export * from "./subagent-service.ts";
 export * from "./subagent-tools.ts";
