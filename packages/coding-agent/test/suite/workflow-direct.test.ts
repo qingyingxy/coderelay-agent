@@ -1,9 +1,48 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
-import { SessionWorkflowEventLog, WorkflowStore } from "../../src/core/workflow/index.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	EXECUTION_PROTOCOL_VERSION,
+	SessionWorkflowEventLog,
+	type WorkflowExecutionProtocol,
+	WorkflowStore,
+} from "../../src/core/workflow/index.ts";
+import { SubagentRuntime, WorkflowRuntimeRegistry, WriterLeaseRegistry } from "../../src/index.ts";
+import { FakeSubagentSessionFactory, subagentHandoff } from "../workflow/subagent-fixtures.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
+
+const MAIN_EXPLORER_PROTOCOL: WorkflowExecutionProtocol = {
+	version: EXECUTION_PROTOCOL_VERSION,
+	name: "main-explorer",
+	requirements: [
+		{
+			id: "explorer-before-main",
+			stage: "before_main",
+			role: "explorer",
+			required: true,
+			minRuns: 1,
+			maxRuns: 1,
+			failurePolicy: "fail_workflow",
+		},
+	],
+};
+
+const MAIN_REVIEWER_PROTOCOL: WorkflowExecutionProtocol = {
+	version: EXECUTION_PROTOCOL_VERSION,
+	name: "main-reviewer",
+	requirements: [
+		{
+			id: "reviewer-before-delivery",
+			stage: "before_delivery",
+			role: "reviewer",
+			required: true,
+			minRuns: 1,
+			maxRuns: 1,
+			failurePolicy: "fail_workflow",
+		},
+	],
+};
 
 function replayWorkflow(harness: Harness): {
 	readonly store: WorkflowStore;
@@ -102,6 +141,179 @@ describe("Direct Workflow AgentSession integration", () => {
 			changedFiles: ["src/demo.ts"],
 		});
 		expect(harness.session.getWorkflowStatusLine()).toContain("1 task | 1 file | tests: not configured");
+	});
+
+	it("enforces Explorer before main even when the main model does not delegate", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const harness = await createHarness({ subagentRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct", false, MAIN_EXPLORER_PROTOCOL);
+		harness.setResponses([fauxAssistantMessage("Implemented without calling a Subagent tool")]);
+
+		const prompt = harness.session.prompt("Implement a CLI change");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		expect(factory.sessions[0]?.config.profile.name).toBe("explorer");
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "Found the implementation boundary",
+				evidence: [{ path: "src/index.ts", line: 12, note: "Entry point" }],
+			}),
+		);
+		await prompt;
+
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { status: "completed" },
+			agents: [expect.objectContaining({ profileName: "explorer", handoffId: expect.any(String) })],
+			executionProtocol: {
+				satisfied: true,
+				requirements: [
+					expect.objectContaining({
+						id: "explorer-before-main",
+						succeededRuns: 1,
+						satisfied: true,
+					}),
+				],
+			},
+		});
+		expect(
+			harness.session.messages.some(
+				(message) => message.role === "custom" && message.customType === "workflow-protocol-handoff",
+			),
+		).toBe(true);
+	});
+
+	it("cancels a required Explorer without starting the main Agent", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const harness = await createHarness({ subagentRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct", false, MAIN_EXPLORER_PROTOCOL);
+		harness.setResponses([fauxAssistantMessage("Main must not run")]);
+
+		const prompt = harness.session.prompt("Implement a CLI change");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		expect(await harness.session.cancelWorkflow("Cancelled during Explorer")).toBe(true);
+		await expect(prompt).rejects.toThrow();
+
+		expect(factory.sessions[0]?.abortCalls).toBe(1);
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: {
+				status: "cancelled",
+				result: { reason: "Cancelled during Explorer" },
+			},
+		});
+	});
+
+	it("holds Direct completion until the runtime Reviewer approves", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const harness = await createHarness({ subagentRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct", false, MAIN_REVIEWER_PROTOCOL);
+		harness.setResponses([fauxAssistantMessage("Implemented without calling a Reviewer")]);
+
+		const prompt = harness.session.prompt("Implement a CLI change");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		expect(harness.session.getWorkflowView()?.workflow.status).toBe("executing");
+		expect(harness.session.getWorkflowView()?.rootTask?.status).toBe("verifying");
+		expect(factory.sessions[0]?.config.profile.name).toBe("reviewer");
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "Delivery review passed",
+				verificationSummary: ["review:passed"],
+			}),
+		);
+		await prompt;
+
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { status: "completed" },
+			agents: [expect.objectContaining({ profileName: "reviewer", handoffId: expect.any(String) })],
+			executionProtocol: {
+				satisfied: true,
+				requirements: [
+					expect.objectContaining({
+						id: "reviewer-before-delivery",
+						succeededRuns: 1,
+						satisfied: true,
+					}),
+				],
+			},
+		});
+	});
+
+	it("runs one bounded Repair and re-reviews a failed Direct delivery", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const harness = await createHarness({ subagentRuntime });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct", false, {
+			...MAIN_REVIEWER_PROTOCOL,
+			requirements: [
+				{
+					...MAIN_REVIEWER_PROTOCOL.requirements[0],
+					maxRuns: 2,
+					failurePolicy: "retry_once",
+				},
+			],
+		});
+		harness.setResponses([
+			fauxAssistantMessage("Initial implementation"),
+			fauxAssistantMessage("Repaired implementation"),
+		]);
+
+		const prompt = harness.session.prompt("Implement a CLI change");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "A correctness issue remains",
+				verificationSummary: ["review:failed"],
+				unfinishedItems: ["Fix the incorrect branch"],
+			}),
+		);
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(2));
+		factory.sessions[1]?.complete(
+			subagentHandoff({
+				conclusion: "Repair resolved the issue",
+				verificationSummary: ["review:passed"],
+			}),
+		);
+		await prompt;
+
+		const { store, workflowId } = replayWorkflow(harness);
+		const workflow = store.getWorkflow(workflowId);
+		const rootTask = workflow?.rootTaskId ? store.getTask(workflow.rootTaskId) : undefined;
+		expect(rootTask ? store.listAttempts(rootTask.id) : []).toHaveLength(2);
+		expect(store.listVerifications(workflowId).map(({ status }) => status)).toEqual(["failed", "passed"]);
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { status: "completed" },
+			executionProtocol: {
+				satisfied: true,
+				requirements: [
+					expect.objectContaining({
+						failedRuns: 1,
+						succeededRuns: 1,
+					}),
+				],
+			},
+		});
 	});
 
 	it("creates a new Workflow after the previous request reaches a terminal state", async () => {

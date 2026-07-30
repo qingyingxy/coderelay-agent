@@ -2,6 +2,7 @@ import type { Job } from "../jobs/types.ts";
 import type { AgentInstance } from "../subagents/types.ts";
 import type { WorkflowAutomationWaitReason } from "./autonomous-workflow-types.ts";
 import { type DecisionExplanation, resolveModeDecisionReasonCode } from "./decision-reasons.ts";
+import type { ExecutionProtocolView } from "./execution-protocol.ts";
 import type { TaskSchedulingDecision } from "./scheduler.ts";
 import type { Attempt, ExecutionMode, Plan, Task, VerificationResult, Workflow } from "./types.ts";
 import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
@@ -36,6 +37,7 @@ export interface WorkflowView {
 	readonly budgetStatus: string;
 	readonly availableActions: readonly WorkflowViewAction[];
 	readonly stopReason?: string;
+	readonly executionProtocol?: ExecutionProtocolView;
 	readonly automation?: {
 		readonly enabled: boolean;
 		readonly mode: ExecutionMode;

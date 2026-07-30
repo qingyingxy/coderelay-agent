@@ -123,6 +123,30 @@ function validatePlanStep(
 	if (stepKind !== "command" && step.command !== undefined) {
 		violations.push(violation("plan.step_unexpected_command", `Agent Plan step ${step.id} cannot define a command`));
 	}
+	if (stepKind === "command" && step.requiredAgentRole !== undefined) {
+		violations.push(
+			violation("plan.step_unexpected_agent_role", `Command Plan step ${step.id} cannot define an Agent role`),
+		);
+	}
+	const mutatesFiles = step.fileIntents.some(({ action }) => action !== "inspect");
+	if (
+		stepKind === "agent" &&
+		mutatesFiles &&
+		step.requiredAgentRole !== undefined &&
+		step.requiredAgentRole !== "worker"
+	) {
+		violations.push(
+			violation("plan.step_writer_role_required", `Writer Plan step ${step.id} requires the worker role`),
+		);
+	}
+	if (stepKind === "agent" && step.fileIntents.length > 0 && !mutatesFiles && step.requiredAgentRole === "worker") {
+		violations.push(
+			violation(
+				"plan.step_read_only_role_required",
+				`Read-only Plan step ${step.id} cannot require the worker role`,
+			),
+		);
+	}
 	if (hasDuplicates(step.dependsOn)) {
 		violations.push(violation("plan.duplicate_step_dependency", `Plan step ${step.id} dependencies must be unique`));
 	}

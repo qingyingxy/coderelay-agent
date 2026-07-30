@@ -27,6 +27,7 @@ import {
 	type EvaluationReport,
 	type EvaluationRunRecord,
 	type EvaluationStrategy,
+	EXECUTION_PROTOCOL_VERSION,
 	evaluateRegressionGate,
 	formatEvaluationReportMarkdown,
 	ModelRuntime,
@@ -35,6 +36,7 @@ import {
 	SessionSubagentPersistence,
 	SettingsManager,
 	sumResourceUsage,
+	type WorkflowExecutionProtocol,
 	type WorkflowView,
 } from "@earendil-works/pi-coding-agent";
 
@@ -46,13 +48,80 @@ const STRATEGY_INSTRUCTIONS: Readonly<Record<EvaluationStrategy, string>> = {
 	single_agent:
 		"Use only the main Agent. Do not delegate. Diagnose, implement, and verify the task within the main Session.",
 	main_explorer:
-		'You MUST call the "subagent" tool exactly once with subagentType "explorer" before inspecting or editing. Wait for get_subagent_result, use its Handoff, then implement and verify with the main Agent.',
+		"The Workflow Runtime dispatches a required read-only Explorer before the main Agent and injects its structured Handoff. Use that evidence, then implement and verify with the main Agent.",
 	main_reviewer:
-		'Implement the task with the main Agent, then you MUST call the "subagent" tool exactly once with subagentType "reviewer" before final delivery. Wait for get_subagent_result, address valid findings, and re-run verification.',
+		"The Workflow Runtime holds completion after main implementation until a required read-only Reviewer approves the scoped diff.",
 	planner_worker_reviewer:
 		"Create a dependency-aware Plan. Use a Worker for implementation and a read-only Reviewer before delivery. Keep all execution governed by the Workflow.",
 	automatic:
 		"Use the automatic Workflow policy. Delegate only when the expected quality gain justifies the added cost, and verify before delivery.",
+};
+
+const STRATEGY_PROTOCOLS: Readonly<Record<EvaluationStrategy, WorkflowExecutionProtocol>> = {
+	single_agent: {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: "single-agent",
+		requirements: [],
+	},
+	main_explorer: {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: "main-explorer",
+		requirements: [
+			{
+				id: "explorer-before-main",
+				stage: "before_main",
+				role: "explorer",
+				required: true,
+				minRuns: 1,
+				maxRuns: 2,
+				failurePolicy: "retry_once",
+			},
+		],
+	},
+	main_reviewer: {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: "main-reviewer",
+		requirements: [
+			{
+				id: "reviewer-before-delivery",
+				stage: "before_delivery",
+				role: "reviewer",
+				required: true,
+				minRuns: 1,
+				maxRuns: 2,
+				failurePolicy: "retry_once",
+			},
+		],
+	},
+	planner_worker_reviewer: {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: "planner-worker-reviewer",
+		requirements: [
+			{
+				id: "worker-implementation",
+				stage: "implementation",
+				role: "worker",
+				required: true,
+				minRuns: 1,
+				maxRuns: 2,
+				failurePolicy: "retry_once",
+			},
+			{
+				id: "reviewer-before-delivery",
+				stage: "before_delivery",
+				role: "reviewer",
+				required: true,
+				minRuns: 1,
+				maxRuns: 2,
+				failurePolicy: "retry_once",
+			},
+		],
+	},
+	automatic: {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: "automatic",
+		requirements: [],
+	},
 };
 
 interface EvaluationCliOptions {
@@ -62,6 +131,7 @@ interface EvaluationCliOptions {
 	readonly baselineReportPath?: string;
 	readonly verifyTaskSet: boolean;
 	readonly repetitions: number;
+	readonly keepFailedWorkspaces: boolean;
 }
 
 interface CommandResult {
@@ -78,6 +148,7 @@ function parseOptions(args: readonly string[]): EvaluationCliOptions {
 	let taskIds: readonly string[] | undefined;
 	let verifyTaskSet = false;
 	let repetitions = 1;
+	let keepFailedWorkspaces = false;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
 		if (argument === "--strategies") {
@@ -120,9 +191,21 @@ function parseOptions(args: readonly string[]): EvaluationCliOptions {
 			verifyTaskSet = true;
 			continue;
 		}
+		if (argument === "--keep-failed-workspaces") {
+			keepFailedWorkspaces = true;
+			continue;
+		}
 		throw new Error(`Unknown option: ${argument}`);
 	}
-	return { strategies, taskIds, outputDirectory, baselineReportPath, verifyTaskSet, repetitions };
+	return {
+		strategies,
+		taskIds,
+		outputDirectory,
+		baselineReportPath,
+		verifyTaskSet,
+		repetitions,
+		keepFailedWorkspaces,
+	};
 }
 
 function fixtureFiles(root: string, directory = root): readonly string[] {
@@ -294,6 +377,11 @@ async function runEvaluation(
 	modelRuntime: ModelRuntime,
 	model: Awaited<ReturnType<ModelRuntime["getAvailable"]>>[number],
 	modelIdentity: EvaluationModelIdentity,
+	artifacts: {
+		readonly outputDirectory: string;
+		readonly repetition: number;
+		readonly keepFailedWorkspaces: boolean;
+	},
 ): Promise<EvaluationRunRecord> {
 	const runRoot = mkdtempSync(join(tmpdir(), `pi-r16-${task.id}-${strategy}-`));
 	const workspace = join(runRoot, "repository");
@@ -322,7 +410,7 @@ async function runEvaluation(
 		}
 	});
 	try {
-		session.enableWorkflowTracking(strategyMode(strategy), true);
+		session.enableWorkflowTracking(strategyMode(strategy), true, STRATEGY_PROTOCOLS[strategy]);
 		const prompt = [
 			`Evaluation Task: ${task.title}`,
 			task.prompt,
@@ -338,6 +426,7 @@ async function runEvaluation(
 		}
 	} finally {
 		mainSessionUsage = usageFromMessages(session.state.messages);
+		session.exportToJsonl(join(runRoot, "session.jsonl"));
 		unsubscribe();
 		session.dispose();
 	}
@@ -349,19 +438,13 @@ async function runEvaluation(
 		({ exitCode, timedOut }) => exitCode === 0 && !timedOut,
 	).length;
 	const agents = view?.agents ?? [];
-	const requiredProfiles =
-		strategy === "main_explorer"
-			? ["explorer"]
-			: strategy === "main_reviewer"
-				? ["reviewer"]
-				: strategy === "planner_worker_reviewer"
-					? ["worker", "reviewer"]
-					: [];
-	const missingProfiles = requiredProfiles.filter(
-		(profileName) => !agents.some((agent) => agent.profileName === profileName),
-	);
-	if (missingProfiles.length > 0) {
-		limitations.push(`Strategy protocol missing required Agent Profiles: ${missingProfiles.join(", ")}`);
+	const protocolViolations =
+		view?.executionProtocol?.violations ??
+		(STRATEGY_PROTOCOLS[strategy].requirements.some(({ required }) => required)
+			? ["Workflow did not expose execution protocol state"]
+			: []);
+	if (protocolViolations.length > 0) {
+		limitations.push(`Strategy protocol violations: ${protocolViolations.join("; ")}`);
 	}
 	const repairTasks = view?.tasks.filter(({ kind }) => kind === "repair") ?? [];
 	const persistedHandoffs = new Map(
@@ -399,29 +482,53 @@ async function runEvaluation(
 	const succeeded =
 		!runtimeFailure &&
 		!budgetExceeded &&
-		missingProfiles.length === 0 &&
+		protocolViolations.length === 0 &&
 		durationMs <= task.budget.maxDurationMs &&
 		passedVerifications === task.verificationCommands.length;
 	const failedVerification = verificationResults.find(({ exitCode, timedOut }) => exitCode !== 0 || timedOut);
+	const protocolRuntimeFailure = runtimeFailure?.startsWith("Execution protocol") ?? false;
 	const failureType = succeeded
 		? undefined
-		: runtimeFailure
-			? "model"
-			: missingProfiles.length > 0
-				? "strategy_protocol"
+		: protocolRuntimeFailure || (!runtimeFailure && protocolViolations.length > 0)
+			? "strategy_protocol"
+			: runtimeFailure
+				? "model"
 				: budgetExceeded
 					? "budget"
 					: durationMs > task.budget.maxDurationMs || failedVerification?.timedOut
 						? "timeout"
 						: "verification";
 	const failureMessage =
-		runtimeFailure ??
-		(missingProfiles.length > 0
-			? `Strategy did not create required Agent Profiles: ${missingProfiles.join(", ")}`
-			: undefined) ??
+		(protocolRuntimeFailure || (!runtimeFailure && protocolViolations.length > 0)
+			? `Strategy protocol did not complete: ${protocolViolations.join("; ")}`
+			: runtimeFailure) ??
 		(failedVerification
 			? `${failedVerification.stderr || failedVerification.stdout}`.trim().slice(0, 4_000)
 			: undefined);
+	if (!succeeded && artifacts.keepFailedWorkspaces) {
+		const artifactDirectory = join(
+			artifacts.outputDirectory,
+			"failures",
+			`${strategy}-${task.id}-run-${artifacts.repetition}`,
+		);
+		mkdirSync(dirname(artifactDirectory), { recursive: true });
+		writeFileSync(join(runRoot, "workflow-view.json"), `${JSON.stringify(view, null, 2)}\n`, "utf8");
+		writeFileSync(
+			join(runRoot, "handoffs.json"),
+			`${JSON.stringify([...persistedHandoffs.values()], null, 2)}\n`,
+			"utf8",
+		);
+		writeFileSync(
+			join(runRoot, "verification-results.json"),
+			`${JSON.stringify(verificationResults, null, 2)}\n`,
+			"utf8",
+		);
+		const diff = await runCommand("git diff HEAD --no-ext-diff", workspace, task.budget.maxDurationMs);
+		writeFileSync(join(runRoot, "delivery.diff"), diff.stdout, "utf8");
+		rmSync(artifactDirectory, { recursive: true, force: true });
+		cpSync(runRoot, artifactDirectory, { recursive: true });
+		limitations.push(`Failure artifacts retained at ${artifactDirectory}`);
+	}
 	rmSync(runRoot, { recursive: true, force: true });
 	return {
 		schemaVersion: EVALUATION_SCHEMA_VERSION,
@@ -435,7 +542,7 @@ async function runEvaluation(
 		promptDigest: `sha256:${createHash("sha256").update(task.prompt).digest("hex")}`,
 		promptVersion: task.promptVersion,
 		strategyPromptDigest: `sha256:${createHash("sha256").update(STRATEGY_INSTRUCTIONS[strategy]).digest("hex")}`,
-		strategyProtocolVersion: "r16-strategy-v1",
+		strategyProtocolVersion: EXECUTION_PROTOCOL_VERSION,
 		budget: task.budget,
 		startedAt,
 		endedAt: new Date().toISOString(),
@@ -446,9 +553,9 @@ async function runEvaluation(
 		validReviewerFindings,
 		repairAttempts: repairTasks.length,
 		successfulRepairs: repairTasks.filter(({ status }) => status === "succeeded").length,
-		delegations: agents.length + missingProfiles.length,
+		delegations: agents.length + protocolViolations.length,
 		invalidDelegations:
-			agents.filter(({ status, handoffId }) => status === "failed" && !handoffId).length + missingProfiles.length,
+			agents.filter(({ status, handoffId }) => status === "failed" && !handoffId).length + protocolViolations.length,
 		handoffs: agents.length,
 		completeHandoffs: agents.filter(({ handoffId }) => handoffId !== undefined && persistedHandoffs.has(handoffId))
 			.length,
@@ -511,7 +618,11 @@ if (options.verifyTaskSet) {
 		for (let repetition = 1; repetition <= options.repetitions; repetition++) {
 			for (const task of selectedTasks) {
 				console.log(`[RUN] ${strategy} / ${task.id} / ${repetition}`);
-				const run = await runEvaluation(selectedTaskSet, task, strategy, modelRuntime, model, modelIdentity);
+				const run = await runEvaluation(selectedTaskSet, task, strategy, modelRuntime, model, modelIdentity, {
+					outputDirectory: options.outputDirectory,
+					repetition,
+					keepFailedWorkspaces: options.keepFailedWorkspaces,
+				});
 				runs.push(run);
 				console.log(`[${run.succeeded ? "PASS" : "FAIL"}] ${strategy} / ${task.id} / ${repetition}`);
 			}

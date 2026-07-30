@@ -192,6 +192,13 @@ export interface CompleteTaskCommand extends WorkflowCommandBase {
 	readonly handoffId?: string;
 }
 
+export interface RejectTaskVerificationCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly verificationId: VerificationId;
+	readonly summary: string;
+	readonly evidenceRefs?: readonly string[];
+}
+
 export interface BeginDeliveryVerificationCommand extends WorkflowCommandBase {}
 
 export interface RecordDeliveryVerificationCommand extends WorkflowCommandBase {
@@ -1191,6 +1198,73 @@ export class WorkflowController {
 		return this.#commit(command, events);
 	}
 
+	rejectTaskVerification(command: RejectTaskVerificationCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		const verification = this.#store.getVerification(command.verificationId);
+		const verificationRevision = this.#store.getVerificationRevision(command.verificationId);
+		if (!verification || verificationRevision === undefined || verification.status !== "running") {
+			fail("controller.verification_not_running", `Verification ${command.verificationId} must be running`);
+		}
+		if (verification.workflowId !== workflow.id || verification.taskId !== task.id) {
+			fail(
+				"controller.verification_owner_mismatch",
+				`Verification ${verification.id} does not belong to task ${task.id}`,
+			);
+		}
+		if (workflow.status !== "executing" || task.status !== "verifying") {
+			fail("controller.task_not_verifying", `Task ${task.id} is not awaiting Verification`);
+		}
+		const summary = command.summary.trim();
+		if (!summary) {
+			fail("controller.verification_summary_required", "Verification failure summary is required");
+		}
+		const occurredAt = this.#now();
+		const verificationFailedId = this.#eventId();
+		const events: readonly WorkflowEventDraft[] = [
+			{
+				eventId: verificationFailedId,
+				entityId: verification.id,
+				entityRevision: verificationRevision + 1,
+				eventType: "verification.failed",
+				occurredAt,
+				actor: { kind: "agent", id: "reviewer" },
+				payload: {
+					result: {
+						...verification,
+						status: "failed",
+						summary,
+						evidenceRefs: structuredClone(command.evidenceRefs ?? verification.evidenceRefs),
+						endedAt: occurredAt,
+					},
+				},
+			},
+			{
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.ready",
+				occurredAt,
+				actor: { kind: "controller" },
+				causationId: verificationFailedId,
+				payload: {
+					fromStatus: task.status,
+					toStatus: "ready",
+					facts: {
+						workflowExecuting: true,
+						dependenciesSucceeded: true,
+						retryAllowed: true,
+					},
+				},
+			},
+		];
+		return this.#commit(command, events);
+	}
+
 	beginDeliveryVerification(command: BeginDeliveryVerificationCommand): WorkflowCommandResult {
 		const duplicate = this.#duplicateResult(command);
 		if (duplicate) {
@@ -1994,10 +2068,15 @@ export class WorkflowController {
 				parentTaskId: rootTask.id,
 				sourcePlanId: plan.id,
 				sourcePlanStepId: step.id,
+				recommendedAgentRole:
+					step.requiredAgentRole ??
+					(step.fileIntents.some(({ action }) => action !== "inspect") ? "worker" : undefined),
 				kind: step.kind ?? "agent",
 				command: step.command,
 				accessMode:
-					step.kind === "command" || step.fileIntents.some(({ action }) => action !== "inspect")
+					step.kind === "command" ||
+					step.requiredAgentRole === "worker" ||
+					step.fileIntents.some(({ action }) => action !== "inspect")
 						? "writer"
 						: "read_only",
 				title: step.title,

@@ -65,7 +65,7 @@ import {
 	shouldCompact,
 } from "./compaction/index.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import { DeliveryRuntime, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
+import { DeliveryRuntime, DiffCollector, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
 import {
@@ -135,6 +135,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
+import { BUILTIN_AGENT_PROFILES } from "./workflow/agent-profile.ts";
 import { type AgentSessionAdapter, startDirectAgentSessionWorkflow } from "./workflow/agent-session-adapter.ts";
 import { createWorkflowAutomationPolicy, requiresPlanMode } from "./workflow/autonomous-workflow-policy.ts";
 import { AutonomousWorkflowRunner } from "./workflow/autonomous-workflow-runner.ts";
@@ -142,6 +143,13 @@ import type { AutonomousWorkflowEvent, WorkflowAutomationResult } from "./workfl
 import type { RequiredClarification } from "./workflow/clarification-gate.ts";
 import type { DecisionExplanation } from "./workflow/decision-reasons.ts";
 import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
+import {
+	applyExecutionProtocolToPlan,
+	type ExecutionProtocolRequirement,
+	SessionExecutionProtocolRuntime,
+	validateExecutionProtocol,
+	type WorkflowExecutionProtocol,
+} from "./workflow/execution-protocol.ts";
 import {
 	createModeAdvisorPromptEnvelope,
 	executeModeAdvisorPrompt,
@@ -431,6 +439,8 @@ export class AgentSession {
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 	private _latestWorkflowView: WorkflowView | undefined;
+	private _workflowExecutionProtocol: WorkflowExecutionProtocol | undefined;
+	private _workflowProtocolRuntime: SessionExecutionProtocolRuntime | undefined;
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
 	private _subagentRuntime: SubagentService | undefined;
 	private _agentTeam: GovernedAgentTeam | undefined;
@@ -1204,12 +1214,24 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Enable CLI Workflow creation for accepted top-level prompts. */
-	enableWorkflowTracking(mode?: ExecutionMode, automationEnabled = false): void {
+	enableWorkflowTracking(
+		mode?: ExecutionMode,
+		automationEnabled = false,
+		executionProtocol?: WorkflowExecutionProtocol,
+	): void {
+		if (executionProtocol) {
+			const violations = validateExecutionProtocol(executionProtocol);
+			if (violations.length > 0) {
+				throw new Error(violations.join("; "));
+			}
+		}
 		this._workflowTrackingEnabled = true;
 		this._installSubagentTools();
 		this._workflowMode = mode ?? "direct";
 		this._workflowModeExplicit = mode !== undefined;
 		this._workflowAutomationEnabled = automationEnabled;
+		this._workflowExecutionProtocol = executionProtocol ? structuredClone(executionProtocol) : undefined;
+		this._workflowProtocolRuntime = undefined;
 		this._recoverPendingWorkflowClarification();
 		this._planWorkflowRuntime ??= PlanWorkflowRuntime.recoverLatest(this.sessionManager);
 		if (
@@ -1430,6 +1452,11 @@ export class AgentSession {
 		this._autonomousWorkflowRunner?.stop();
 		const adapter = this._activeWorkflowAdapter;
 		if (adapter && !adapter.finalReport) {
+			const workflowId = adapter.workflowId;
+			adapter.requestCancellation(reason);
+			if (this._subagentRuntime) {
+				await this._subagentRuntime.cancelWorkflow(workflowId, reason);
+			}
 			await adapter.cancel(reason);
 			const finalReport = adapter.finalReport;
 			if (finalReport) {
@@ -1490,16 +1517,39 @@ export class AgentSession {
 	getWorkflowView(): WorkflowView | undefined {
 		const active = this._activeWorkflowAdapter?.view;
 		if (active) {
-			return this._withWorkflowAutomation(active);
+			return this._withWorkflowRuntime(active);
 		}
 		const planRuntime = this._planWorkflowRuntime;
 		if (planRuntime) {
 			const workflowId = planRuntime.workflow.id;
-			return this._withWorkflowAutomation(
+			return this._withWorkflowRuntime(
 				planRuntime.view(this._subagentRuntime?.list(workflowId) ?? [], this._jobRuntime?.jobs(workflowId) ?? []),
 			);
 		}
-		return this._latestWorkflowView ? this._withWorkflowAutomation(this._latestWorkflowView) : undefined;
+		return this._latestWorkflowView ? this._withWorkflowRuntime(this._latestWorkflowView) : undefined;
+	}
+
+	private _withWorkflowRuntime(view: WorkflowView): WorkflowView {
+		const agents = this._subagentRuntime?.list(view.workflow.id) ?? view.agents;
+		const protocol = this._protocolRuntimeFor(view.workflow.id);
+		if (view.workflow.modeDecision?.mode === "plan") {
+			protocol?.observeAgents(agents);
+		}
+		return {
+			...this._withWorkflowAutomation({ ...view, agents }),
+			executionProtocol: protocol?.view,
+		};
+	}
+
+	private _protocolRuntimeFor(workflowId: string): SessionExecutionProtocolRuntime | undefined {
+		const protocol = this._workflowExecutionProtocol;
+		if (!protocol) {
+			return undefined;
+		}
+		if (this._workflowProtocolRuntime?.view.workflowId !== workflowId) {
+			this._workflowProtocolRuntime = new SessionExecutionProtocolRuntime(this.sessionManager, workflowId, protocol);
+		}
+		return this._workflowProtocolRuntime;
 	}
 
 	private _withWorkflowAutomation(view: WorkflowView): WorkflowView {
@@ -1863,7 +1913,13 @@ export class AgentSession {
 		if (!message) {
 			throw new Error("Planner completed without an Assistant message");
 		}
-		runtime.submit(parsePlannerPlanContent(contentText(message.content, "")));
+		const parsedPlan = parsePlannerPlanContent(contentText(message.content, ""));
+		runtime.submit(
+			this._workflowExecutionProtocol
+				? applyExecutionProtocolToPlan(parsedPlan, this._workflowExecutionProtocol)
+				: parsedPlan,
+		);
+		this._protocolRuntimeFor(runtime.workflow.id);
 		this._pendingPlanRevisionRequest = undefined;
 		this._nextWorkflowMode = "direct";
 		this._emit({
@@ -1877,18 +1933,279 @@ export class AgentSession {
 		if (this._planWorkflowRuntime?.isTerminal) {
 			this._planWorkflowRuntime = undefined;
 		}
-		return startDirectAgentSessionWorkflow(this, {
-			commandId: `command-${randomUUID()}`,
-			workflowId: `workflow-${randomUUID()}`,
-			rootTaskId: `task-${randomUUID()}`,
-			request: {
-				text: requestText,
-				cwd: this._cwd,
-				requestedMode: modeDecision?.source === "user" ? "direct" : undefined,
-				attachments: [],
+		const requiresDeliveryGate =
+			this._workflowExecutionProtocol?.requirements.some(
+				({ required, stage }) => required && (stage === "after_main" || stage === "before_delivery"),
+			) ?? false;
+		const adapter = startDirectAgentSessionWorkflow(
+			this,
+			{
+				commandId: `command-${randomUUID()}`,
+				workflowId: `workflow-${randomUUID()}`,
+				rootTaskId: `task-${randomUUID()}`,
+				request: {
+					text: requestText,
+					cwd: this._cwd,
+					requestedMode: modeDecision?.source === "user" ? "direct" : undefined,
+					attachments: [],
+				},
+				modeDecision,
 			},
-			modeDecision,
-		});
+			{ deferCompletion: requiresDeliveryGate },
+		);
+		this._protocolRuntimeFor(adapter.workflowId);
+		return adapter;
+	}
+
+	private async _runProtocolAgent(
+		adapter: AgentSessionAdapter,
+		requirement: ExecutionProtocolRequirement,
+		prompt: string,
+		stableRunId: string,
+	): Promise<AgentRunResult> {
+		const protocol = this._protocolRuntimeFor(adapter.workflowId);
+		if (!protocol) {
+			throw new Error("Execution protocol runtime is not configured");
+		}
+		const workflow = adapter.controller.getWorkflow(adapter.workflowId);
+		const task = adapter.controller.getTask(adapter.taskId);
+		if (!workflow || !task) {
+			throw new Error(`Workflow ${adapter.workflowId} is unavailable for protocol execution`);
+		}
+		const profile = BUILTIN_AGENT_PROFILES[requirement.role];
+		const parentPermission = this._subagentParentPermission();
+		const readOnlyPermission: PermissionSet = {
+			...parentPermission,
+			write: false,
+			executeCommands: false,
+			network: false,
+		};
+		const run = protocol.begin(requirement.id, undefined, stableRunId);
+		try {
+			const runtime = this._getSubagentRuntime();
+			const agent = await runtime.spawn({
+				workflowId: workflow.id,
+				taskId: task.id,
+				attemptId: `protocol-${requirement.role}-${randomUUID()}`,
+				cwd: workflow.request.cwd,
+				profile,
+				profileSource: "builtin",
+				scope: "workflow",
+				parentPermission: readOnlyPermission,
+				workflowPermission: readOnlyPermission,
+				taskPermission: readOnlyPermission,
+				parentBudget: workflow.budget,
+				workflowBudget: workflow.budget,
+				taskBudget: profile.defaultBudget,
+			});
+			await runtime.send(agent.id, prompt);
+			const result = await runtime.wait(agent.id);
+			if (result.status !== "completed" || !result.handoff) {
+				const reason = result.error ?? `${requirement.role} ended without a structured Handoff`;
+				protocol.fail(run.id, reason, agent.id);
+				return result;
+			}
+			protocol.succeed(run.id, {
+				agentId: agent.id,
+				handoffId: result.handoff.id,
+				summary: result.handoff.conclusion,
+			});
+			return result;
+		} catch (error) {
+			protocol.fail(run.id, error instanceof Error ? error.message : String(error));
+			throw error;
+		}
+	}
+
+	private async _runDirectBeforeMainProtocol(
+		adapter: AgentSessionAdapter,
+		requestText: string,
+	): Promise<readonly CustomMessage[]> {
+		const protocol = this._protocolRuntimeFor(adapter.workflowId);
+		if (!protocol) {
+			return [];
+		}
+		const handoffMessages: CustomMessage[] = [];
+		for (const requirement of protocol.requirements("before_main")) {
+			if (requirement.role !== "explorer") {
+				throw new Error(`Direct before_main protocol only supports explorer, received ${requirement.role}`);
+			}
+			const recoveredRun = protocol.view.runs
+				.filter(
+					({ requirementId, status, handoffId }) =>
+						requirementId === requirement.id && status === "succeeded" && handoffId !== undefined,
+				)
+				.at(-1);
+			if (recoveredRun?.handoffId) {
+				const handoff = this._getSubagentRuntime().getHandoff(recoveredRun.handoffId);
+				if (!handoff) {
+					throw new Error(`Recovered Explorer Handoff ${recoveredRun.handoffId} is unavailable`);
+				}
+				handoffMessages.push({
+					role: "custom",
+					customType: "workflow-protocol-handoff",
+					content: `Explorer Handoff (required by ${requirement.id}):\n${JSON.stringify(handoff)}`,
+					display: false,
+					details: { requirementId: requirement.id, handoffId: handoff.id },
+					timestamp: Date.now(),
+				});
+				continue;
+			}
+			const attempts = requirement.failurePolicy === "retry_once" ? Math.min(2, requirement.maxRuns) : 1;
+			let result: AgentRunResult | undefined;
+			for (let attempt = 0; attempt < attempts; attempt++) {
+				const stableRunId = `protocol-${adapter.workflowId}-${requirement.id}-${attempt + 1}`;
+				const existing = protocol.view.runs.find(({ id }) => id === stableRunId);
+				if (existing?.status === "failed") {
+					continue;
+				}
+				if (existing?.status === "running") {
+					protocol.fail(existing.id, "Recovered interrupted protocol run");
+					continue;
+				}
+				result = await this._runProtocolAgent(
+					adapter,
+					requirement,
+					[
+						"Inspect the repository for the following request before implementation.",
+						"Return a structured Handoff with exact file evidence, risks, and recommended next steps.",
+						"Do not modify files or execute commands.",
+						requestText,
+					].join("\n\n"),
+					stableRunId,
+				);
+				if (result.status === "completed" && result.handoff) {
+					handoffMessages.push({
+						role: "custom",
+						customType: "workflow-protocol-handoff",
+						content: `Explorer Handoff (required by ${requirement.id}):\n${JSON.stringify(result.handoff)}`,
+						display: false,
+						details: { requirementId: requirement.id, handoffId: result.handoff.id },
+						timestamp: Date.now(),
+					});
+					break;
+				}
+			}
+			if (!result || result.status !== "completed" || !result.handoff) {
+				throw new Error(
+					result?.error ?? `Execution protocol requirement ${requirement.id} did not produce a Handoff`,
+				);
+			}
+		}
+		protocol.assertStageSatisfied("before_main");
+		return handoffMessages;
+	}
+
+	private async _runDirectBeforeDeliveryProtocol(adapter: AgentSessionAdapter): Promise<void> {
+		if (!adapter.hasDeferredCompletion) {
+			return;
+		}
+		const protocol = this._protocolRuntimeFor(adapter.workflowId);
+		if (!protocol) {
+			adapter.completeDeferredVerification();
+			return;
+		}
+		const evidenceRefs: string[] = [];
+		const risks: string[] = [];
+		const reviewerRequirements = [
+			...protocol.requirements("after_main"),
+			...protocol.requirements("before_delivery"),
+		];
+		for (const requirement of reviewerRequirements) {
+			if (requirement.role !== "reviewer") {
+				throw new Error(`Direct before_delivery protocol only supports reviewer, received ${requirement.role}`);
+			}
+			const recoveredRun = protocol.view.runs
+				.filter(
+					({ requirementId, status, handoffId }) =>
+						requirementId === requirement.id && status === "succeeded" && handoffId !== undefined,
+				)
+				.at(-1);
+			if (recoveredRun?.handoffId) {
+				const handoff = this._getSubagentRuntime().getHandoff(recoveredRun.handoffId);
+				if (!handoff) {
+					throw new Error(`Recovered Reviewer Handoff ${recoveredRun.handoffId} is unavailable`);
+				}
+				evidenceRefs.push(
+					...handoff.evidence.map(({ path, line }) => `${path}${line === undefined ? "" : `:${line}`}`),
+				);
+				risks.push(...handoff.risks);
+				continue;
+			}
+			const attempts = requirement.failurePolicy === "retry_once" ? Math.min(2, requirement.maxRuns) : 1;
+			let passed = false;
+			let failure = "Reviewer did not complete";
+			for (let attempt = 0; attempt < attempts; attempt++) {
+				const stableRunId = `protocol-${adapter.workflowId}-${requirement.id}-${attempt + 1}`;
+				const existing = protocol.view.runs.find(({ id }) => id === stableRunId);
+				if (existing?.status === "failed") {
+					continue;
+				}
+				if (existing?.status === "running") {
+					protocol.fail(existing.id, "Recovered interrupted protocol run");
+					continue;
+				}
+				const workflow = adapter.controller.getWorkflow(adapter.workflowId);
+				const rootTask = adapter.controller.getTask(adapter.taskId);
+				if (!workflow || !rootTask) {
+					throw new Error(`Workflow ${adapter.workflowId} is unavailable for delivery review`);
+				}
+				const diff = new DiffCollector().collect(workflow.request.cwd, [rootTask]);
+				const run = protocol.begin(requirement.id, undefined, stableRunId);
+				this._deliveryReviewer ??= new SubagentReadonlyReviewer(this._getSubagentRuntime());
+				const reviewer = this._deliveryReviewer;
+				let result: Awaited<ReturnType<ReadonlyReviewer["review"]>>;
+				try {
+					result = await reviewer.review({ workflow, rootTask, diff });
+				} catch (error) {
+					failure = error instanceof Error ? error.message : String(error);
+					protocol.fail(run.id, failure);
+					continue;
+				}
+				const agentId = result.handoff?.agentId;
+				if (result.status === "passed" && result.handoff) {
+					protocol.succeed(run.id, {
+						agentId,
+						handoffId: result.handoff.id,
+						summary: result.summary,
+					});
+					evidenceRefs.push(...result.evidenceRefs);
+					risks.push(...result.risks);
+					passed = true;
+					break;
+				}
+				failure = result.summary;
+				protocol.fail(run.id, failure, agentId);
+				if (result.handoff && attempt + 1 < attempts) {
+					adapter.prepareProtocolRepair(failure, result.evidenceRefs);
+					await this._runAgentPrompt({
+						role: "custom",
+						customType: "workflow-protocol-repair",
+						content: [
+							"Repair the delivery issues reported by the required read-only Reviewer.",
+							"Address only evidence-backed findings, then rerun relevant verification.",
+							JSON.stringify(result.handoff),
+						].join("\n\n"),
+						display: true,
+						details: {
+							requirementId: requirement.id,
+							reviewerHandoffId: result.handoff.id,
+							repairAttempt: attempt + 1,
+						},
+						timestamp: Date.now(),
+					});
+					if (!adapter.hasDeferredCompletion) {
+						throw new Error("Protocol Repair did not produce a successful deferred completion");
+					}
+				}
+			}
+			if (!passed) {
+				throw new Error(`Execution protocol Reviewer failed: ${failure}`);
+			}
+		}
+		protocol.assertStageSatisfied("after_main");
+		protocol.assertStageSatisfied("before_delivery");
+		adapter.completeDeferredVerification({ evidenceRefs, risks, unfinishedItems: [] });
 	}
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[], emitSettled = true): Promise<void> {
@@ -2142,7 +2459,18 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		try {
+			if (workflowAdapter && directRequestText !== undefined) {
+				messages.push(...(await this._runDirectBeforeMainProtocol(workflowAdapter, directRequestText)));
+			}
 			await this._runAgentPrompt(messages, (options?.source ?? "interactive") !== "extension");
+			if (workflowAdapter) {
+				await this._runDirectBeforeDeliveryProtocol(workflowAdapter);
+			}
+		} catch (error) {
+			workflowAdapter?.failProtocol(
+				`Execution protocol failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			throw error;
 		} finally {
 			const finalReport = workflowAdapter?.finalReport;
 			if (finalReport) {

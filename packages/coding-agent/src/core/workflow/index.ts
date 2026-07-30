@@ -9,6 +9,7 @@ export * from "./decision-reasons.ts";
 export * from "./direct-plan-upgrade.ts";
 export * from "./event-log.ts";
 export * from "./events.ts";
+export * from "./execution-protocol.ts";
 export * from "./invariants.ts";
 export * from "./mode-advisor.ts";
 export * from "./mode-advisor-runtime.ts";

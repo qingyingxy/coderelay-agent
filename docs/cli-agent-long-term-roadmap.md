@@ -1,7 +1,7 @@
 # Pi CLI Coding Agent 长期改进路线图
 
-> 状态：M0-M8、R0-R18 已完成
-> 最后更新：2026-07-29
+> 状态：M0-M8、R0-R18 已完成；M9、R19 实施中
+> 最后更新：2026-07-30
 > 项目定位：基于 Pi 二次开发的个人 CLI Coding Agent，用于 Agent 工程学习、作品展示和求职。
 
 ## 1. 文档目的
@@ -53,6 +53,10 @@ M7 实施计划：
 M8 实施计划：
 
 - [`M8 Subagent 生产加固与受治理团队实施计划`](./design/m8-subagent-production-hardening-plan.md)
+
+M9 实施计划：
+
+- M9 首轮计划直接记录在本路线图的 R19，协议稳定后再决定是否拆分独立实施文档。
 
 ## 2. 状态约定
 
@@ -174,7 +178,7 @@ flowchart TB
 
 ## 6. 长期任务计划
 
-R0-R13 已完成，R14-R18 是后续生产加固阶段。它们不是用户请求在运行时依次经过的流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
+R0-R18 已完成，R19 是针对真实模型多 Agent 策略不稳定问题新增的协议加固阶段。它们不是用户请求在运行时依次经过的流程。每个阶段都必须形成“设计、实现、CLI 可见、自动测试、可重复演示”的纵向闭环。
 
 ### R0：范围与架构基线
 
@@ -408,6 +412,34 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | R17 | `DONE` | 受治理的 Agent Team | Workflow Task Graph 只读投影、受控邮箱、Controller Proposal 准入、Team CLI 和默认候选门禁已完成 |
 | R18 | `DONE` | 多 Writer 与自动集成 | 隔离 Workspace Lease、Repository Integration Lease、冲突 Attempt、回滚和合并后验证已完成 |
 
+### R19：真实多 Agent 执行协议稳定化
+
+R19 解决真实模型可能忽略 Prompt 中的委派要求，以及 Plan 无法稳定表达 Worker/Reviewer 约束的问题。显式策略的角色、顺序、完成门禁和恢复语义必须由 Runtime 保证；Prompt 只描述任务内容，不作为协议事实来源。
+
+| ID | 状态 | 任务 | 交付物与验收标准 | 依赖 |
+|---|---|---|---|---|
+| R19.1 | `DONE` | 固定失败基线与策略语义 | 记录 `main_explorer`、`main_reviewer`、`planner_worker_reviewer` 的当前失败样本，明确每种策略的角色、阶段、次数和失败口径 | R16 |
+| R19.2 | `DONE` | 定义 Workflow Execution Protocol | 建立版本化协议模型，表达 `before_main`、`implementation`、`after_main`、`before_delivery` 阶段、必选角色、次数和失败策略 | R19.1 |
+| R19.3 | `DONE` | 持久化协议事实 | Session Event Log Checkpoint、Workflow View 和 RPC 保存协议选择、阶段运行、失败及满足状态；稳定 Run ID 恢复时不重复记录 | R19.2、R15 |
+| R19.4 | `DONE` | 强制 Direct Explorer 前置门禁 | `main_explorer` 由 Runtime 在 Main 启动前创建只读 Explorer，校验 Handoff 并注入 Main 上下文；Explorer 失败时禁止 Main 写入 | R19.2-R19.3 |
+| R19.5 | `DONE` | 强制 Direct Reviewer 交付门禁 | Main 成功后延迟完成，只读 Reviewer 失败时进入一次受限 Main Repair 并重新 Review；仍失败则禁止完成 | R19.2-R19.3、R10 |
+| R19.6 | `DONE` | 扩展 Plan Agent 角色协议 | `PlanStep`、Planner Schema、解析器和 Controller 支持 `requiredAgentRole`，并把角色写入 Task 的权威调度信息 | R19.2、R5-R6 |
+| R19.7 | `DONE` | 校验 Planner/Worker/Reviewer 策略 | 审批前由协议编译器确定性补齐 Worker Agent Task 和必选 Review Verification；不再依赖一次非确定性 Replan | R19.6 |
+| R19.8 | `DONE` | 接入 Completion Gate 与恢复 | 协议未满足时不得完成；取消级联到前置 Agent，Handoff 缺失诚实失败，Run 次数有界，Repair 后重新 Review，稳定 Run ID 恢复幂等 | R19.3-R19.7 |
+| R19.9 | `DONE` | 升级真实模型评测 Runner | 策略编译为 Runtime 协议，Prompt 仅保留说明；从持久化状态统计合规性，并可保留失败 Workspace、Session、View、Diff、Verification 和 Handoff | R19.8 |
+| R19.10 | `DONE` | 建立确定性协议回归 | Faux Provider 覆盖模型忽略委派、阶段失败、重复恢复、取消、Run Budget、Repair 和 Completion Gate，显式策略协议合规率达到 100% | R19.4-R19.9 |
+| R19.11 | `TODO` | 运行真实模型稳定性烟测 | 三种显式多 Agent 策略在固定单任务上各重复三次，协议合规率达到 100%，任务效果与协议合规分开统计 | R19.10 |
+| R19.12 | `TODO` | 完成真实模型对照矩阵 | 固定模型、Prompt、预算和 Fixture，运行 3 个任务 × 5 种策略 × 3 次共 45 次，生成质量、成本、时长和失败报告 | R19.11 |
+| R19.13 | `TODO` | 建立新基线与作品证据 | 将通过的协议版本接入回归门禁，更新评测、架构、演示和简历证据；未证明收益前不宣称多 Agent 优于单 Agent | R19.12 |
+
+R19 完成条件：
+
+1. 显式策略的协议合规率为 100%，模型忽略工具指令时 Runtime 仍执行必选阶段。
+2. 恢复后重复创建的 Explorer、Worker 或 Reviewer 数量为 0。
+3. 缺少必选角色、Handoff 或 Review 的 Workflow 误完成数量为 0。
+4. 已完成 Agent 的结构化 Handoff 完整率为 100%。
+5. 45 次完整矩阵报告可以复现，协议正确性与任务成功率、成本收益分开呈现。
+
 ## 7. 里程碑
 
 | 里程碑 | 状态 | 范围 | 演示目标 |
@@ -421,6 +453,7 @@ R14-R18 的完整边界、协议、任务拆分和验收标准见 [`M8 Subagent 
 | M6：自动 Workflow | `DONE` | R12 | 自动 Mode、调度、验证和有界 Repair 可以无手动推进地形成闭环 |
 | M7：Subagent 融合 | `DONE` | R13 | 自定义 Agent、统一 Runtime、混合 Backend、Transcript 和控制能力不绕过 Workflow |
 | M8：生产加固 | `DONE` | R14-R18 | 隔离、恢复、评测、受治理 Team 和 opt-in 多 Writer 集成均已完成 |
+| M9：多 Agent 协议稳定化 | `IN_PROGRESS` | R19 | 显式多 Agent 策略由 Runtime 强制执行，恢复幂等，并通过完整真实模型矩阵 |
 
 ## 8. Core 与 Extension 实现策略
 
@@ -479,6 +512,11 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 15. 用户可以继续、重试或取消中断任务。
 16. 最终报告包含修改、测试、风险和资源使用。
 17. README 明确说明项目基于 Pi 二次开发。
+18. `main_explorer` 在 Main 启动前完成 Explorer Handoff，模型不能跳过该阶段。
+19. `main_reviewer` 在每个交付版本完成前执行 Reviewer，Review 失败不能误报成功。
+20. `planner_worker_reviewer` 的 Plan 明确包含 Worker 角色和必选 Review Verification。
+21. 协议阶段在重启恢复后不会重复创建 Agent 或重复执行副作用。
+22. 真实模型完整矩阵固定模型、Prompt、预算和 Fixture，并保留失败证据。
 
 ## 10. 主要风险
 
@@ -493,6 +531,7 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 自动模式频繁询问用户 | CLI 体验变差 | 默认 auto，仅关键审批和澄清暂停 |
 | 自动推进重复触发副作用 | 重复 Agent、Job、Verification 或 Repair | 单推进器、稳定幂等键和交付版本指纹 |
 | 自动 Repair 无限循环 | 成本、时间和修改范围失控 | 重试与预算上限、失败指纹和无修改检测 |
+| 仅用 Prompt 约束多 Agent 策略 | 模型跳过 Explorer、Worker 或 Reviewer，机制存在但策略不合规 | 将角色、顺序和完成条件下沉为 Runtime Execution Protocol |
 | 为简历提前包装未完成功能 | 项目可信度下降 | 只记录已实现并验证的事实和指标 |
 
 ## 11. 决策记录
@@ -565,12 +604,15 @@ Extension 可以验证 Prompt、命令、Widget 和审批体验，但不能成�
 | 2026-07-29 | R16 真实模型评测与调度解释完成 | 固定真实任务集和五策略对照 Runner 已接入；报告量化质量、成本、失败和边际收益；自动决策使用稳定 Reason Code，并由公平性检查和回归门禁约束 |
 | 2026-07-29 | R17 受治理的 Agent Team 完成 | Team View 直接投影 Workflow Task Graph；邮箱和 Proposal 有界、持久、可审计；Controller 统一依赖、风险、角色、预算和权限准入；CLI 与自由度保护测试完成；默认策略继续受效果门禁限制 |
 | 2026-07-29 | R18 多 Writer Worktree 与自动集成完成 | Writer 使用独立 Worktree Lease；Artifact 通过 Repository Integration Lease 串行应用；重叠生成 Conflict Resolution Attempt；合并后 Review、受影响测试或全局验证失败会回滚并校验目标指纹 |
+| 2026-07-30 | M9 多 Agent 协议稳定化立项 | 真实模型烟测暴露 Prompt-only 委派不稳定；新增 R19，将显式策略的角色、阶段、门禁、恢复和评测事实下沉到 Runtime |
+| 2026-07-30 | R19 第一阶段实施完成 | `r19-v1` 协议、Checkpoint/View、Direct Explorer/Reviewer 门禁、Plan 角色编译、评测 Runner 和 Faux 回归已接入；Repair、失败 Artifact 和真实模型矩阵继续实施 |
 
 ## 12. 后续维护
 
-M0-M8、R0-R18 已完成。后续维护遵守以下规则：
+M0-M8、R0-R18 已完成，M9、R19 实施中。后续维护遵守以下规则：
 
 1. 用 `npm run demo:autonomous-workflow` 验证确定性自动闭环。
 2. 真实模型任务效果单独评测，不与机制正确性测试混合统计。
 3. 多 Writer 保持 opt-in，只有效果门禁证明收益后才能成为默认策略。
 4. 自动流程协议变更必须同步更新 RPC Schema、Workflow View、恢复测试和本路线图。
+5. 显式多 Agent 策略不得只依赖 Prompt 约束；必选角色、顺序和完成条件必须由 Runtime 执行并持久化。

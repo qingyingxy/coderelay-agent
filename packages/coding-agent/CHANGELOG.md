@@ -20,6 +20,7 @@
 - Added R16 fixed real-model evaluation fixtures and five-strategy comparisons, quality/cost and marginal-benefit reports, stable Mode/Agent/Backend/Scheduler/Repair Reason Codes, and a comparable-report regression gate.
 - Added R17 governed Agent Teams with live Workflow Task Graph projection, bounded persistent mailboxes, Controller-admitted Task Proposals, role-aware scheduling, Team CLI views, collaboration guardrails, and a quality-evidence default-candidate gate.
 - Added R18 opt-in multi-Writer Worktrees with per-Workspace Writer Leases, repository-scoped Integration Leases, dependency and overlap analysis, durable Conflict Resolution Attempts, reversible Artifact application, mandatory post-integration verification, Integration CLI views, and a benefit-evidence default-candidate gate.
+- Added the R19 versioned Workflow Execution Protocol with persisted stage runs, Runtime-enforced Direct Explorer and Reviewer gates, Plan Worker/Reviewer role compilation, protocol state in Workflow views, and Faux Provider compliance regressions.
 
 ## [0.82.1] - 2026-07-25
 

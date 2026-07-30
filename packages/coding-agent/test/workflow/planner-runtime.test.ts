@@ -97,6 +97,7 @@ describe("Planner runtime", () => {
 					steps: [
 						{
 							id: "inspect",
+							requiredAgentRole: "explorer",
 							title: "Inspect",
 							dependsOn: [],
 							fileIntents: [],
@@ -113,5 +114,30 @@ describe("Planner runtime", () => {
 				message: "Planner response has an invalid steps[0].description",
 			}),
 		);
+	});
+
+	it("parses explicit Agent role requirements", () => {
+		const content = parsePlannerPlanContent(
+			JSON.stringify({
+				goal: "Implement the change",
+				assumptions: [],
+				steps: [
+					{
+						id: "implement",
+						kind: "agent",
+						requiredAgentRole: "worker",
+						title: "Implement",
+						description: "Modify the implementation",
+						dependsOn: [],
+						fileIntents: [{ path: "src/index.ts", action: "modify", reason: "Implement the change" }],
+						verificationRequirementIds: [],
+					},
+				],
+				risks: [],
+				verificationRequirements: [],
+			}),
+		);
+
+		expect(content.steps[0]?.requiredAgentRole).toBe("worker");
 	});
 });

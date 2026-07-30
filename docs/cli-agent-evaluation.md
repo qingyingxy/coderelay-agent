@@ -30,6 +30,30 @@ Mode accuracy: 3/3 (100.0%)
 
 CLI 的 Faux Provider 集成回归另覆盖 Direct、Plan、Subagent、Job、取消、Repair 和恢复；当前两个专项文件共 16 个用例通过。
 
+## R19 多 Agent 协议评测
+
+真实模型策略不再依赖“必须调用 Subagent”的 Prompt。Runner 将五种策略编译为 `r19-v1` Workflow Execution Protocol，并分别统计协议合规、任务验证、成本、时长和 Reviewer 发现。
+
+只校验固定 Fixture：
+
+```bash
+npm run eval:cli-agent:model -- --verify-task-set
+```
+
+运行单任务稳定性烟测：
+
+```bash
+npm run eval:cli-agent:model -- --tasks slug-normalization --strategies main_explorer,main_reviewer,planner_worker_reviewer --repetitions 3 --output .artifacts/r19-smoke --keep-failed-workspaces
+```
+
+运行 45 次完整矩阵：
+
+```bash
+npm run eval:cli-agent:model -- --repetitions 3 --output .artifacts/r19-matrix --keep-failed-workspaces
+```
+
+失败 Artifact 包含 Workspace、Session JSONL、Workflow View、Diff、Verification 和 Handoff。真实模型命令会产生 API 成本；没有报告文件时不得宣称多 Agent 效果已验证。
+
 ## 限制
 
 - 这是确定性机制评测，不代表真实 LLM 的代码正确率。

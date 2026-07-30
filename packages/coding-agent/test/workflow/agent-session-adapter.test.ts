@@ -65,7 +65,7 @@ class FakeAgentSession implements WorkflowAgentSession {
 	}
 }
 
-function start(session: FakeAgentSession) {
+function start(session: FakeAgentSession, deferCompletion = false) {
 	let nextId = 0;
 	return startDirectAgentSessionWorkflow(
 		session,
@@ -83,6 +83,7 @@ function start(session: FakeAgentSession) {
 			createId: (kind) => `${kind}-${++nextId}`,
 			now: () => 100,
 			writerLeaseRegistry: new WriterLeaseRegistry(),
+			deferCompletion,
 		},
 	);
 }
@@ -239,6 +240,51 @@ describe("AgentSessionAdapter", () => {
 			}),
 		]);
 
+		adapter.dispose();
+	});
+
+	it("defers terminal completion until the delivery protocol passes", () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session, true);
+
+		session.emit({ type: "agent_start" });
+		emitRun(session, fauxAssistantMessage("Implemented"), false);
+
+		expect(adapter.hasDeferredCompletion).toBe(true);
+		expect(adapter.controller.getRootTask(WORKFLOW_ID)?.status).toBe("verifying");
+		expect(adapter.controller.getWorkflow(WORKFLOW_ID)?.status).toBe("executing");
+
+		adapter.completeDeferredVerification({
+			evidenceRefs: ["review:reviewer-handoff"],
+		});
+
+		expect(adapter.hasDeferredCompletion).toBe(false);
+		expect(adapter.controller.getWorkflow(WORKFLOW_ID)?.status).toBe("completed");
+		expect(adapter.controller.listVerifications(WORKFLOW_ID)[0]?.evidenceRefs).toContain("review:reviewer-handoff");
+		adapter.dispose();
+	});
+
+	it("fails honestly when a required protocol stage fails before the main attempt", () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session, true);
+
+		adapter.failProtocol("Explorer did not produce a Handoff");
+
+		expect(adapter.controller.listAttempts(TASK_ID)).toEqual([
+			expect.objectContaining({
+				status: "failed",
+				failure: expect.objectContaining({
+					code: "execution_protocol.failed",
+				}),
+			}),
+		]);
+		expect(adapter.controller.getRootTask(WORKFLOW_ID)?.status).toBe("failed");
+		expect(adapter.controller.getWorkflow(WORKFLOW_ID)).toMatchObject({
+			status: "failed",
+			result: {
+				reason: "Explorer did not produce a Handoff",
+			},
+		});
 		adapter.dispose();
 	});
 

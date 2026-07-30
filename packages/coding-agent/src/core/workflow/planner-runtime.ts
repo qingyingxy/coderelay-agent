@@ -32,6 +32,7 @@ const PLANNER_OUTPUT_SCHEMA = {
 					id: { type: "string" },
 					kind: { type: "string", enum: ["agent", "command"] },
 					command: { type: "string" },
+					requiredAgentRole: { type: "string", enum: ["explorer", "worker", "reviewer"] },
 					title: { type: "string" },
 					description: { type: "string" },
 					dependsOn: { type: "array", items: { type: "string" } },
@@ -160,7 +161,7 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 				id: "planner-structured-output",
 				kind: "output",
 				description:
-					"Return only one JSON object matching PlanContent. Use step kind 'command' with a non-empty command for deterministic test/build commands; otherwise omit kind and command.",
+					"Return only one JSON object matching PlanContent. Agent steps must declare requiredAgentRole: use worker for implementation, explorer for read-only investigation, and reviewer only for read-only review. Use step kind 'command' with a non-empty command for deterministic test/build commands and omit requiredAgentRole.",
 			},
 		],
 		outputSchema: {
@@ -245,6 +246,15 @@ function parsePlanStep(value: unknown, index: number): PlanStep {
 	if (command !== undefined && (typeof command !== "string" || !command.trim())) {
 		return invalidShape(`${path}.command`);
 	}
+	const requiredAgentRole = value.requiredAgentRole;
+	if (
+		requiredAgentRole !== undefined &&
+		requiredAgentRole !== "explorer" &&
+		requiredAgentRole !== "worker" &&
+		requiredAgentRole !== "reviewer"
+	) {
+		return invalidShape(`${path}.requiredAgentRole`);
+	}
 	if (!Array.isArray(value.fileIntents)) return invalidShape(`${path}.fileIntents`);
 	const fileIntents = value.fileIntents.map((intent, intentIndex) => {
 		const intentPath = `${path}.fileIntents[${intentIndex}]`;
@@ -263,6 +273,7 @@ function parsePlanStep(value: unknown, index: number): PlanStep {
 		id: nonEmptyString(value.id, `${path}.id`),
 		kind,
 		command,
+		requiredAgentRole,
 		title: nonEmptyString(value.title, `${path}.title`),
 		description: nonEmptyString(value.description, `${path}.description`),
 		dependsOn: stringArray(value.dependsOn, `${path}.dependsOn`),

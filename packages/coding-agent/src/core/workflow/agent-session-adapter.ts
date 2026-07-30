@@ -54,6 +54,7 @@ export interface AgentSessionAdapterOptions {
 	readonly writerLeaseRegistry?: WriterLeaseRegistry;
 	readonly runtimeRegistry?: WorkflowRuntimeRegistry;
 	readonly writerLeaseTtlMs?: number;
+	readonly deferCompletion?: boolean;
 }
 
 export interface AgentSessionDelegationRequest {
@@ -69,6 +70,12 @@ interface PendingAgentEnd {
 interface PendingMutation {
 	readonly path: string;
 	readonly operation: "edit" | "write";
+}
+
+interface DeferredCompletion {
+	readonly verificationId: VerificationId;
+	readonly summary: string;
+	readonly usage: ResourceUsage;
 }
 
 function zeroUsage(): ResourceUsage {
@@ -162,6 +169,7 @@ export class AgentSessionAdapter {
 	readonly #writerLeaseRegistry: WriterLeaseRegistry;
 	readonly #runtimeRegistry: WorkflowRuntimeRegistry;
 	readonly #writerLeaseTtlMs: number;
+	readonly #deferCompletion: boolean;
 	#unsubscribe?: () => void;
 	#unregisterRuntime?: () => void;
 	#writerLeaseId?: string;
@@ -182,6 +190,7 @@ export class AgentSessionAdapter {
 	readonly #pendingMutations = new Map<string, PendingMutation>();
 	/** Paths reported by successful edit/write tools across the whole workflow, in order. */
 	readonly #changedFiles: string[] = [];
+	#deferredCompletion?: DeferredCompletion;
 
 	constructor(
 		session: WorkflowAgentSession,
@@ -199,10 +208,27 @@ export class AgentSessionAdapter {
 		this.#writerLeaseRegistry = options.writerLeaseRegistry ?? DEFAULT_WRITER_LEASE_REGISTRY;
 		this.#runtimeRegistry = options.runtimeRegistry ?? DEFAULT_WORKFLOW_RUNTIME_REGISTRY;
 		this.#writerLeaseTtlMs = options.writerLeaseTtlMs ?? 3_600_000;
+		this.#deferCompletion = options.deferCompletion ?? false;
 	}
 
 	get controller(): WorkflowController {
 		return this.#controller;
+	}
+
+	get workflowId(): WorkflowId {
+		return this.#workflowId;
+	}
+
+	get taskId(): TaskId {
+		return this.#taskId;
+	}
+
+	get changedFiles(): readonly string[] {
+		return [...this.#changedFiles];
+	}
+
+	get hasDeferredCompletion(): boolean {
+		return this.#deferredCompletion !== undefined;
 	}
 
 	get finalReport(): WorkflowFinalReport | undefined {
@@ -393,6 +419,116 @@ export class AgentSessionAdapter {
 		await this.#session.waitForIdle();
 	}
 
+	completeDeferredVerification(input?: {
+		readonly evidenceRefs?: readonly string[];
+		readonly risks?: readonly string[];
+		readonly unfinishedItems?: readonly string[];
+	}): void {
+		const pending = this.#deferredCompletion;
+		if (!pending) {
+			throw new Error(`Workflow ${this.#workflowId} has no deferred completion`);
+		}
+		this.#deferredCompletion = undefined;
+		this.#completeVerification(
+			pending.verificationId,
+			pending.summary,
+			pending.usage,
+			input?.evidenceRefs,
+			input?.risks,
+			input?.unfinishedItems,
+		);
+		this.#unregisterRuntime?.();
+		this.#unregisterRuntime = undefined;
+		this.#releaseWriterLease();
+	}
+
+	prepareProtocolRepair(summary: string, evidenceRefs: readonly string[] = []): void {
+		const pending = this.#deferredCompletion;
+		if (!pending) {
+			throw new Error(`Workflow ${this.#workflowId} has no deferred completion to repair`);
+		}
+		this.#controller.rejectTaskVerification({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			verificationId: pending.verificationId,
+			summary,
+			evidenceRefs,
+		});
+		this.#deferredCompletion = undefined;
+	}
+
+	failProtocol(reason: string): void {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow || isWorkflowTerminalStatus(workflow.status)) {
+			return;
+		}
+		const task = this.#controller.getTask(this.#taskId);
+		const usage = this.#deferredCompletion?.usage ?? this.#workflowUsage;
+		this.#deferredCompletion = undefined;
+		if (task?.status === "ready") {
+			const attemptId = this.#createId("attempt");
+			this.#controller.prepareMainAgentAttempt({
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				attemptId,
+				agentId: "execution-protocol",
+				writerLeaseId: this.#writerLeaseId,
+			});
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_started",
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				attemptId,
+			});
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_failed",
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				attemptId,
+				usage,
+				workflowUsage: usage,
+				willRetry: false,
+				failure: {
+					code: "execution_protocol.failed",
+					message: reason,
+				},
+			});
+		} else if (task?.status === "running" && this.#activeAttemptId) {
+			this.#controller.handleRuntimeEvent({
+				type: "attempt_failed",
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				attemptId: this.#activeAttemptId,
+				usage,
+				workflowUsage: usage,
+				willRetry: false,
+				failure: {
+					code: "execution_protocol.failed",
+					message: reason,
+				},
+			});
+			this.#activeAttemptId = undefined;
+		} else {
+			this.#controller.fail({
+				commandId: this.#createId("command"),
+				workflowId: this.#workflowId,
+				taskId: this.#taskId,
+				reason,
+				usage,
+				durationMs: Math.max(0, this.#now() - Date.parse(workflow.createdAt)),
+				runtimeResourcesStopped: true,
+			});
+		}
+		this.#unregisterRuntime?.();
+		this.#unregisterRuntime = undefined;
+		this.#releaseWriterLease();
+	}
+
 	/**
 	 * Cancel the Direct workflow in two phases (design §5.3).
 	 *
@@ -412,18 +548,26 @@ export class AgentSessionAdapter {
 		await this.#cancelPromise;
 	}
 
-	async #runCancellation(reason: string): Promise<void> {
+	requestCancellation(reason: string): void {
 		const workflow = this.#controller.getWorkflow(this.#workflowId);
 		if (!workflow || isWorkflowTerminalStatus(workflow.status)) {
 			return;
 		}
 		this.#cancelling = true;
-		// Phase 1: persist the cancel request. Idempotent if already cancelling.
 		this.#controller.requestCancellation({
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 			reason,
 		});
+	}
+
+	async #runCancellation(reason: string): Promise<void> {
+		const workflow = this.#controller.getWorkflow(this.#workflowId);
+		if (!workflow || isWorkflowTerminalStatus(workflow.status)) {
+			return;
+		}
+		// Phase 1: persist the cancel request. Idempotent if already cancelling.
+		this.requestCancellation(reason);
 		// Phase 2: stop the AgentSession and wait until it is idle.
 		const cancellation = await this.#runtimeRegistry.cancelWorkflow(this.#workflowId, reason);
 		if (cancellation.failures.length > 0) {
@@ -456,6 +600,7 @@ export class AgentSessionAdapter {
 		this.#workflowUsage = workflowUsage;
 		this.#activeAttemptId = undefined;
 		this.#pendingAgentEnd = undefined;
+		this.#deferredCompletion = undefined;
 	}
 
 	/**
@@ -688,6 +833,14 @@ export class AgentSessionAdapter {
 			});
 			this.#workflowUsage = workflowUsage;
 			this.#activeAttemptId = undefined;
+			if (this.#deferCompletion) {
+				this.#deferredCompletion = {
+					verificationId,
+					summary,
+					usage: workflowUsage,
+				};
+				return;
+			}
 			this.#completeVerification(verificationId, summary, workflowUsage);
 			this.#unregisterRuntime?.();
 			this.#unregisterRuntime = undefined;
@@ -706,7 +859,14 @@ export class AgentSessionAdapter {
 	 * as not configured and never fabricated. The controller invariants enforce the
 	 * remaining structural checks (attempt succeeded, task verifying, verification running).
 	 */
-	#completeVerification(verificationId: VerificationId, summary: string, usage: ResourceUsage): void {
+	#completeVerification(
+		verificationId: VerificationId,
+		summary: string,
+		usage: ResourceUsage,
+		evidenceRefs: readonly string[] = [],
+		risks: readonly string[] = [],
+		unfinishedItems: readonly string[] = [],
+	): void {
 		const report = buildBasicVerificationReport({ changedFiles: this.#changedFiles });
 		this.#controller.complete({
 			commandId: this.#createId("command"),
@@ -715,9 +875,9 @@ export class AgentSessionAdapter {
 			verificationId,
 			summary,
 			changedFiles: report.changedFiles,
-			evidenceRefs: report.evidenceRefs,
-			risks: [],
-			unfinishedItems: [],
+			evidenceRefs: [...report.evidenceRefs, ...evidenceRefs],
+			risks,
+			unfinishedItems,
 			usage,
 			durationMs: usage.durationMs,
 		});

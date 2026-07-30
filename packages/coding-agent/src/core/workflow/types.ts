@@ -213,6 +213,7 @@ export interface PlanStep {
 	readonly id: PlanStepId;
 	readonly kind?: Extract<TaskKind, "agent" | "command">;
 	readonly command?: string;
+	readonly requiredAgentRole?: Extract<TaskAgentRole, "explorer" | "worker" | "reviewer">;
 	readonly title: string;
 	readonly description: string;
 	readonly dependsOn: readonly PlanStepId[];
