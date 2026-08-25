@@ -58,6 +58,7 @@ export interface WorkspaceProvider {
 		workspace: AgentWorkspace,
 		modifications: readonly SubagentModification[],
 	): Promise<WorkspaceArtifact | undefined>;
+	restoreArtifact?(workspace: AgentWorkspace, artifact: WorkspaceArtifact): Promise<void>;
 	integrateArtifact?(artifact: WorkspaceArtifact): Promise<WorkspaceArtifact>;
 	analyzeArtifact?(
 		artifact: WorkspaceArtifact,

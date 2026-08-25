@@ -145,6 +145,25 @@ Prompt Pipeline 位于模式选择之后、Pi Agent Loop 之前：
 4. 预算器优先裁剪可选历史，永不丢失安全约束、当前 Task 和必要 Handoff。
 5. AgentSession Adapter 将 Prompt Envelope 交给现有 Pi Agent Loop，不重复实现模型调用和 Tool Calling。
 
+## 5.1 模型网关与预算路由
+
+Workflow Model Gateway 位于角色调度和 AgentSession 之间，统一把角色、风险和剩余预算映射到 `fast`、`balanced`、`strong` 三个模型层级：
+
+```text
+Mode Advisor / Explorer       → fast
+低风险 Direct                  → fast
+困难/高风险任务 Planner        → strong
+Worker / 普通 Reviewer         → balanced
+高风险 Reviewer / Repair      → strong
+预算剩余低于 25%               → 向低一档降级
+```
+
+自动模式让简单任务和边界明确、低风险的中等任务进入 Direct。困难和高风险任务进入 Plan：Strong Planner 先读取任务与仓库，把实现拆成带文件边界、依赖关系和独立验收条件的 Worker Task；Balanced Worker 执行这些小任务，确定性验证失败时只升级失败节点，验证通过后再由 Reviewer 检查交付。
+
+路由只选择已经在 `ModelRuntime` 中注册且有鉴权的模型；不可用时保留当前模型并记录回退原因。用户显式指定的模型默认优先于自动路由。每次路由保存模型、层级、上一模型和理由，进入 Workflow View、报告和 Session Event Log，便于按成功率、成本和耗时比较路由策略。
+
+通过 `PI_MODEL_FAST`、`PI_MODEL_BALANCED`、`PI_MODEL_STRONG` 配置三个层级，或显式设置 `PI_MODEL_ROUTING=auto` 开启；未配置层级时不改变原有模型行为。
+
 ## 6. 状态机
 
 ```mermaid

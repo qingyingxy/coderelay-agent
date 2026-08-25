@@ -23,6 +23,7 @@ describe("PromptEnvelope AgentSession integration", () => {
 		harness.setResponses([fauxAssistantMessage("Remembered"), fauxAssistantMessage("Completed")]);
 		await harness.session.prompt("Earlier session context");
 		harness.session.enableWorkflowTracking();
+		const activeToolNames = harness.session.getActiveToolNames();
 
 		let providerToolNames: string[] = [];
 		let providerSystemPrompt = "";
@@ -100,7 +101,7 @@ describe("PromptEnvelope AgentSession integration", () => {
 		expect(providerToolNames).toEqual(["read"]);
 		expect(providerSystemPrompt).toContain("- read:");
 		expect(providerSystemPrompt).not.toContain("- edit:");
-		expect(harness.session.getActiveToolNames()).toEqual(["read", "edit", "write"]);
+		expect(harness.session.getActiveToolNames()).toEqual(activeToolNames);
 		expect(harness.session.systemPrompt).toContain("- edit:");
 		expect(new SessionWorkflowEventLog(harness.sessionManager).read()).toHaveLength(0);
 	});

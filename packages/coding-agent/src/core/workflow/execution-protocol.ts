@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { SessionManager } from "../session-manager.ts";
 import type { AgentInstance } from "../subagents/types.ts";
-import type { PlanContent, PlanStep, WorkflowId } from "./types.ts";
+import type { PlanContent, PlanStep, TaskLevel, WorkflowId } from "./types.ts";
 
-export const EXECUTION_PROTOCOL_VERSION = "r19-v1";
+export const EXECUTION_PROTOCOL_VERSION = "r19-v3";
 export const EXECUTION_PROTOCOL_STAGES = ["before_main", "implementation", "after_main", "before_delivery"] as const;
 export type ExecutionProtocolStage = (typeof EXECUTION_PROTOCOL_STAGES)[number];
-export type ExecutionProtocolRole = "explorer" | "worker" | "reviewer";
+export type ExecutionProtocolRole = "planner" | "explorer" | "worker" | "reviewer";
 export type ExecutionProtocolFailurePolicy = "fail_workflow" | "retry_once";
 
 export interface ExecutionProtocolRequirement {
@@ -23,6 +23,32 @@ export interface WorkflowExecutionProtocol {
 	readonly version: typeof EXECUTION_PROTOCOL_VERSION;
 	readonly name: string;
 	readonly requirements: readonly ExecutionProtocolRequirement[];
+}
+
+export function createAdaptiveExecutionProtocol(taskLevel: TaskLevel): WorkflowExecutionProtocol {
+	const reviewer: ExecutionProtocolRequirement = {
+		id: "reviewer-before-delivery",
+		stage: "before_delivery",
+		role: "reviewer",
+		required: true,
+		minRuns: 1,
+		maxRuns: 2,
+		failurePolicy: "retry_once",
+	};
+	const worker: ExecutionProtocolRequirement = {
+		id: "worker-implementation",
+		stage: "implementation",
+		role: "worker",
+		required: true,
+		minRuns: 1,
+		maxRuns: 2,
+		failurePolicy: "retry_once",
+	};
+	return {
+		version: EXECUTION_PROTOCOL_VERSION,
+		name: `adaptive-${taskLevel.replace("_", "-")}`,
+		requirements: taskLevel === "simple" || taskLevel === "medium" ? [] : [worker, reviewer],
+	};
 }
 
 export type ExecutionProtocolRunStatus = "running" | "succeeded" | "failed";
@@ -77,6 +103,25 @@ function isCheckpoint(value: unknown): value is ExecutionProtocolCheckpoint {
 	);
 }
 
+function agentMatchesStage(agent: AgentInstance, stage: ExecutionProtocolStage): boolean {
+	switch (stage) {
+		case "before_main":
+			return (
+				agent.creationReasonCode === "agent.exploration_requested" ||
+				agent.creationReasonCode === "agent.delegation_requested"
+			);
+		case "implementation":
+			return agent.creationReasonCode === "agent.writer_task_ready";
+		case "after_main":
+			return agent.creationReasonCode === "agent.read_only_task_ready";
+		case "before_delivery":
+			return (
+				agent.creationReasonCode === "agent.review_requested" ||
+				(agent.creationReasonCode === "agent.read_only_task_ready" && agent.profileName === "reviewer")
+			);
+	}
+}
+
 export function validateExecutionProtocol(protocol: WorkflowExecutionProtocol): readonly string[] {
 	const violations: string[] = [];
 	if (protocol.version !== EXECUTION_PROTOCOL_VERSION) {
@@ -97,6 +142,7 @@ export function validateExecutionProtocol(protocol: WorkflowExecutionProtocol): 
 			violations.push(`Unsupported execution protocol stage: ${requirement.stage}`);
 		}
 		const allowedStages: Readonly<Record<ExecutionProtocolRole, readonly ExecutionProtocolStage[]>> = {
+			planner: ["before_main"],
 			explorer: ["before_main"],
 			worker: ["implementation"],
 			reviewer: ["after_main", "before_delivery"],
@@ -258,14 +304,16 @@ export class SessionExecutionProtocolRuntime {
 
 	observeAgents(agents: readonly AgentInstance[]): void {
 		for (const requirement of this.#protocol.requirements) {
-			const matchingAgents = agents.filter(
-				(agent) =>
-					agent.profileName === requirement.role &&
-					((agent.status === "idle" && agent.handoffId !== undefined) ||
-						agent.status === "stopped" ||
-						agent.status === "failed" ||
-						agent.status === "interrupted"),
-			);
+			const matchingAgents = agents.filter((agent) => {
+				if (agent.profileName !== requirement.role || !agentMatchesStage(agent, requirement.stage)) {
+					return false;
+				}
+				const completed = (agent.status === "idle" || agent.status === "stopped") && agent.handoffId !== undefined;
+				const planReviewerTask =
+					requirement.stage === "before_delivery" && agent.creationReasonCode === "agent.read_only_task_ready";
+				const failed = agent.status === "failed" || agent.status === "interrupted";
+				return completed || (failed && !planReviewerTask);
+			});
 			for (const agent of matchingAgents.slice(0, requirement.maxRuns)) {
 				const runId = `protocol-agent-${requirement.id}-${agent.id}`;
 				if (this.#runs.some(({ id }) => id === runId)) {

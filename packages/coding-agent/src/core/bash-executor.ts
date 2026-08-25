@@ -24,6 +24,10 @@ export interface BashExecutorOptions {
 	onChunk?: (chunk: string) => void;
 	/** AbortSignal for cancellation */
 	signal?: AbortSignal;
+	/** Optional command timeout in milliseconds */
+	timeoutMs?: number;
+	/** Explicit child-process environment */
+	environment?: Readonly<Record<string, string>>;
 }
 
 export interface BashResult {
@@ -108,6 +112,8 @@ export async function executeBashWithOperations(
 		const result = await operations.exec(command, cwd, {
 			onData,
 			signal: options?.signal,
+			timeout: options?.timeoutMs === undefined ? undefined : options.timeoutMs / 1000,
+			env: options?.environment ? { ...options.environment } : undefined,
 		});
 
 		const fullOutput = outputChunks.join("");

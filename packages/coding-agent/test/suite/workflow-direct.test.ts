@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,7 +9,14 @@ import {
 	type WorkflowExecutionProtocol,
 	WorkflowStore,
 } from "../../src/core/workflow/index.ts";
-import { SubagentRuntime, WorkflowRuntimeRegistry, WriterLeaseRegistry } from "../../src/index.ts";
+import {
+	type JobProcessFactory,
+	JobRuntime,
+	ModelGateway,
+	SubagentRuntime,
+	WorkflowRuntimeRegistry,
+	WriterLeaseRegistry,
+} from "../../src/index.ts";
 import { FakeSubagentSessionFactory, subagentHandoff } from "../workflow/subagent-fixtures.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -43,6 +51,89 @@ const MAIN_REVIEWER_PROTOCOL: WorkflowExecutionProtocol = {
 		},
 	],
 };
+
+const DIRECT_PLANNER_LITE_REVIEWER_PROTOCOL: WorkflowExecutionProtocol = {
+	version: EXECUTION_PROTOCOL_VERSION,
+	name: "direct-planner-lite-reviewer",
+	requirements: [
+		{
+			id: "planner-lite-before-main",
+			stage: "before_main",
+			role: "planner",
+			required: true,
+			minRuns: 1,
+			maxRuns: 2,
+			failurePolicy: "retry_once",
+		},
+		{
+			id: "reviewer-before-delivery",
+			stage: "before_delivery",
+			role: "reviewer",
+			required: true,
+			minRuns: 1,
+			maxRuns: 2,
+			failurePolicy: "retry_once",
+		},
+	],
+};
+
+function model(id: string): Model<Api> {
+	return {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "faux",
+		baseUrl: "https://example.test/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_000,
+	};
+}
+
+function routingGateway(): ModelGateway {
+	const models = [model("faux-fast"), model("faux-balanced"), model("faux-strong")];
+	return new ModelGateway(
+		{
+			getModel: (provider, id) => models.find((candidate) => candidate.provider === provider && candidate.id === id),
+			hasConfiguredAuth: () => true,
+		},
+		{
+			enabled: true,
+			fastModel: "faux/faux-fast",
+			balancedModel: "faux/faux-balanced",
+			strongModel: "faux/faux-strong",
+		},
+	);
+}
+
+class SequencedVerificationFactory implements JobProcessFactory {
+	readonly commands: string[] = [];
+	readonly #exitCodes: readonly number[];
+
+	constructor(exitCodes: readonly number[]) {
+		this.#exitCodes = exitCodes;
+	}
+
+	start(input: Parameters<JobProcessFactory["start"]>[0]) {
+		const index = this.commands.length;
+		const exitCode = this.#exitCodes[index] ?? 0;
+		this.commands.push(input.command);
+		return {
+			pid: 10_000 + index,
+			wait: async () => {
+				if (exitCode === 0) {
+					input.onStdout(`verification ${index + 1} passed\n`);
+				} else {
+					input.onStderr(`verification ${index + 1} failed with assertion mismatch\n`);
+				}
+				return { exitCode };
+			},
+			terminate: async () => undefined,
+		};
+	}
+}
 
 function replayWorkflow(harness: Harness): {
 	readonly store: WorkflowStore;
@@ -255,14 +346,194 @@ describe("Direct Workflow AgentSession integration", () => {
 		});
 	});
 
+	it("runs a balanced Plan Lite contract and deterministic verification before Reviewer", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const verificationFactory = new SequencedVerificationFactory([0]);
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			modelGateway: routingGateway(),
+		});
+		const harness = await createHarness({
+			subagentRuntime,
+			jobRuntime: new JobRuntime({
+				processFactory: verificationFactory,
+				runtimeRegistry: new WorkflowRuntimeRegistry(),
+			}),
+			models: [
+				{ id: "faux-strong", name: "Faux Strong" },
+				{ id: "faux-fast", name: "Faux Fast" },
+				{ id: "faux-balanced", name: "Faux Balanced" },
+			],
+			modelRouting: {
+				enabled: true,
+				fastModel: "faux/faux-fast",
+				balancedModel: "faux/faux-balanced",
+				strongModel: "faux/faux-strong",
+			},
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking(
+			"direct",
+			false,
+			DIRECT_PLANNER_LITE_REVIEWER_PROTOCOL,
+			{ maxDurationMs: 60_000 },
+			["node --test"],
+		);
+		harness.setResponses([fauxAssistantMessage("Implemented from the execution contract")]);
+
+		const prompt = harness.session.prompt("Fix a bounded asynchronous cache bug");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		expect(factory.sessions[0]?.config.profile.name).toBe("planner-lite");
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "Edit src/cache.ts, preserve in-flight sharing, then run node --test",
+				evidence: [{ path: "src/cache.ts", line: 10, note: "Cache implementation" }],
+				verificationSummary: ["Run node --test after implementation"],
+			}),
+		);
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(2));
+		expect(verificationFactory.commands).toEqual(["node --test"]);
+		expect(factory.sessions[1]?.config.profile.name).toBe("reviewer");
+		factory.sessions[1]?.complete(
+			subagentHandoff({
+				conclusion: "Delivery review passed",
+				verificationSummary: ["review:passed"],
+			}),
+		);
+		await prompt;
+
+		expect(
+			harness.session.messages.some(
+				(message) =>
+					message.role === "custom" &&
+					message.customType === "workflow-protocol-handoff" &&
+					getMessageText(message).includes("Execution Contract"),
+			),
+		).toBe(true);
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { status: "completed" },
+			agents: [
+				expect.objectContaining({
+					profileName: "planner-lite",
+					modelRoute: expect.objectContaining({ role: "planner_lite", tier: "balanced" }),
+				}),
+				expect.objectContaining({ profileName: "reviewer" }),
+			],
+			executionProtocol: {
+				satisfied: true,
+				requirements: [
+					expect.objectContaining({ id: "planner-lite-before-main", succeededRuns: 1 }),
+					expect.objectContaining({ id: "reviewer-before-delivery", succeededRuns: 1 }),
+				],
+			},
+		});
+	});
+
+	it("blocks Reviewer and gives Strong Repair the contract, diff, and failed test log", async () => {
+		const factory = new FakeSubagentSessionFactory();
+		const verificationFactory = new SequencedVerificationFactory([1, 1]);
+		const subagentRuntime = new SubagentRuntime({
+			sessionFactory: factory,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			modelGateway: routingGateway(),
+		});
+		const harness = await createHarness({
+			subagentRuntime,
+			jobRuntime: new JobRuntime({
+				processFactory: verificationFactory,
+				runtimeRegistry: new WorkflowRuntimeRegistry(),
+			}),
+			models: [
+				{ id: "faux-strong", name: "Faux Strong" },
+				{ id: "faux-fast", name: "Faux Fast" },
+				{ id: "faux-balanced", name: "Faux Balanced" },
+			],
+			modelRouting: {
+				enabled: true,
+				fastModel: "faux/faux-fast",
+				balancedModel: "faux/faux-balanced",
+				strongModel: "faux/faux-strong",
+			},
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking(
+			"direct",
+			false,
+			DIRECT_PLANNER_LITE_REVIEWER_PROTOCOL,
+			{ maxDurationMs: 60_000 },
+			["node --test"],
+		);
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("write", { path: "src/cache.ts", content: "export const cache = true;\n" }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Initial implementation"),
+			fauxAssistantMessage("Repair attempted"),
+		]);
+
+		const prompt = harness.session.prompt("Fix a bounded asynchronous cache bug");
+		await vi.waitFor(() => expect(factory.sessions).toHaveLength(1));
+		factory.sessions[0]?.complete(
+			subagentHandoff({
+				conclusion: "Edit src/cache.ts and verify in-flight sharing",
+				evidence: [{ path: "src/cache.ts", line: 1, note: "Cache implementation" }],
+				verificationSummary: ["Run node --test"],
+			}),
+		);
+		await expect(prompt).rejects.toThrow("still failed after Repair");
+
+		expect(factory.sessions).toHaveLength(1);
+		expect(verificationFactory.commands).toEqual(["node --test", "node --test"]);
+		const repairMessage = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "workflow-protocol-repair",
+		);
+		const repairText = getMessageText(repairMessage);
+		expect(repairText).toContain("Execution Contract");
+		expect(repairText).toContain("src/cache.ts");
+		expect(repairText).toContain("assertion mismatch");
+		const verificationEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "custom" && entry.customType === "workflow-direct-verification");
+		expect(verificationEntries).toHaveLength(2);
+		expect(harness.session.getWorkflowView()).toMatchObject({
+			workflow: { status: "failed" },
+			modelRoutes: [
+				expect.objectContaining({ role: "main", tier: "fast" }),
+				expect.objectContaining({
+					role: "repair",
+					tier: "strong",
+					reasonCode: "model.verification_failure_escalated_strong",
+				}),
+			],
+		});
+	});
+
 	it("runs one bounded Repair and re-reviews a failed Direct delivery", async () => {
 		const factory = new FakeSubagentSessionFactory();
 		const subagentRuntime = new SubagentRuntime({
 			sessionFactory: factory,
 			runtimeRegistry: new WorkflowRuntimeRegistry(),
 			writerLeaseRegistry: new WriterLeaseRegistry(),
+			modelGateway: routingGateway(),
 		});
-		const harness = await createHarness({ subagentRuntime });
+		const harness = await createHarness({
+			subagentRuntime,
+			models: [
+				{ id: "faux-strong", name: "Faux Strong" },
+				{ id: "faux-fast", name: "Faux Fast" },
+				{ id: "faux-balanced", name: "Faux Balanced" },
+			],
+			modelRouting: {
+				enabled: true,
+				fastModel: "faux/faux-fast",
+				balancedModel: "faux/faux-balanced",
+				strongModel: "faux/faux-strong",
+			},
+		});
 		harnesses.push(harness);
 		harness.session.enableWorkflowTracking("direct", false, {
 			...MAIN_REVIEWER_PROTOCOL,
@@ -302,8 +573,20 @@ describe("Direct Workflow AgentSession integration", () => {
 		const rootTask = workflow?.rootTaskId ? store.getTask(workflow.rootTaskId) : undefined;
 		expect(rootTask ? store.listAttempts(rootTask.id) : []).toHaveLength(2);
 		expect(store.listVerifications(workflowId).map(({ status }) => status)).toEqual(["failed", "passed"]);
+		expect(subagentRuntime.list(workflowId).map(({ modelRoute }) => modelRoute)).toMatchObject([
+			{ tier: "balanced", reasonCode: "model.reviewer.balanced" },
+			{ tier: "balanced", reasonCode: "model.retry_role_tier" },
+		]);
 		expect(harness.session.getWorkflowView()).toMatchObject({
 			workflow: { status: "completed" },
+			modelRoutes: [
+				expect.objectContaining({ role: "main", tier: "fast" }),
+				expect.objectContaining({
+					role: "repair",
+					tier: "strong",
+					reasonCode: "model.verification_failure_escalated_strong",
+				}),
+			],
 			executionProtocol: {
 				satisfied: true,
 				requirements: [

@@ -1,4 +1,4 @@
-import type { ResolvedExecutionMode, RiskLevel } from "./types.ts";
+import type { ResolvedExecutionMode, RiskLevel, TaskLevel } from "./types.ts";
 
 export const COMPLEXITY_LEVELS = ["low", "medium", "high"] as const;
 export type ComplexityLevel = (typeof COMPLEXITY_LEVELS)[number];
@@ -16,6 +16,7 @@ export interface ModeAssessment {
 }
 
 export interface ModeAdvice extends ModeAssessment {
+	readonly taskLevel: TaskLevel;
 	readonly suggestedMode: ResolvedExecutionMode;
 }
 
@@ -27,6 +28,18 @@ export class ModeAdviceError extends Error {
 		this.name = "ModeAdviceError";
 		this.code = code;
 	}
+}
+
+export function classifyTaskLevel(
+	assessment: Pick<ModeAssessment, "complexity" | "riskLevel" | "confidence">,
+): TaskLevel {
+	if (assessment.riskLevel === "high") {
+		return "high_risk";
+	}
+	if (assessment.complexity === "high" || assessment.riskLevel === "medium" || assessment.confidence === "low") {
+		return "hard";
+	}
+	return assessment.complexity === "medium" ? "medium" : "simple";
 }
 
 export function adviseExecutionMode(assessment: ModeAssessment): ModeAdvice {
@@ -50,13 +63,13 @@ export function adviseExecutionMode(assessment: ModeAssessment): ModeAdvice {
 		throw new ModeAdviceError("mode_advice.reason_required", "Mode advice reason is required");
 	}
 
-	const directAllowed =
-		assessment.complexity !== "high" && assessment.riskLevel === "low" && assessment.confidence !== "low";
+	const taskLevel = classifyTaskLevel(assessment);
 	return {
 		complexity: assessment.complexity,
 		riskLevel: assessment.riskLevel,
 		confidence: assessment.confidence,
 		reason,
-		suggestedMode: directAllowed ? "direct" : "plan",
+		taskLevel,
+		suggestedMode: taskLevel === "simple" || taskLevel === "medium" ? "direct" : "plan",
 	};
 }

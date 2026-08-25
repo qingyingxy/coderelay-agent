@@ -15,19 +15,20 @@ describe("automatic execution mode advice", () => {
 			riskLevel: "low",
 			confidence: "high",
 			reason: "The request is a localized text change",
+			taskLevel: "simple",
 			suggestedMode: "direct",
 		});
 	});
 
-	it("allows a medium-complexity Direct suggestion when risk is low", () => {
+	it("keeps bounded medium-complexity work in Direct when risk is low", () => {
 		expect(
 			adviseExecutionMode({
 				complexity: "medium",
 				riskLevel: "low",
 				confidence: "medium",
 				reason: "The affected boundary is known and verification is focused",
-			}).suggestedMode,
-		).toBe("direct");
+			}),
+		).toMatchObject({ taskLevel: "medium", suggestedMode: "direct" });
 	});
 
 	it.each([
@@ -49,15 +50,21 @@ describe("automatic execution mode advice", () => {
 			riskLevel: "low" as const,
 			confidence: "low" as const,
 		},
+		{
+			name: "high risk",
+			complexity: "low" as const,
+			riskLevel: "high" as const,
+			confidence: "high" as const,
+		},
 	])("suggests Plan for $name", ({ complexity, riskLevel, confidence }) => {
-		expect(
-			adviseExecutionMode({
-				complexity,
-				riskLevel,
-				confidence,
-				reason: "Planning is the conservative choice",
-			}).suggestedMode,
-		).toBe("plan");
+		const advice = adviseExecutionMode({
+			complexity,
+			riskLevel,
+			confidence,
+			reason: "Planning is the conservative choice",
+		});
+		expect(advice.suggestedMode).toBe("plan");
+		expect(advice.taskLevel).toBe(riskLevel === "high" ? "high_risk" : "hard");
 	});
 
 	it("rejects malformed runtime assessments", () => {

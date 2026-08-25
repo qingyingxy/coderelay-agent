@@ -721,6 +721,8 @@ export async function main(args: string[], options?: MainOptions) {
 			model: sessionOptions.model,
 			thinkingLevel: sessionOptions.thinkingLevel,
 			scopedModels: sessionOptions.scopedModels,
+			modelRoutingUserOverride:
+				parsed.model !== undefined || parsed.provider !== undefined || parsed.models !== undefined,
 			tools: sessionOptions.tools,
 			excludeTools: sessionOptions.excludeTools,
 			noTools: sessionOptions.noTools,

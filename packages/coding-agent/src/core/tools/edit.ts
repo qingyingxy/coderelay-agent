@@ -20,7 +20,7 @@ import {
 	stripBom,
 } from "./edit-diff.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToCwd } from "./path-utils.ts";
+import { resolveWritePath } from "./path-utils.ts";
 import { renderToolPath, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -307,7 +307,7 @@ export function createEditToolDefinition(
 		prepareArguments: prepareEditArguments,
 		async execute(_toolCallId, input: EditToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const { path, edits } = validateEditInput(input);
-			const absolutePath = resolveToCwd(path, cwd);
+			const absolutePath = resolveWritePath(path, cwd);
 
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the

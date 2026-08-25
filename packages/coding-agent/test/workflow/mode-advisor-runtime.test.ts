@@ -12,10 +12,32 @@ describe("Mode Advisor runtime", () => {
 		});
 
 		expect(envelope).toMatchObject({
+			promptVersion: "mode-advisor-v3",
 			role: "mode_advisor",
 			profileName: "mode-advisor",
 			toolNames: [],
+			outputSchema: {
+				jsonSchema: {
+					properties: {
+						clarificationCandidates: {
+							items: {
+								properties: {
+									impact: {
+										enum: ["scope", "behavior", "architecture", "safety", "verification", "preference"],
+									},
+								},
+							},
+						},
+					},
+				},
+			},
 		});
+		expect(envelope.constraints.find(({ id }) => id === "mode-advisor-complexity-rubric")?.description).toContain(
+			"Promise coalescing",
+		);
+		expect(envelope.constraints.find(({ id }) => id === "mode-advisor-complexity-rubric")?.description).toContain(
+			"cross-module or distributed concurrency",
+		);
 	});
 
 	it("derives Plan and preserves required clarification", () => {
@@ -36,10 +58,33 @@ describe("Mode Advisor runtime", () => {
 			}),
 		);
 
-		expect(result.advice.suggestedMode).toBe("plan");
+		expect(result.advice).toMatchObject({ taskLevel: "hard", suggestedMode: "plan" });
 		expect(result.clarification).toMatchObject({
 			required: true,
 			questions: [{ id: "migration-target" }],
 		});
+	});
+
+	it("preserves valid advice when an optional clarification candidate is malformed", () => {
+		const result = parseModeAdvisorResult(
+			JSON.stringify({
+				complexity: "medium",
+				riskLevel: "low",
+				confidence: "medium",
+				reason: "The change is bounded to one asynchronous cache component",
+				clarificationCandidates: [
+					{
+						id: "ttl-policy",
+						question: "Should reads extend the TTL?",
+						impact: "Determines whether reads extend the TTL",
+						changesImplementation: true,
+					},
+				],
+			}),
+		);
+
+		expect(result.advice).toMatchObject({ taskLevel: "medium", suggestedMode: "direct" });
+		expect(result.candidates).toEqual([]);
+		expect(result.clarification.required).toBe(false);
 	});
 });

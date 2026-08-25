@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { executeBashWithOperations } from "../bash-executor.ts";
+import { createLocalBashOperations } from "../tools/bash.ts";
 import { validateAgentProfile } from "../workflow/agent-profile.ts";
 import type { AgentCreationReasonCode, BackendSelectionReasonCode } from "../workflow/decision-reasons.ts";
+import type { ModelGateway } from "../workflow/model-gateway.ts";
 import {
 	assertBudgetAvailable,
 	evaluateBudget,
@@ -18,7 +21,7 @@ import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "../work
 import { AgentRegistry, AgentRegistryError } from "./agent-registry.ts";
 import { compileAgentEnforcementPlan, type EnforcementMode, parseEnforcementMode } from "./enforcement-plan.ts";
 import { GitWorktreeWorkspaceProvider } from "./git-worktree-workspace-provider.ts";
-import { parseHandoff } from "./handoff.ts";
+import { HandoffValidationError, parseHandoff, STRUCTURED_HANDOFF_RETRY_INSTRUCTION } from "./handoff.ts";
 import { DEFAULT_WORKSPACE_INTEGRATION_QUEUE, type WorkspaceIntegrationQueue } from "./integration-queue.ts";
 import {
 	type ConflictResolutionAttempt,
@@ -51,6 +54,8 @@ import {
 import type { SubagentService } from "./subagent-service.ts";
 import type {
 	AgentBackend,
+	AgentBackendPolicy,
+	AgentCommandDiagnostic,
 	AgentInstance,
 	AgentRecoveryContext,
 	AgentRunResult,
@@ -58,6 +63,7 @@ import type {
 	AgentTranscriptEntry,
 	AgentTranscriptEntryType,
 	AgentTranscriptView,
+	ControlledVerificationRunner,
 	Handoff,
 	RetrySubagentInput,
 	SpawnSubagentInput,
@@ -72,6 +78,13 @@ import type { WorkspaceProvider } from "./workspace-provider.ts";
 const ACTIVE_AGENT_STATUSES = new Set(["starting", "running", "waiting"]);
 const LIVE_AGENT_STATUSES = new Set(["starting", "idle", "running", "waiting", "stopping"]);
 const MUTATION_TOOLS = new Set(["edit", "write"]);
+const COMMAND_DIAGNOSTIC_PREFIX = "Command diagnostic: ";
+const WORKER_NO_PROGRESS_STEER_TURNS = 6;
+const WORKER_NO_PROGRESS_STOP_TURNS = 20;
+const DEFAULT_WORKER_NO_PROGRESS_STEER_MS = 60_000;
+const DEFAULT_WORKER_NO_PROGRESS_STOP_MS = 150_000;
+const DEFAULT_CONTROLLED_VERIFICATION_TIMEOUT_MS = 120_000;
+const REVIEWER_FINALIZE_TURNS = 5;
 
 interface PendingMutation {
 	readonly path: string;
@@ -83,9 +96,52 @@ interface RuntimeEventShape {
 	readonly toolCallId?: unknown;
 	readonly toolName?: unknown;
 	readonly args?: unknown;
+	readonly result?: unknown;
 	readonly isError?: unknown;
 	readonly message?: unknown;
 }
+
+interface PendingCommand {
+	readonly command: string;
+}
+
+interface ControlledVerificationState {
+	readonly promise: Promise<void>;
+}
+
+interface ControlledVerificationRecord {
+	readonly sequence: number;
+	readonly diagnostic: AgentCommandDiagnostic;
+}
+
+interface RequiredVerificationProblem {
+	readonly kind: "not_run" | "failed" | "stale";
+	readonly command: string;
+	readonly message: string;
+}
+
+const localVerificationOperations = createLocalBashOperations();
+
+const defaultVerificationRunner: ControlledVerificationRunner = async (input) => {
+	try {
+		const result = await executeBashWithOperations(input.command, input.cwd, localVerificationOperations, {
+			timeoutMs: input.timeoutMs,
+			environment: input.environment,
+		});
+		return {
+			exitCode: result.exitCode,
+			output: result.output,
+			timedOut: false,
+		};
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			exitCode: undefined,
+			output: message,
+			timedOut: /^timeout:/i.test(message),
+		};
+	}
+};
 
 export interface SubagentRuntimeOptions {
 	readonly sessionFactory: SubagentSessionFactory;
@@ -96,6 +152,12 @@ export interface SubagentRuntimeOptions {
 	readonly createId?: (kind: "agent" | "handoff") => string;
 	readonly now?: () => number;
 	readonly maxAgents?: number;
+	readonly maxAgentDurationMs?: number;
+	readonly workerNoProgressSteerMs?: number;
+	readonly workerNoProgressStopMs?: number;
+	readonly controlledVerificationTimeoutMs?: number;
+	readonly verificationRunner?: ControlledVerificationRunner;
+	readonly defaultBackend?: AgentBackendPolicy;
 	readonly writerLeaseTtlMs?: number;
 	readonly persistence?: SubagentPersistence;
 	readonly workspaceProvider?: WorkspaceProvider;
@@ -112,6 +174,8 @@ export interface SubagentRuntimeOptions {
 	};
 	readonly retentionPolicy?: SubagentRetentionPolicy;
 	readonly redactor?: SecretRedactor;
+	readonly modelGateway?: ModelGateway;
+	readonly writeDeniedPaths?: readonly string[];
 }
 
 export class SubagentRuntimeError extends Error {
@@ -145,6 +209,66 @@ function mutationPath(args: unknown): string | undefined {
 		return value.path;
 	}
 	return typeof value.file_path === "string" && value.file_path.trim() ? value.file_path : undefined;
+}
+
+function commandText(args: unknown): string | undefined {
+	if (typeof args !== "object" || args === null || !("command" in args)) {
+		return undefined;
+	}
+	const command = args.command;
+	return typeof command === "string" && command.trim() ? command : undefined;
+}
+
+function diagnosticOutput(value: unknown): string | undefined {
+	if (value === undefined) {
+		return undefined;
+	}
+	let serialized: string;
+	if (typeof value === "string") {
+		serialized = value;
+	} else {
+		try {
+			serialized = JSON.stringify(value);
+		} catch {
+			serialized = String(value);
+		}
+	}
+	const maximumChars = 16 * 1024;
+	return serialized.length > maximumChars
+		? `[Earlier output truncated by ${serialized.length - maximumChars} chars]\n${serialized.slice(-maximumChars)}`
+		: serialized;
+}
+
+function parseCommandDiagnostic(text: string): AgentCommandDiagnostic | undefined {
+	if (!text.startsWith(COMMAND_DIAGNOSTIC_PREFIX)) {
+		return undefined;
+	}
+	let value: unknown;
+	try {
+		value = JSON.parse(text.slice(COMMAND_DIAGNOSTIC_PREFIX.length));
+	} catch {
+		return undefined;
+	}
+	if (typeof value !== "object" || value === null) {
+		return undefined;
+	}
+	const diagnostic = value as Partial<AgentCommandDiagnostic>;
+	if (
+		typeof diagnostic.toolCallId !== "string" ||
+		typeof diagnostic.command !== "string" ||
+		(diagnostic.status !== "succeeded" && diagnostic.status !== "failed") ||
+		(diagnostic.output !== undefined && typeof diagnostic.output !== "string") ||
+		(diagnostic.source !== undefined && diagnostic.source !== "agent" && diagnostic.source !== "controlled")
+	) {
+		return undefined;
+	}
+	return {
+		toolCallId: diagnostic.toolCallId,
+		command: diagnostic.command,
+		status: diagnostic.status,
+		output: diagnostic.output,
+		source: diagnostic.source,
+	};
 }
 
 function turnUsage(message: unknown): ResourceUsage | undefined {
@@ -203,6 +327,12 @@ export class SubagentRuntime implements SubagentService {
 	readonly #createId: (kind: "agent" | "handoff") => string;
 	readonly #now: () => number;
 	readonly #maxAgents: number;
+	readonly #maxAgentDurationMs: number | undefined;
+	readonly #workerNoProgressSteerMs: number;
+	readonly #workerNoProgressStopMs: number;
+	readonly #controlledVerificationTimeoutMs: number;
+	readonly #verificationRunner: ControlledVerificationRunner;
+	readonly #defaultBackend: AgentBackendPolicy | undefined;
 	readonly #writerLeaseTtlMs: number;
 	readonly #persistence?: SubagentPersistence;
 	readonly #workspaceProvider: WorkspaceProvider;
@@ -213,6 +343,8 @@ export class SubagentRuntime implements SubagentService {
 	readonly #maxConcurrentWriters: number;
 	readonly #retentionPolicy: SubagentRetentionPolicy;
 	readonly #redactor: SecretRedactor;
+	readonly #modelGateway: ModelGateway | undefined;
+	readonly #writeDeniedPaths: readonly string[];
 	readonly #unsubscribeRegistry: () => void;
 	readonly #resourceRecovery: Promise<void>;
 	readonly #sessions = new Map<AgentId, SubagentSession>();
@@ -222,6 +354,7 @@ export class SubagentRuntime implements SubagentService {
 	readonly #runPromises = new Map<AgentId, Promise<AgentRunResult>>();
 	readonly #lastResults = new Map<AgentId, AgentRunResult>();
 	readonly #lastPrompts = new Map<AgentId, string>();
+	readonly #originalPrompts = new Map<AgentId, string>();
 	readonly #interruptPromises = new Map<AgentId, Promise<AgentRunResult>>();
 	readonly #interruptReasons = new Map<AgentId, string>();
 	readonly #leaseIds = new Map<AgentId, string>();
@@ -229,14 +362,27 @@ export class SubagentRuntime implements SubagentService {
 	readonly #unsubscribeEvents = new Map<AgentId, () => void>();
 	readonly #interrupting = new Set<AgentId>();
 	readonly #pendingMutations = new Map<AgentId, Map<string, PendingMutation>>();
+	readonly #pendingCommands = new Map<AgentId, Map<string, PendingCommand>>();
+	readonly #commandDiagnostics = new Map<AgentId, AgentCommandDiagnostic[]>();
 	readonly #modifications = new Map<AgentId, SubagentModification[]>();
 	readonly #incrementalUsage = new Map<AgentId, ResourceUsage>();
 	readonly #transcripts = new Map<AgentId, AgentTranscriptEntry[]>();
 	readonly #releasedWorkspaceAgents = new Set<AgentId>();
 	readonly #sandboxHandles = new Map<AgentId, SandboxHandle>();
 	readonly #workspaceRecovery = new Map<AgentId, WorkspaceRecoveryVerification>();
+	readonly #noProgressSteered = new Set<AgentId>();
+	readonly #noProgressStopped = new Set<AgentId>();
+	readonly #verificationCompleteSteered = new Set<AgentId>();
+	readonly #reviewerFinalizeSteered = new Set<AgentId>();
+	readonly #verificationModificationCounts = new Map<AgentId, Map<string, number>>();
+	readonly #verificationEnvironments = new Map<AgentId, Readonly<Record<string, string>>>();
+	readonly #controlledVerifications = new Map<AgentId, Map<string, ControlledVerificationState>>();
+	readonly #controlledVerificationResults = new Map<AgentId, Map<string, ControlledVerificationRecord>>();
+	readonly #noProgressTimers = new Map<AgentId, readonly ReturnType<typeof setTimeout>[]>();
 	#transcriptSequence = 0;
+	#controlledVerificationSequence = 0;
 	#persistenceRecordsSinceCheckpoint = 0;
+	#disposePromise: Promise<void> | undefined;
 
 	constructor(options: SubagentRuntimeOptions) {
 		const sessionFactories = new Map<AgentBackend, SubagentSessionFactory>([["rpc", options.sessionFactory]]);
@@ -254,6 +400,13 @@ export class SubagentRuntime implements SubagentService {
 		this.#runtimeRegistry = options.runtimeRegistry ?? DEFAULT_WORKFLOW_RUNTIME_REGISTRY;
 		this.#createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
 		this.#maxAgents = options.maxAgents ?? 8;
+		this.#maxAgentDurationMs = options.maxAgentDurationMs;
+		this.#workerNoProgressSteerMs = options.workerNoProgressSteerMs ?? DEFAULT_WORKER_NO_PROGRESS_STEER_MS;
+		this.#workerNoProgressStopMs = options.workerNoProgressStopMs ?? DEFAULT_WORKER_NO_PROGRESS_STOP_MS;
+		this.#controlledVerificationTimeoutMs =
+			options.controlledVerificationTimeoutMs ?? DEFAULT_CONTROLLED_VERIFICATION_TIMEOUT_MS;
+		this.#verificationRunner = options.verificationRunner ?? defaultVerificationRunner;
+		this.#defaultBackend = options.defaultBackend;
 		this.#writerLeaseTtlMs = options.writerLeaseTtlMs ?? 60_000;
 		this.#persistence = options.persistence;
 		this.#workspaceProvider = options.workspaceProvider ?? new GitWorktreeWorkspaceProvider();
@@ -281,9 +434,39 @@ export class SubagentRuntime implements SubagentService {
 			: undefined;
 		this.#retentionPolicy = options.retentionPolicy ?? DEFAULT_SUBAGENT_RETENTION_POLICY;
 		this.#redactor = options.redactor ?? new SecretRedactor();
+		this.#modelGateway = options.modelGateway;
+		this.#writeDeniedPaths = [
+			...new Set((options.writeDeniedPaths ?? []).map((path) => path.trim()).filter(Boolean)),
+		];
 		validateSubagentRetentionPolicy(this.#retentionPolicy);
 		if (!Number.isInteger(this.#maxAgents) || this.#maxAgents < 1) {
 			throw new SubagentRuntimeError("subagent.invalid_max_agents", "Subagent maxAgents must be positive");
+		}
+		if (
+			this.#maxAgentDurationMs !== undefined &&
+			(!Number.isInteger(this.#maxAgentDurationMs) || this.#maxAgentDurationMs < 1)
+		) {
+			throw new SubagentRuntimeError(
+				"subagent.invalid_max_agent_duration",
+				"Subagent maxAgentDurationMs must be a positive integer",
+			);
+		}
+		if (
+			!Number.isInteger(this.#workerNoProgressSteerMs) ||
+			this.#workerNoProgressSteerMs < 1 ||
+			!Number.isInteger(this.#workerNoProgressStopMs) ||
+			this.#workerNoProgressStopMs <= this.#workerNoProgressSteerMs
+		) {
+			throw new SubagentRuntimeError(
+				"subagent.invalid_no_progress_thresholds",
+				"Worker no-progress thresholds must be positive integers and stop must be greater than steer",
+			);
+		}
+		if (!Number.isInteger(this.#controlledVerificationTimeoutMs) || this.#controlledVerificationTimeoutMs < 1) {
+			throw new SubagentRuntimeError(
+				"subagent.invalid_verification_timeout",
+				"Controlled verification timeout must be a positive integer",
+			);
 		}
 		this.#restorePersistedState();
 		if (this.#persistence?.compact && this.registry.list().length > 0) {
@@ -298,7 +481,9 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	availableSlots(workflowId: string): number {
-		const liveAgents = this.registry.list(workflowId).filter(({ status }) => LIVE_AGENT_STATUSES.has(status));
+		const liveAgents = this.registry
+			.list(workflowId)
+			.filter(({ status, sessionReleasedAt }) => LIVE_AGENT_STATUSES.has(status) && !sessionReleasedAt);
 		return Math.max(0, this.#maxAgents - liveAgents.length);
 	}
 
@@ -327,7 +512,9 @@ export class SubagentRuntime implements SubagentService {
 				profileViolations.map(({ message }) => message).join("; "),
 			);
 		}
-		const liveAgents = this.registry.list(input.workflowId).filter(({ status }) => LIVE_AGENT_STATUSES.has(status));
+		const liveAgents = this.registry
+			.list(input.workflowId)
+			.filter(({ status, sessionReleasedAt }) => LIVE_AGENT_STATUSES.has(status) && !sessionReleasedAt);
 		if (liveAgents.length >= this.#maxAgents) {
 			throw new SubagentRuntimeError(
 				"subagent.agent_limit",
@@ -363,7 +550,8 @@ export class SubagentRuntime implements SubagentService {
 		const activeAgents = this.registry
 			.list(input.workflowId)
 			.filter(({ status }) => ACTIVE_AGENT_STATUSES.has(status)).length;
-		assertBudgetAvailable(workflowBudget, zeroUsage(), {
+		const workflowUsage = sumResourceUsage(this.registry.list(input.workflowId).map(({ usage }) => usage));
+		assertBudgetAvailable(workflowBudget, workflowUsage, {
 			activeAgents: activeAgents + 1,
 			agentDepth: depth,
 		});
@@ -376,20 +564,44 @@ export class SubagentRuntime implements SubagentService {
 			workflow: workflowPermission,
 			task: input.taskPermission,
 		});
-		const budget = inheritBudgetLimits(parentBudget, workflowBudget, input.taskBudget, input.profile.defaultBudget);
+		const inheritedBudget = inheritBudgetLimits(
+			parentBudget,
+			workflowBudget,
+			input.taskBudget,
+			input.profile.defaultBudget,
+		);
+		const remainingWorkflowDurationMs =
+			input.workflowDeadlineAtMs === undefined ? undefined : Math.floor(input.workflowDeadlineAtMs - this.#now());
+		if (remainingWorkflowDurationMs !== undefined && remainingWorkflowDurationMs < 1) {
+			throw new RuntimePolicyError(
+				"runtime_policy.workflow_duration_exhausted",
+				`Workflow ${input.workflowId} duration budget is exhausted`,
+			);
+		}
+		const durationLimits = [
+			inheritedBudget.maxDurationMs,
+			this.#maxAgentDurationMs,
+			remainingWorkflowDurationMs,
+		].filter((value): value is number => value !== undefined);
+		const budget =
+			durationLimits.length > 0
+				? { ...inheritedBudget, maxDurationMs: Math.min(...durationLimits) }
+				: inheritedBudget;
 		const {
 			backend,
 			reason: backendReason,
 			reasonCode: backendReasonCode,
-		} = this.#selectBackend(input, effectivePermissions, budget);
+		} = this.#selectBackend(
+			input.backend === undefined && this.#defaultBackend ? { ...input, backend: this.#defaultBackend } : input,
+			effectivePermissions,
+			budget,
+		);
 		const creationReasonCode = this.#resolveCreationReasonCode(input);
 		const sessionFactory = this.#sessionFactories.get(backend);
 		if (!sessionFactory) {
 			throw new SubagentRuntimeError("subagent.backend_unsupported", `Subagent backend ${backend} is unavailable`);
 		}
-		const toolNames = filterToolsByPermissions(input.profile.allowedTools, effectivePermissions).filter(
-			(toolName) => toolName !== "bash" || effectivePermissions.network,
-		);
+		const toolNames = filterToolsByPermissions(input.profile.allowedTools, effectivePermissions);
 		if (!this.#workflowBudgets.has(input.workflowId)) {
 			this.#workflowBudgets.set(input.workflowId, workflowBudget);
 		}
@@ -397,13 +609,44 @@ export class SubagentRuntime implements SubagentService {
 			this.#workflowPermissions.set(input.workflowId, workflowPermission);
 		}
 		const agentId = this.#createId("agent");
-		const modelName = resolveSubagentModelName(input.cwd, input.profile.model);
+		const configuredModelName = resolveSubagentModelName(input.cwd, input.profile.model);
+		const modelRoute = this.#modelGateway?.options.enabled
+			? this.#modelGateway.route({
+					role: input.profile.role,
+					currentModelName: configuredModelName,
+					explicitModel: input.profile.model !== undefined,
+					riskLevel: input.riskLevel,
+					escalationReason: input.modelEscalationReason,
+					budget,
+					usage: workflowUsage,
+				})
+			: undefined;
+		const modelName = modelRoute?.model ? modelRoute.record.modelName : configuredModelName;
+		const effectiveProfile =
+			modelRoute && modelRoute.record.source === "configured" && modelRoute.record.modelName !== configuredModelName
+				? { ...input.profile, model: modelRoute.record.modelName }
+				: input.profile;
 		const workspace = await this.#workspaceProvider.prepare({
 			agentId,
 			backend,
 			write: effectivePermissions.write,
 			input,
 		});
+		if (
+			input.recoveryContext?.artifact &&
+			input.recoveryContext.artifact.changedFiles.length > 0 &&
+			this.#workspaceProvider.restoreArtifact
+		) {
+			try {
+				await this.#workspaceProvider.restoreArtifact(workspace, input.recoveryContext.artifact);
+			} catch (error) {
+				await this.#workspaceProvider.release(workspace).catch(() => undefined);
+				throw new SubagentRuntimeError(
+					"workspace.recovery_restore_failed",
+					`Failed to restore Artifact ${input.recoveryContext.artifact.id}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
 		if (this.#enforcementMode === "strict" && effectivePermissions.write && workspace.assurance !== "isolated") {
 			await this.#workspaceProvider.release(workspace);
 			throw new SubagentRuntimeError(
@@ -416,6 +659,7 @@ export class SubagentRuntime implements SubagentService {
 			backend,
 			workspace,
 			permissions: effectivePermissions,
+			writeDeniedPaths: this.#writeDeniedPaths,
 			providerEnvironmentKeys: providerEnvironmentKeys(modelName),
 		});
 		let sandboxHandle: SandboxHandle;
@@ -430,6 +674,9 @@ export class SubagentRuntime implements SubagentService {
 			throw error;
 		}
 		this.#sandboxHandles.set(agentId, sandboxHandle);
+		this.#verificationEnvironments.set(agentId, Object.freeze({ ...sandboxHandle.environment }));
+		this.#controlledVerifications.set(agentId, new Map());
+		this.#controlledVerificationResults.set(agentId, new Map());
 		const sandbox = await this.#sandboxBackend.verify(sandboxHandle);
 		const timestamp = new Date(this.#now()).toISOString();
 		this.registry.create({
@@ -439,9 +686,10 @@ export class SubagentRuntime implements SubagentService {
 			taskId: input.taskId,
 			attemptId: input.attemptId,
 			profileName: input.profile.name,
-			profile: structuredClone(input.profile),
+			profile: structuredClone(effectiveProfile),
 			profileSource: input.profileSource ?? "runtime",
 			profileSourcePath: input.profileSourcePath,
+			modelRoute: modelRoute?.record,
 			scope: input.scope ?? "task",
 			backend,
 			backendReason,
@@ -466,7 +714,7 @@ export class SubagentRuntime implements SubagentService {
 		});
 		const session = sessionFactory.create({
 			cwd: workspace.path,
-			profile: input.profile,
+			profile: effectiveProfile,
 			modelName,
 			toolNames,
 			effectivePermissions,
@@ -480,11 +728,15 @@ export class SubagentRuntime implements SubagentService {
 			agentId,
 			structuredClone({
 				...input,
+				profile: effectiveProfile,
 				workflowBudget,
 				workflowPermission,
 			}),
 		);
 		this.#pendingMutations.set(agentId, new Map());
+		this.#pendingCommands.set(agentId, new Map());
+		this.#commandDiagnostics.set(agentId, []);
+		this.#verificationModificationCounts.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
 		this.#incrementalUsage.set(agentId, zeroUsage());
 		this.#transcripts.set(agentId, []);
@@ -493,8 +745,23 @@ export class SubagentRuntime implements SubagentService {
 			session.onEvent((event) => this.#handleSessionEvent(agentId, event)),
 		);
 		try {
-			await session.start();
-			this.registry.setSession(agentId, await session.getSessionId());
+			const startTimeoutMs = budget.maxDurationMs ?? 300_000;
+			let startTimer: ReturnType<typeof setTimeout> | undefined;
+			const startPromise = session.start().then(() => session.getSessionId());
+			const startDeadline = new Promise<never>((_resolve, reject) => {
+				startTimer = setTimeout(
+					() =>
+						reject(
+							new SubagentRuntimeError(
+								"subagent.start_timeout",
+								`Agent ${agentId} startup exceeded ${startTimeoutMs}ms`,
+							),
+						),
+					startTimeoutMs,
+				);
+			});
+			const sessionId = await Promise.race([startPromise, startDeadline]).finally(() => clearTimeout(startTimer));
+			this.registry.setSession(agentId, sessionId);
 			this.registry.transition(agentId, "idle");
 			this.#unregisterRuntime.set(
 				agentId,
@@ -578,22 +845,47 @@ export class SubagentRuntime implements SubagentService {
 		});
 		this.reserveWriter(agentId);
 		this.#lastPrompts.set(agentId, message);
+		if (!this.#originalPrompts.has(agentId)) {
+			this.#originalPrompts.set(agentId, message);
+		}
 		this.#recordTranscript(agentId, "prompt", message);
 		this.#pendingMutations.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
 		this.#incrementalUsage.set(agentId, zeroUsage());
 		this.registry.transition(agentId, "running");
 		const startedAt = this.#now();
+		this.#startNoProgressTimers(agentId);
 		const timeoutMs = agent.budget.maxDurationMs ?? 300_000;
-		const idlePromise = session.waitForIdle(timeoutMs);
-		try {
-			await session.prompt(message);
-		} catch (error) {
-			await this.#failRun(agentId, error, startedAt);
+		const idlePromise = session.waitForIdle(timeoutMs).catch((error) => {
+			const message = error instanceof Error ? error.message : String(error);
+			if (
+				/^timeout waiting for agent to become idle\b/i.test(message) ||
+				/^in-process subagent timed out after \d+ms\b/i.test(message)
+			) {
+				throw new SubagentRuntimeError("subagent.duration_exceeded", `Agent ${agentId} exceeded ${timeoutMs}ms`);
+			}
 			throw error;
-		}
-		const runPromise = this.#settleRun(agentId, idlePromise, startedAt);
+		});
+		const promptPromise = session.prompt(message);
+		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+		const deadlinePromise = new Promise<void>((_resolve, reject) => {
+			deadlineTimer = setTimeout(
+				() =>
+					reject(
+						new SubagentRuntimeError("subagent.duration_exceeded", `Agent ${agentId} exceeded ${timeoutMs}ms`),
+					),
+				timeoutMs,
+			);
+		});
+		const completionPromise = Promise.race([
+			Promise.all([promptPromise, idlePromise]).then(() => undefined),
+			deadlinePromise,
+		]).finally(() => clearTimeout(deadlineTimer));
+		const runPromise = this.#settleRun(agentId, completionPromise, startedAt, timeoutMs);
 		this.#runPromises.set(agentId, runPromise);
+		await Promise.race([promptPromise, idlePromise, deadlinePromise]).catch(async () => {
+			await runPromise;
+		});
 	}
 
 	async resume(agentId: AgentId, message: string): Promise<void> {
@@ -692,7 +984,9 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const maximum = source.budget.maxRetries ?? 0;
 		const recoveryReason = input.recoveryReason?.trim();
-		if (!recoveryReason && source.retryCount >= maximum) {
+		const failureReason = input.failureReason?.trim();
+		const isProcessRecovery = !!recoveryReason;
+		if (!isProcessRecovery && source.retryCount >= maximum) {
 			throw new RuntimePolicyError(
 				"runtime_policy.retry_exhausted",
 				`Agent ${agentId} exhausted ${maximum} retries`,
@@ -701,16 +995,17 @@ export class SubagentRuntime implements SubagentService {
 		const existingRetry = this.registry
 			.list(source.workflowId)
 			.find((agent) =>
-				recoveryReason ? agent.recoveryOfAgentId === source.id : agent.retryOfAgentId === source.id,
+				isProcessRecovery ? agent.recoveryOfAgentId === source.id : agent.retryOfAgentId === source.id,
 			);
 		if (existingRetry) {
 			throw new RuntimePolicyError(
-				recoveryReason ? "runtime_policy.recovery_exists" : "runtime_policy.retry_exists",
-				`Agent ${agentId} already has ${recoveryReason ? "recovery" : "retry"} Agent ${existingRetry.id}`,
+				isProcessRecovery ? "runtime_policy.recovery_exists" : "runtime_policy.retry_exists",
+				`Agent ${agentId} already has ${isProcessRecovery ? "recovery" : "retry"} Agent ${existingRetry.id}`,
 			);
 		}
 		const spawnInput = this.#requireInput(agentId);
-		let recoveryContext = recoveryReason ? await this.#buildRecoveryContext(source, recoveryReason) : undefined;
+		const retryReason = recoveryReason ?? failureReason ?? source.lastError ?? "Previous Agent attempt failed";
+		let recoveryContext = await this.#buildRecoveryContext(source, retryReason);
 		if (recoveryContext?.artifact && source.workspace?.kind === "git-worktree") {
 			try {
 				await this.#workspaceProvider.release(source.workspace);
@@ -736,12 +1031,24 @@ export class SubagentRuntime implements SubagentService {
 				};
 			}
 		}
+		const changedFiles = recoveryContext.artifact?.changedFiles.length ?? 0;
+		const modelEscalationReason =
+			input.modelEscalationReason ??
+			(isProcessRecovery
+				? undefined
+				: changedFiles === 0
+					? "no_progress"
+					: source.retryCount > 0
+						? "repeated_failure"
+						: "retry");
 		const retried = await this.spawn({
 			...spawnInput,
 			attemptId: input.attemptId,
-			retryCount: recoveryReason ? source.retryCount : source.retryCount + 1,
-			retryOfAgentId: recoveryReason ? undefined : source.id,
-			recoveryOfAgentId: recoveryReason ? source.id : undefined,
+			taskBudget: input.taskBudget ?? spawnInput.taskBudget,
+			modelEscalationReason,
+			retryCount: isProcessRecovery ? source.retryCount : source.retryCount + 1,
+			retryOfAgentId: isProcessRecovery ? undefined : source.id,
+			recoveryOfAgentId: isProcessRecovery ? source.id : undefined,
 			recoveryContext,
 		});
 		if (input.autoStart ?? true) {
@@ -810,6 +1117,11 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	async dispose(): Promise<void> {
+		this.#disposePromise ??= this.#disposeInternal();
+		await this.#disposePromise;
+	}
+
+	async #disposeInternal(): Promise<void> {
 		await this.#resourceRecovery.catch(() => undefined);
 		await Promise.all(
 			this.registry
@@ -822,56 +1134,67 @@ export class SubagentRuntime implements SubagentService {
 		this.#unsubscribeRegistry();
 	}
 
-	async #settleRun(agentId: AgentId, idlePromise: Promise<void>, startedAt: number): Promise<AgentRunResult> {
+	async #settleRun(
+		agentId: AgentId,
+		idlePromise: Promise<void>,
+		startedAt: number,
+		timeoutMs: number,
+	): Promise<AgentRunResult> {
 		const session = this.#requireSession(agentId);
 		try {
 			await idlePromise;
-			const usage = await session.getUsage();
-			const completedUsage = { ...usage, durationMs: Math.max(0, this.#now() - startedAt) };
+			const usage = await this.#getSessionUsage(agentId, session);
+			let completedUsage = {
+				...usage,
+				durationMs: Math.max(0, this.#now() - startedAt),
+			};
 			this.registry.setUsage(agentId, completedUsage);
 			if (this.#interrupting.has(agentId)) {
 				const reason = this.#interruptReasons.get(agentId) ?? "Agent interrupted";
 				this.#releaseWriter(agentId);
 				this.registry.transition(agentId, "interrupted", reason);
+				this.#recordPendingCommandDiagnostics(agentId, reason);
 				await session.stop();
+				const artifact = await this.#capturePartialWorkspace(agentId, reason);
 				await this.#cleanupAgent(agentId);
 				const interrupted: AgentRunResult = {
 					agentId,
 					status: "interrupted",
 					usage: completedUsage,
 					modifications: this.#modifications.get(agentId) ?? [],
+					artifact,
+					errorCode: reason.startsWith("No implementation progress")
+						? "subagent.no_progress"
+						: "subagent.interrupted",
 					error: reason,
 				};
 				this.#lastResults.set(agentId, interrupted);
 				return structuredClone(interrupted);
 			}
 			const agent = this.#requireAgent(agentId);
-			const evaluation = evaluateBudget(agent.budget, completedUsage);
-			const input = this.#requireInput(agentId);
-			const workflowUsage = sumResourceUsage(this.registry.list(agent.workflowId).map(({ usage }) => usage));
-			const overruns = [...evaluation.exceeded, ...evaluateBudget(input.workflowBudget, workflowUsage).exceeded];
-			if (overruns.length > 0) {
-				const dimensions = [...new Set(overruns.map(({ dimension }) => dimension))];
-				throw new RuntimePolicyError(
-					"runtime_policy.budget_exhausted",
-					`Agent ${agentId} exceeded ${dimensions.join(", ")}`,
-					overruns,
-				);
-			}
+			this.#assertRunBudget(agentId, completedUsage);
 			const text = await session.getLastAssistantText();
 			if (!text) {
 				throw new SubagentRuntimeError("subagent.output_missing", `Agent ${agentId} returned no output`);
 			}
+			this.#recordTranscript(agentId, "assistant", text);
+			const identity = {
+				id: this.#createId("handoff"),
+				workflowId: agent.workflowId,
+				taskId: agent.taskId,
+				attemptId: agent.attemptId,
+				agentId,
+				createdAt: new Date(this.#now()).toISOString(),
+			};
 			const parsedHandoff = this.#redactor.redact(
-				parseHandoff(text, {
-					id: this.#createId("handoff"),
-					workflowId: agent.workflowId,
-					taskId: agent.taskId,
-					attemptId: agent.attemptId,
-					agentId,
-					createdAt: new Date(this.#now()).toISOString(),
-				}),
+				await this.#parseHandoffWithRepair(agentId, agent, session, text, identity, startedAt, timeoutMs),
 			);
+			completedUsage = {
+				...(await this.#getSessionUsage(agentId, session)),
+				durationMs: Math.max(0, this.#now() - startedAt),
+			};
+			this.registry.setUsage(agentId, completedUsage);
+			this.#assertRunBudget(agentId, completedUsage);
 			const artifact = await this.#finalizeWorkspace(agentId, parsedHandoff);
 			const handoff: Handoff = artifact
 				? {
@@ -883,7 +1206,6 @@ export class SubagentRuntime implements SubagentService {
 						],
 					}
 				: parsedHandoff;
-			this.#recordTranscript(agentId, "assistant", text);
 			this.registry.recordHandoff(agentId, handoff);
 			this.#releaseWriter(agentId);
 			if (this.#requireAgent(agentId).status === "waiting") {
@@ -901,11 +1223,404 @@ export class SubagentRuntime implements SubagentService {
 			this.#lastResults.set(agentId, result);
 			return structuredClone(result);
 		} catch (error) {
-			return this.#failRun(agentId, error, startedAt);
+			try {
+				const verifiedCompletion = await this.#completeVerifiedWorkerAtDeadline(agentId, error, startedAt);
+				if (verifiedCompletion) {
+					return verifiedCompletion;
+				}
+			} catch (completionError) {
+				return await this.#failRun(agentId, completionError, startedAt);
+			}
+			return await this.#failRun(agentId, error, startedAt);
 		} finally {
+			this.#clearNoProgressTimers(agentId);
 			this.#runPromises.delete(agentId);
 			this.#interrupting.delete(agentId);
 		}
+	}
+
+	#assertRunBudget(agentId: AgentId, usage: ResourceUsage): void {
+		const agent = this.#requireAgent(agentId);
+		const input = this.#requireInput(agentId);
+		const workflowUsage = sumResourceUsage(this.registry.list(agent.workflowId).map(({ usage }) => usage));
+		const overruns = [
+			...evaluateBudget(agent.budget, usage).exceeded,
+			...evaluateBudget(input.workflowBudget, workflowUsage).exceeded,
+		];
+		if (overruns.length === 0) {
+			return;
+		}
+		const dimensions = [...new Set(overruns.map(({ dimension }) => dimension))];
+		throw new RuntimePolicyError(
+			"runtime_policy.budget_exhausted",
+			`Agent ${agentId} exceeded ${dimensions.join(", ")}`,
+			overruns,
+		);
+	}
+
+	async #getSessionUsage(agentId: AgentId, session: SubagentSession): Promise<ResourceUsage> {
+		const streamed = this.#incrementalUsage.get(agentId) ?? zeroUsage();
+		const reported = await session.getUsage().catch(() => streamed);
+		return {
+			inputTokens: Math.max(reported.inputTokens, streamed.inputTokens),
+			outputTokens: Math.max(reported.outputTokens, streamed.outputTokens),
+			cacheReadTokens: Math.max(reported.cacheReadTokens, streamed.cacheReadTokens),
+			cacheWriteTokens: Math.max(reported.cacheWriteTokens, streamed.cacheWriteTokens),
+			cost: Math.max(reported.cost, streamed.cost),
+			turns: Math.max(reported.turns, streamed.turns),
+			durationMs: Math.max(reported.durationMs, streamed.durationMs),
+		};
+	}
+
+	async #parseHandoffWithRepair(
+		agentId: AgentId,
+		agent: AgentInstance,
+		session: SubagentSession,
+		text: string,
+		identity: Parameters<typeof parseHandoff>[1],
+		startedAt: number,
+		timeoutMs: number,
+	): Promise<Handoff> {
+		let candidate = text;
+		let lastError: unknown;
+		let omittedVerificationRepairAttempted = false;
+		for (let correction = 0; correction < 2; correction++) {
+			await this.#waitForControlledVerifications(agentId);
+			let handoff: Handoff | undefined;
+			try {
+				handoff = parseHandoff(candidate, identity);
+				lastError = undefined;
+			} catch (error) {
+				lastError = error;
+			}
+			const verificationProblem = handoff ? this.#requiredVerificationProblem(agentId) : undefined;
+			if (handoff && !verificationProblem) {
+				return handoff;
+			}
+			if (
+				lastError !== undefined &&
+				(!(lastError instanceof HandoffValidationError) ||
+					(agent.profile?.role !== "worker" &&
+						agent.profile?.role !== "planner_lite" &&
+						agent.profile?.role !== "reviewer"))
+			) {
+				throw lastError;
+			}
+			const remainingMs = timeoutMs - Math.max(0, this.#now() - startedAt);
+			if (remainingMs <= 0) {
+				throw lastError ?? new SubagentRuntimeError("subagent.verification_failed", verificationProblem!.message);
+			}
+			const workerHasNoChanges = agent.profile?.role === "worker" && !this.#hasImplementationProgress(agentId);
+			if (omittedVerificationRepairAttempted && verificationProblem) {
+				throw new SubagentRuntimeError("subagent.verification_failed", verificationProblem.message);
+			}
+			const omittedVerification =
+				verificationProblem?.kind === "not_run" && !workerHasNoChanges ? verificationProblem : undefined;
+			if (omittedVerification) {
+				omittedVerificationRepairAttempted = true;
+			}
+			const repairPrompt = workerHasNoChanges
+				? [
+						"No implementation change was detected. The response repeated planning instead of executing the assigned Task.",
+						"Stay in this same Worker Session. Use the edit or write tool now, run the required verification commands, repair any failure, and return the structured Handoff only after implementation. Do not output another plan.",
+					].join("\n")
+				: omittedVerification
+					? [
+							`Required verification command was not run: ${omittedVerification.command}`,
+							"Stay in this same Worker Session. The implementation patch already exists. Do not modify code or continue investigating before verification.",
+							`Run this exact command now with the bash tool: ${omittedVerification.command}`,
+							"Only if this command fails may you inspect its output and repair the code; rerun the same command after each repair. Return the complete structured Handoff only after it passes. A textual claim that it passed is not verification evidence.",
+						].join("\n")
+					: verificationProblem
+						? [
+								`Required verification is incomplete: ${verificationProblem.message}`,
+								"Stay in this same Worker Session. Inspect the current implementation and command output, fix the code, rerun every required verification command, and only then return the structured Handoff. Do not create or restate a plan.",
+							].join("\n")
+						: [
+								STRUCTURED_HANDOFF_RETRY_INSTRUCTION,
+								`Format validation failed: ${(lastError as HandoffValidationError).message}`,
+								"Return the corrected Handoff now using the existing Task result; do not redo the implementation.",
+							].join("\n");
+			this.#lastPrompts.set(agentId, repairPrompt);
+			this.#recordTranscript(agentId, "prompt", repairPrompt);
+			const repairIdle = session.waitForIdle(remainingMs);
+			await Promise.all([session.prompt(repairPrompt), repairIdle]);
+			const repairedText = await session.getLastAssistantText();
+			if (!repairedText) {
+				throw new SubagentRuntimeError("subagent.output_missing", `Agent ${agentId} returned no repaired Handoff`);
+			}
+			this.#recordTranscript(agentId, "assistant", repairedText);
+			candidate = repairedText;
+		}
+		const handoff = parseHandoff(candidate, identity);
+		await this.#waitForControlledVerifications(agentId);
+		const verificationProblem = this.#requiredVerificationProblem(agentId);
+		if (verificationProblem) {
+			throw new SubagentRuntimeError("subagent.verification_failed", verificationProblem.message);
+		}
+		return handoff;
+	}
+
+	#requiredVerificationProblem(agentId: AgentId): RequiredVerificationProblem | undefined {
+		const commands = this.#requireInput(agentId).verificationCommands ?? [];
+		const results = this.#controlledVerificationResults.get(agentId);
+		const modificationCount = this.#modifications.get(agentId)?.length ?? 0;
+		for (const command of commands) {
+			const normalized = command.trim();
+			const latest = results?.get(normalized)?.diagnostic;
+			if (!latest) {
+				return {
+					kind: "not_run",
+					command: normalized,
+					message: `required command was not run: ${normalized}`,
+				};
+			}
+			if (latest.status !== "succeeded") {
+				return {
+					kind: "failed",
+					command: normalized,
+					message: `required command failed: ${normalized}${latest.output ? `\n${latest.output}` : ""}`,
+				};
+			}
+			const verifiedAtModificationCount = this.#verificationModificationCounts.get(agentId)?.get(latest.toolCallId);
+			if (verifiedAtModificationCount === undefined || verifiedAtModificationCount < modificationCount) {
+				return {
+					kind: "stale",
+					command: normalized,
+					message: `implementation changed after required command passed: ${normalized}`,
+				};
+			}
+		}
+		return undefined;
+	}
+
+	#startControlledVerification(agentId: AgentId, command: string, triggeringToolCallId: string): void {
+		const agent = this.#requireAgent(agentId);
+		const environment = this.#verificationEnvironments.get(agentId);
+		const running = this.#controlledVerifications.get(agentId);
+		if (!agent.workspace || !environment || !running) {
+			return;
+		}
+		const cwd = agent.workspace.path;
+		const verificationId = `controlled:${triggeringToolCallId}`;
+		const sequence = ++this.#controlledVerificationSequence;
+		const modificationCount = this.#modifications.get(agentId)?.length ?? 0;
+		const promise = Promise.resolve()
+			.then(() =>
+				this.#verificationRunner({
+					command,
+					cwd,
+					environment,
+					timeoutMs: this.#controlledVerificationTimeoutMs,
+				}),
+			)
+			.then((result) => {
+				const changedDuringVerification = (this.#modifications.get(agentId)?.length ?? 0) !== modificationCount;
+				const succeeded = result.exitCode === 0 && !result.timedOut && !changedDuringVerification;
+				const failureReason = result.timedOut
+					? `Controlled verification timed out after ${this.#controlledVerificationTimeoutMs}ms`
+					: changedDuringVerification
+						? "Implementation changed while controlled verification was running"
+						: result.exitCode === undefined
+							? "Controlled verification ended without an exit code"
+							: `Controlled verification exited with code ${result.exitCode}`;
+				const diagnostic: AgentCommandDiagnostic = {
+					toolCallId: verificationId,
+					command,
+					status: succeeded ? "succeeded" : "failed",
+					output: [result.output.trim(), ...(succeeded ? [] : [failureReason])].filter(Boolean).join("\n"),
+					source: "controlled",
+				};
+				const diagnostics = this.#commandDiagnostics.get(agentId);
+				diagnostics?.push(diagnostic);
+				const results = this.#controlledVerificationResults.get(agentId);
+				const existing = results?.get(command.trim());
+				if (!existing || sequence >= existing.sequence) {
+					results?.set(command.trim(), { sequence, diagnostic });
+				}
+				this.#verificationModificationCounts.get(agentId)?.set(verificationId, modificationCount);
+				if (diagnostics && diagnostics.length > 6) {
+					diagnostics.splice(0, diagnostics.length - 6);
+				}
+				this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
+				if (!succeeded) {
+					void this.send(
+						agentId,
+						`Required verification failed under the parent runtime: ${command}. Stay in this same Worker Session, use the controlled failure output to repair the implementation, rerun the exact command, and do not return a Handoff until it passes.\n${diagnostic.output ?? ""}`,
+					).catch(() => undefined);
+					return;
+				}
+				if (
+					agent.profile?.role === "worker" &&
+					this.#hasImplementationProgress(agentId) &&
+					this.#requiredVerificationsPassed(agentId) &&
+					!this.#verificationCompleteSteered.has(agentId)
+				) {
+					this.#verificationCompleteSteered.add(agentId);
+					void this.send(
+						agentId,
+						"All required verification commands passed under the parent runtime for the current implementation. Stop additional exploration and optional test runs. Return the complete structured Handoff now.",
+					).catch(() => undefined);
+				}
+			})
+			.catch((error) => {
+				const diagnostic: AgentCommandDiagnostic = {
+					toolCallId: verificationId,
+					command,
+					status: "failed",
+					output: `Controlled verification runner failed: ${error instanceof Error ? error.message : String(error)}`,
+					source: "controlled",
+				};
+				this.#commandDiagnostics.get(agentId)?.push(diagnostic);
+				const results = this.#controlledVerificationResults.get(agentId);
+				const existing = results?.get(command.trim());
+				if (!existing || sequence >= existing.sequence) {
+					results?.set(command.trim(), { sequence, diagnostic });
+				}
+				this.#verificationModificationCounts.get(agentId)?.set(verificationId, modificationCount);
+				this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
+			});
+		running.set(verificationId, { promise });
+		void promise.finally(() => running.delete(verificationId));
+	}
+
+	async #waitForControlledVerifications(agentId: AgentId): Promise<void> {
+		const running = this.#controlledVerifications.get(agentId);
+		while (running && running.size > 0) {
+			await Promise.all([...running.values()].map(({ promise }) => promise));
+		}
+	}
+
+	#requiredVerificationsPassed(agentId: AgentId): boolean {
+		const commands = this.#requireInput(agentId).verificationCommands ?? [];
+		return commands.length > 0 && this.#requiredVerificationProblem(agentId) === undefined;
+	}
+
+	#hasImplementationProgress(agentId: AgentId): boolean {
+		const agent = this.#requireAgent(agentId);
+		return (
+			(this.#modifications.get(agentId)?.length ?? 0) > 0 ||
+			(agent.recoveryContext?.artifact?.changedFiles.length ?? 0) > 0
+		);
+	}
+
+	async #completeVerifiedWorkerAtDeadline(
+		agentId: AgentId,
+		error: unknown,
+		startedAt: number,
+	): Promise<AgentRunResult | undefined> {
+		if (!(error instanceof SubagentRuntimeError) || error.code !== "subagent.duration_exceeded") {
+			return undefined;
+		}
+		const agent = this.#requireAgent(agentId);
+		await this.#waitForControlledVerifications(agentId);
+		if (
+			agent.profile?.role !== "worker" ||
+			!this.#hasImplementationProgress(agentId) ||
+			!this.#requiredVerificationsPassed(agentId)
+		) {
+			return undefined;
+		}
+		const session = this.#requireSession(agentId);
+		this.#recordPendingCommandDiagnostics(agentId, "Session deadline reached after required verification passed");
+		await session.stop().catch(() => undefined);
+		const completedUsage = {
+			...(await this.#getSessionUsage(agentId, session)),
+			durationMs: Math.max(0, this.#now() - startedAt),
+		};
+		this.registry.setUsage(agentId, completedUsage);
+		const changedFiles = [
+			...new Set([
+				...(agent.recoveryContext?.artifact?.changedFiles ?? []),
+				...(this.#modifications.get(agentId) ?? []).map(({ path }) => path),
+			]),
+		];
+		const commands = this.#requireInput(agentId).verificationCommands ?? [];
+		const parsedHandoff = this.#redactor.redact<Handoff>({
+			id: this.#createId("handoff"),
+			workflowId: agent.workflowId,
+			taskId: agent.taskId,
+			attemptId: agent.attemptId,
+			agentId,
+			conclusion: "Implementation completed and required verification passed before the Worker Session deadline.",
+			evidence: changedFiles.map((path) => ({
+				path,
+				note: "Changed before required verification passed",
+			})),
+			architectureFindings: [],
+			changedFiles,
+			verificationSummary: commands.map((command) => `${command}: passed before Session deadline`),
+			risks: [
+				"The Worker Session reached its deadline before returning a structured Handoff; Reviewer and external verification must validate the retained Artifact.",
+			],
+			unfinishedItems: [],
+			createdAt: new Date(this.#now()).toISOString(),
+		});
+		const artifact = await this.#finalizeWorkspace(agentId, parsedHandoff);
+		const handoff: Handoff = artifact
+			? {
+					...parsedHandoff,
+					changedFiles: artifact.changedFiles,
+					verificationSummary: [
+						...parsedHandoff.verificationSummary,
+						`Workspace Artifact ${artifact.id} integrated`,
+					],
+				}
+			: parsedHandoff;
+		this.#recordTranscript(
+			agentId,
+			"activity",
+			"Runtime finalized the verified Worker result at its Session deadline",
+		);
+		this.registry.recordHandoff(agentId, handoff);
+		this.#releaseWriter(agentId);
+		if (this.#requireAgent(agentId).status === "waiting") {
+			this.registry.transition(agentId, "running", "Agent resumed before verified deadline completion");
+		}
+		this.registry.transition(agentId, "idle", handoff.conclusion);
+		const result: AgentRunResult = {
+			agentId,
+			status: "completed",
+			handoff,
+			usage: completedUsage,
+			modifications: [...(this.#modifications.get(agentId) ?? [])],
+			artifact,
+		};
+		this.#lastResults.set(agentId, result);
+		return structuredClone(result);
+	}
+
+	#startNoProgressTimers(agentId: AgentId): void {
+		this.#clearNoProgressTimers(agentId);
+		const agent = this.#requireAgent(agentId);
+		if (agent.profile?.role !== "worker" || !agent.effectivePermissions.write) {
+			return;
+		}
+		const retryMultiplier = agent.retryCount > 0 ? 2 : 1;
+		const steerMs = this.#workerNoProgressSteerMs * retryMultiplier;
+		const stopMs = this.#workerNoProgressStopMs * retryMultiplier;
+		const steerTimer = setTimeout(() => {
+			if (this.#hasImplementationProgress(agentId) || this.#noProgressSteered.has(agentId)) return;
+			this.#noProgressSteered.add(agentId);
+			void this.send(
+				agentId,
+				"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then run the required verification and repair failures in this same Session.",
+			).catch(() => undefined);
+		}, steerMs);
+		const stopTimer = setTimeout(() => {
+			if (this.#hasImplementationProgress(agentId) || this.#noProgressStopped.has(agentId)) return;
+			this.#noProgressStopped.add(agentId);
+			void this.interrupt(
+				agentId,
+				`No implementation progress after ${stopMs}ms; escalate to the strong tier`,
+			).catch(() => undefined);
+		}, stopMs);
+		this.#noProgressTimers.set(agentId, [steerTimer, stopTimer]);
+	}
+
+	#clearNoProgressTimers(agentId: AgentId): void {
+		for (const timer of this.#noProgressTimers.get(agentId) ?? []) clearTimeout(timer);
+		this.#noProgressTimers.delete(agentId);
 	}
 
 	async #failRun(agentId: AgentId, error: unknown, startedAt: number): Promise<AgentRunResult> {
@@ -914,11 +1629,20 @@ export class SubagentRuntime implements SubagentService {
 			? (this.#interruptReasons.get(agentId) ?? fallbackMessage)
 			: fallbackMessage;
 		const session = this.#sessions.get(agentId);
-		let usage = zeroUsage();
+		this.#recordPendingCommandDiagnostics(agentId, message);
 		if (session) {
-			usage = await session.getUsage().catch(() => zeroUsage());
+			const lastAssistantText = await session.getLastAssistantText().catch(() => null);
+			if (lastAssistantText) {
+				this.#recordTranscript(agentId, "assistant", lastAssistantText);
+			}
 		}
-		const completedUsage = { ...usage, durationMs: Math.max(0, this.#now() - startedAt) };
+		const usage = session
+			? await this.#getSessionUsage(agentId, session)
+			: (this.#incrementalUsage.get(agentId) ?? zeroUsage());
+		const completedUsage = {
+			...usage,
+			durationMs: Math.max(0, this.#now() - startedAt),
+		};
 		this.registry.setUsage(agentId, completedUsage);
 		const agent = this.#requireAgent(agentId);
 		if (agent.status === "stopping") {
@@ -928,17 +1652,48 @@ export class SubagentRuntime implements SubagentService {
 		}
 		this.#releaseWriter(agentId);
 		await session?.stop().catch(() => undefined);
+		const artifact = await this.#capturePartialWorkspace(agentId, message);
 		await this.#cleanupAgent(agentId);
 		const result: AgentRunResult = {
 			agentId,
 			status: this.#interrupting.has(agentId) ? "interrupted" : "failed",
 			usage: completedUsage,
 			modifications: [...(this.#modifications.get(agentId) ?? [])],
-			artifact: this.#requireAgent(agentId).artifact,
+			artifact,
+			errorCode: message.startsWith("No implementation progress")
+				? "subagent.no_progress"
+				: error instanceof SubagentRuntimeError
+					? error.code
+					: this.#interrupting.has(agentId)
+						? "subagent.interrupted"
+						: "subagent.failed",
 			error: message,
 		};
 		this.#lastResults.set(agentId, result);
 		return structuredClone(result);
+	}
+
+	#recordPendingCommandDiagnostics(agentId: AgentId, failure: string): void {
+		const pendingCommands = this.#pendingCommands.get(agentId);
+		const diagnostics = this.#commandDiagnostics.get(agentId);
+		if (!pendingCommands || !diagnostics) {
+			return;
+		}
+		for (const [toolCallId, pending] of pendingCommands) {
+			const diagnostic: AgentCommandDiagnostic = {
+				toolCallId,
+				command: pending.command,
+				status: "failed",
+				output: `Agent ended before the command completed: ${failure}`,
+				source: "agent",
+			};
+			diagnostics.push(diagnostic);
+			this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
+		}
+		pendingCommands.clear();
+		if (diagnostics.length > 6) {
+			diagnostics.splice(0, diagnostics.length - 6);
+		}
 	}
 
 	#handleSessionEvent(agentId: AgentId, value: unknown): void {
@@ -948,6 +1703,12 @@ export class SubagentRuntime implements SubagentService {
 		const event = value as RuntimeEventShape;
 		const type = typeof event.type === "string" ? event.type : "";
 		if (type === "tool_execution_start") {
+			if (event.toolName === "bash" && typeof event.toolCallId === "string") {
+				const command = commandText(event.args);
+				if (command) {
+					this.#pendingCommands.get(agentId)?.set(event.toolCallId, { command });
+				}
+			}
 			if (
 				typeof event.toolCallId === "string" &&
 				typeof event.toolName === "string" &&
@@ -970,6 +1731,28 @@ export class SubagentRuntime implements SubagentService {
 			return;
 		}
 		if (type === "tool_execution_end" && typeof event.toolCallId === "string") {
+			const pendingCommand = this.#pendingCommands.get(agentId)?.get(event.toolCallId);
+			this.#pendingCommands.get(agentId)?.delete(event.toolCallId);
+			if (pendingCommand) {
+				const diagnostics = this.#commandDiagnostics.get(agentId);
+				const diagnostic: AgentCommandDiagnostic = {
+					toolCallId: event.toolCallId,
+					command: pendingCommand.command,
+					status: event.isError === true ? "failed" : "succeeded",
+					output: diagnosticOutput(event.result),
+					source: "agent",
+				};
+				diagnostics?.push(diagnostic);
+				if (diagnostics && diagnostics.length > 6) {
+					diagnostics.splice(0, diagnostics.length - 6);
+				}
+				this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
+				const requiredCommands = this.#requireInput(agentId).verificationCommands ?? [];
+				const requiredCommand = requiredCommands.find((command) => command.trim() === diagnostic.command.trim());
+				if (requiredCommand) {
+					this.#startControlledVerification(agentId, requiredCommand, event.toolCallId);
+				}
+			}
 			const pending = this.#pendingMutations.get(agentId)?.get(event.toolCallId);
 			this.#pendingMutations.get(agentId)?.delete(event.toolCallId);
 			if (pending && event.isError !== true) {
@@ -978,6 +1761,21 @@ export class SubagentRuntime implements SubagentService {
 					operation: pending.operation,
 					toolCallId: event.toolCallId,
 				});
+				this.#verificationCompleteSteered.delete(agentId);
+				this.#clearNoProgressTimers(agentId);
+			}
+			const agent = this.#requireAgent(agentId);
+			if (
+				agent.profile?.role === "worker" &&
+				this.#hasImplementationProgress(agentId) &&
+				this.#requiredVerificationsPassed(agentId) &&
+				!this.#verificationCompleteSteered.has(agentId)
+			) {
+				this.#verificationCompleteSteered.add(agentId);
+				void this.send(
+					agentId,
+					"All required verification commands passed for the current implementation. Stop additional exploration and optional test runs. Return the complete structured Handoff now.",
+				).catch(() => undefined);
 			}
 			return;
 		}
@@ -1002,11 +1800,44 @@ export class SubagentRuntime implements SubagentService {
 			if (exceeded.length > 0) {
 				const dimensions = [...new Set(exceeded.map(({ dimension }) => dimension))];
 				void this.interrupt(agentId, `Budget exhausted: ${dimensions.join(", ")}`).catch(() => undefined);
+				return;
+			}
+			if (
+				agent.profile?.role === "reviewer" &&
+				usage.turns >= REVIEWER_FINALIZE_TURNS &&
+				!this.#reviewerFinalizeSteered.has(agentId)
+			) {
+				this.#reviewerFinalizeSteered.add(agentId);
+				void this.send(
+					agentId,
+					"Stop reading and searching. Decide from the evidence already collected and return the complete structured Handoff now. Start one verificationSummary item with exactly review:passed or review:failed. Do not call another tool.",
+				).catch(() => undefined);
+			}
+			const noImplementationProgress =
+				agent.profile?.role === "worker" &&
+				agent.effectivePermissions.write &&
+				!this.#hasImplementationProgress(agentId);
+			const steerTurns = agent.retryCount > 0 ? WORKER_NO_PROGRESS_STEER_TURNS * 2 : WORKER_NO_PROGRESS_STEER_TURNS;
+			const stopTurns = agent.retryCount > 0 ? WORKER_NO_PROGRESS_STOP_TURNS * 2 : WORKER_NO_PROGRESS_STOP_TURNS;
+			if (noImplementationProgress && usage.turns >= stopTurns && !this.#noProgressStopped.has(agentId)) {
+				this.#noProgressStopped.add(agentId);
+				void this.interrupt(
+					agentId,
+					`No implementation progress after ${usage.turns} Worker turns; escalate to the strong tier`,
+				).catch(() => undefined);
+				return;
+			}
+			if (noImplementationProgress && usage.turns >= steerTurns && !this.#noProgressSteered.has(agentId)) {
+				this.#noProgressSteered.add(agentId);
+				void this.send(
+					agentId,
+					"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then run the required verification and repair failures in this same Session.",
+				).catch(() => undefined);
 			}
 			return;
 		}
-		if (type === "message_update" || type === "auto_retry_start" || type === "tool_execution_update") {
-			this.registry.progress(agentId, type);
+		if (type === "auto_retry_start") {
+			this.registry.progress(agentId, "Model retry started");
 		}
 	}
 
@@ -1019,11 +1850,20 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	async #cleanupAgent(agentId: AgentId): Promise<void> {
+		this.#clearNoProgressTimers(agentId);
 		this.#unsubscribeEvents.get(agentId)?.();
 		this.#unsubscribeEvents.delete(agentId);
 		this.#unregisterRuntime.get(agentId)?.();
 		this.#unregisterRuntime.delete(agentId);
 		this.#sessions.delete(agentId);
+		this.#noProgressSteered.delete(agentId);
+		this.#noProgressStopped.delete(agentId);
+		this.#verificationCompleteSteered.delete(agentId);
+		this.#verificationModificationCounts.delete(agentId);
+		this.#verificationEnvironments.delete(agentId);
+		this.#reviewerFinalizeSteered.delete(agentId);
+		this.#controlledVerifications.delete(agentId);
+		this.#controlledVerificationResults.delete(agentId);
 		const agent = this.registry.get(agentId);
 		if (agent && !agent.sessionReleasedAt) {
 			this.registry.releaseSession(agentId);
@@ -1064,7 +1904,11 @@ export class SubagentRuntime implements SubagentService {
 		input: SpawnSubagentInput,
 		permissions: SpawnSubagentInput["parentPermission"],
 		budget: BudgetLimit,
-	): { backend: AgentBackend; reason: string; reasonCode: BackendSelectionReasonCode } {
+	): {
+		backend: AgentBackend;
+		reason: string;
+		reasonCode: BackendSelectionReasonCode;
+	} {
 		const inProcessSafe =
 			input.profile.role !== "worker" &&
 			!permissions.write &&
@@ -1448,8 +2292,18 @@ export class SubagentRuntime implements SubagentService {
 			}
 		}
 		const transcript = this.#transcripts.get(source.id) ?? [];
+		const originalPrompt =
+			this.#originalPrompts.get(source.id) ?? transcript.find(({ type }) => type === "prompt")?.text;
 		const lastPrompt = [...transcript].reverse().find(({ type }) => type === "prompt")?.text;
 		const lastAssistantText = [...transcript].reverse().find(({ type }) => type === "assistant")?.text;
+		const persistedCommandDiagnostics = transcript.flatMap(({ type, text }) => {
+			if (type !== "activity") {
+				return [];
+			}
+			const diagnostic = parseCommandDiagnostic(text);
+			return diagnostic ? [diagnostic] : [];
+		});
+		const commandDiagnostics = this.#commandDiagnostics.get(source.id) ?? persistedCommandDiagnostics.slice(-6);
 		let artifactPatch: string | undefined;
 		if (artifact && workspace.status !== "invalid") {
 			try {
@@ -1474,13 +2328,47 @@ export class SubagentRuntime implements SubagentService {
 			sourceAttemptId: source.attemptId,
 			reason,
 			checkpointAt: new Date(this.#now()).toISOString(),
+			originalPrompt,
 			lastPrompt,
 			lastAssistantText,
+			commandDiagnostics,
 			handoff: source.handoffId ? this.registry.getHandoff(source.handoffId) : undefined,
 			artifact,
 			artifactPatch,
 			workspace,
 		});
+	}
+
+	async #capturePartialWorkspace(agentId: AgentId, reason: string): Promise<WorkspaceArtifact | undefined> {
+		const agent = this.#requireAgent(agentId);
+		if (agent.artifact || !agent.workspace || !this.#workspaceProvider.createArtifact) {
+			return agent.artifact;
+		}
+		try {
+			const created = await this.#workspaceProvider.createArtifact(
+				agent.workspace,
+				this.#modifications.get(agentId) ?? [],
+			);
+			if (!created) {
+				return undefined;
+			}
+			const artifact: WorkspaceArtifact = {
+				...created,
+				workflowId: agent.workflowId,
+				taskId: agent.taskId,
+				attemptId: agent.attemptId,
+				agentId: agent.id,
+				dependencyArtifactIds: agent.dependencyArtifactIds ? [...agent.dependencyArtifactIds] : undefined,
+			};
+			this.registry.setArtifact(agentId, artifact);
+			return artifact;
+		} catch (error) {
+			this.registry.progress(
+				agentId,
+				`Failed to preserve partial Workspace after ${reason}: ${this.#redactor.redactText(error instanceof Error ? error.message : String(error))}`,
+			);
+			return undefined;
+		}
 	}
 
 	#formatRecoveryContext(context: AgentRecoveryContext): string {
@@ -1511,7 +2399,10 @@ export class SubagentRuntime implements SubagentService {
 		this.registry.setArtifact(agentId, artifact);
 		if (this.#multiWriterIntegration) {
 			try {
-				const integrated = await this.#multiWriterIntegration.integrate({ artifact, handoff });
+				const integrated = await this.#multiWriterIntegration.integrate({
+					artifact,
+					handoff,
+				});
 				this.registry.setArtifact(agentId, integrated);
 				return integrated;
 			} catch (error) {

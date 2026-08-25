@@ -18,6 +18,7 @@ export interface AgentEnforcementPlan {
 		readonly readableRoots: readonly string[];
 		readonly writableRoots: readonly string[];
 		readonly deniedRoots: readonly string[];
+		readonly writeDeniedRoots: readonly string[];
 		readonly denyAll: boolean;
 	};
 	readonly environment: {
@@ -49,6 +50,7 @@ export interface CompileAgentEnforcementPlanInput {
 	readonly backend: AgentBackend;
 	readonly workspace: AgentWorkspace;
 	readonly permissions: PermissionSet;
+	readonly writeDeniedPaths?: readonly string[];
 	readonly providerEnvironmentKeys?: readonly string[];
 }
 
@@ -83,6 +85,7 @@ export function compileAgentEnforcementPlan(input: CompileAgentEnforcementPlanIn
 			readableRoots,
 			writableRoots,
 			deniedRoots: resolvedRoots(input.permissions.deniedPaths, input.workspace.path),
+			writeDeniedRoots: resolvedRoots(input.writeDeniedPaths ?? [], input.workspace.path),
 			denyAll: Boolean(input.permissions.denyAllPaths),
 		},
 		environment: {

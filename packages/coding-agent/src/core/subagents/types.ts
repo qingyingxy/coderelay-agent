@@ -4,6 +4,7 @@ import type {
 	BackendSelectionReasonCode,
 	DecisionReasonCode,
 } from "../workflow/decision-reasons.ts";
+import type { ModelEscalationReason, ModelRouteRecord } from "../workflow/model-gateway.ts";
 import type { PermissionSet } from "../workflow/runtime-policy.ts";
 import type {
 	AgentId,
@@ -12,6 +13,7 @@ import type {
 	HandoffId,
 	IsoDateTime,
 	ResourceUsage,
+	RiskLevel,
 	TaskId,
 	WorkflowId,
 } from "../workflow/types.ts";
@@ -91,13 +93,40 @@ export interface AgentRecoveryContext {
 	readonly sourceAttemptId: AttemptId;
 	readonly reason: string;
 	readonly checkpointAt: IsoDateTime;
+	readonly originalPrompt?: string;
 	readonly lastPrompt?: string;
 	readonly lastAssistantText?: string;
+	readonly commandDiagnostics?: readonly AgentCommandDiagnostic[];
 	readonly handoff?: Handoff;
 	readonly artifact?: WorkspaceArtifact;
 	readonly artifactPatch?: string;
 	readonly workspace: WorkspaceRecoveryVerification;
 }
+
+export interface AgentCommandDiagnostic {
+	readonly toolCallId: string;
+	readonly command: string;
+	readonly status: "succeeded" | "failed";
+	readonly output?: string;
+	readonly source?: "agent" | "controlled";
+}
+
+export interface ControlledVerificationInput {
+	readonly command: string;
+	readonly cwd: string;
+	readonly environment: Readonly<Record<string, string>>;
+	readonly timeoutMs: number;
+}
+
+export interface ControlledVerificationResult {
+	readonly exitCode: number | undefined;
+	readonly output: string;
+	readonly timedOut: boolean;
+}
+
+export type ControlledVerificationRunner = (
+	input: ControlledVerificationInput,
+) => Promise<ControlledVerificationResult>;
 
 export interface AgentInstance {
 	readonly id: AgentId;
@@ -110,6 +139,8 @@ export interface AgentInstance {
 	readonly profile?: AgentProfile;
 	readonly profileSource?: "builtin" | "global" | "project" | "runtime";
 	readonly profileSourcePath?: string;
+	/** Model selected by the Workflow Model Gateway for this Agent, when routing is enabled. */
+	readonly modelRoute?: ModelRouteRecord;
 	readonly scope: AgentScope;
 	readonly backend: AgentBackend;
 	readonly backendReason?: string;
@@ -192,6 +223,7 @@ export interface AgentRunResult {
 	readonly usage: ResourceUsage;
 	readonly modifications: readonly SubagentModification[];
 	readonly artifact?: WorkspaceArtifact;
+	readonly errorCode?: string;
 	readonly error?: string;
 }
 
@@ -277,6 +309,12 @@ export interface SpawnSubagentInput {
 	readonly parentBudget: BudgetLimit;
 	readonly workflowBudget: BudgetLimit;
 	readonly taskBudget: BudgetLimit;
+	/** Absolute Workflow wall-clock deadline used to clamp this Agent's duration. */
+	readonly workflowDeadlineAtMs?: number;
+	readonly riskLevel?: RiskLevel;
+	readonly modelEscalationReason?: ModelEscalationReason;
+	/** Commands the Worker must run successfully before its Handoff can complete the Task. */
+	readonly verificationCommands?: readonly string[];
 	readonly retryCount?: number;
 	readonly retryOfAgentId?: AgentId;
 	readonly recoveryOfAgentId?: AgentId;
@@ -287,7 +325,12 @@ export interface SpawnSubagentInput {
 export interface RetrySubagentInput {
 	readonly attemptId: AttemptId;
 	readonly autoStart?: boolean;
+	/** Process-recovery retries do not consume the configured Task retry count. */
 	readonly recoveryReason?: string;
+	/** Ordinary failed attempts use this reason while still consuming a retry. */
+	readonly failureReason?: string;
+	readonly modelEscalationReason?: ModelEscalationReason;
+	readonly taskBudget?: BudgetLimit;
 }
 
 export interface SubagentSessionConfig {

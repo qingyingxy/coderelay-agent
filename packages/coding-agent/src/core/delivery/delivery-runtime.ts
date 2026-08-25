@@ -49,6 +49,10 @@ export class DeliveryRuntime {
 	async run(port: DeliveryWorkflowPort, options: DeliveryRunOptions = {}): Promise<DeliveryRunResult> {
 		port.beginVerification();
 		const workflow = port.workflow;
+		const workflowDeadlineAtMs =
+			workflow.budget.maxDurationMs === undefined
+				? undefined
+				: Date.parse(workflow.createdAt) + workflow.budget.maxDurationMs;
 		const deliveryFingerprint = port.deliveryFingerprint;
 		const rootTask = port.tasks.find(({ id }) => id === workflow.rootTaskId);
 		if (!rootTask) {
@@ -66,8 +70,15 @@ export class DeliveryRuntime {
 				)
 				.map((verification) => [verification.requirementId, verification]),
 		);
+		const hasRepairTask = port.tasks.some(({ kind }) => kind === "repair");
 		for (const requirement of port.currentPlan.verificationRequirements) {
-			if (!DELIVERY_KINDS.has(requirement.kind)) {
+			const owningAgentTask = port.tasks.find(
+				(task) =>
+					task.kind === "agent" &&
+					task.status === "succeeded" &&
+					task.verificationRequirements.some(({ id }) => id === requirement.id),
+			);
+			if (!DELIVERY_KINDS.has(requirement.kind) && !(requirement.kind === "manual" && owningAgentTask)) {
 				continue;
 			}
 			if (completedByRequirement.has(requirement.id)) {
@@ -85,12 +96,72 @@ export class DeliveryRuntime {
 				continue;
 			}
 			if (requirement.kind === "review") {
+				const existingReviewerVerification =
+					!hasRepairTask &&
+					port.verifications.some((verification) => {
+						if (
+							verification.requirementId !== requirement.id ||
+							verification.status !== "passed" ||
+							!verification.taskId
+						) {
+							return false;
+						}
+						const task = port.tasks.find(({ id }) => id === verification.taskId);
+						return task?.kind === "agent" && task.recommendedAgentRole === "reviewer";
+					});
+				if (existingReviewerVerification) {
+					continue;
+				}
 				const review = await this.#runReview(port, requirement.id, diff, rootTask, deliveryFingerprint);
 				risks.push(...review.risks);
 				unfinishedItems.push(...review.unfinishedItems);
+				if (review.failureKind === "infrastructure") {
+					port.failDelivery(review.summary);
+					return {
+						status: "failed",
+						diff,
+						verifications: port.verifications,
+						risks,
+						unfinishedItems,
+						usage: sumResourceUsage(jobUsage),
+					};
+				}
 				continue;
 			}
 			if (!requirement.command?.trim()) {
+				const existingTaskVerification =
+					!hasRepairTask &&
+					port.verifications.some((verification) => {
+						if (
+							verification.requirementId !== requirement.id ||
+							verification.status !== "passed" ||
+							!verification.taskId
+						) {
+							return false;
+						}
+						return port.tasks.find(({ id }) => id === verification.taskId)?.status === "succeeded";
+					});
+				if (existingTaskVerification) {
+					continue;
+				}
+				const sourceVerification =
+					!hasRepairTask && owningAgentTask
+						? port.verifications.find(
+								(verification) =>
+									verification.taskId === owningAgentTask.id && verification.status === "passed",
+							)
+						: undefined;
+				if (sourceVerification) {
+					port.recordVerification({
+						verificationId: `verification-${randomUUID()}`,
+						requirementId: requirement.id,
+						deliveryFingerprint,
+						status: "passed",
+						summary: `Reused successful Agent Task evidence: ${sourceVerification.summary}`,
+						evidenceRefs: sourceVerification.evidenceRefs,
+					});
+					continue;
+				}
 				port.recordVerification({
 					verificationId: `verification-${randomUUID()}`,
 					requirementId: requirement.id,
@@ -102,6 +173,11 @@ export class DeliveryRuntime {
 				continue;
 			}
 			const attemptId = `delivery-${randomUUID()}`;
+			const remainingDurationMs =
+				workflowDeadlineAtMs === undefined ? undefined : Math.floor(workflowDeadlineAtMs - Date.now());
+			if (remainingDurationMs !== undefined && remainingDurationMs < 1) {
+				throw new Error(`Workflow duration budget exhausted before verification command: ${requirement.command}`);
+			}
 			const lease = this.#writerLeaseRegistry.acquire({
 				workspace: workflow.request.cwd,
 				workflowId: workflow.id,
@@ -116,7 +192,7 @@ export class DeliveryRuntime {
 					attemptId,
 					command: requirement.command,
 					cwd: workflow.request.cwd,
-					timeoutMs: workflow.budget.maxDurationMs,
+					timeoutMs: remainingDurationMs,
 				});
 				const result = await this.#jobRuntime.start(job.id);
 				const durationMs =
@@ -154,11 +230,17 @@ export class DeliveryRuntime {
 		}
 		const failed = port.currentPlan.verificationRequirements
 			.filter(({ required }) => required)
-			.map((requirement) => ({ requirement, result: latest.get(requirement.id) }))
+			.map((requirement) => ({
+				requirement,
+				result: latest.get(requirement.id),
+			}))
 			.filter(({ result }) => result?.status === "failed");
 		const skipped = port.currentPlan.verificationRequirements
 			.filter(({ required }) => required)
-			.map((requirement) => ({ requirement, result: latest.get(requirement.id) }))
+			.map((requirement) => ({
+				requirement,
+				result: latest.get(requirement.id),
+			}))
 			.filter(({ result }) => result?.status === "skipped" || result === undefined);
 		if (failed.length > 0) {
 			const failedVerification = failed[0]?.result;
@@ -276,13 +358,18 @@ export class DeliveryRuntime {
 		let review: ReviewResult;
 		try {
 			review = this.#reviewer
-				? await this.#reviewer.review({ workflow: port.workflow, rootTask, diff })
+				? await this.#reviewer.review({
+						workflow: port.workflow,
+						rootTask,
+						diff,
+					})
 				: {
 						status: "failed",
 						summary: "Readonly Reviewer is not configured",
 						evidenceRefs: [],
 						risks: [],
 						unfinishedItems: ["Readonly Reviewer is not configured"],
+						failureKind: "infrastructure",
 					};
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -292,13 +379,17 @@ export class DeliveryRuntime {
 				evidenceRefs: [],
 				risks: [],
 				unfinishedItems: [message],
+				failureKind: "infrastructure",
 			};
 		}
 		port.recordVerification({
 			verificationId: `verification-${randomUUID()}`,
 			requirementId,
 			deliveryFingerprint,
-			actor: { kind: "agent", id: review.handoff?.agentId ?? `reviewer-${requirementId}` },
+			actor: {
+				kind: "agent",
+				id: review.handoff?.agentId ?? `reviewer-${requirementId}`,
+			},
 			status: review.status,
 			summary: review.summary,
 			evidenceRefs: review.evidenceRefs,

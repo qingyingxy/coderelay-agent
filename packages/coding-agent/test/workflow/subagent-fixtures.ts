@@ -53,6 +53,9 @@ export class FakeSubagentSession implements SubagentSession {
 	stopCalls = 0;
 	abortCalls = 0;
 	output: string | null = null;
+	repairOutput: string | null = null;
+	repairUsage: ResourceUsage | undefined;
+	repairCompletesSynchronously = false;
 	usage: ResourceUsage = ZERO_USAGE;
 	#resolveIdle?: () => void;
 	#rejectIdle?: (error: Error) => void;
@@ -72,6 +75,15 @@ export class FakeSubagentSession implements SubagentSession {
 
 	async prompt(message: string): Promise<void> {
 		this.promptCalls.push(message);
+		if (this.repairOutput && message.includes("Format validation failed")) {
+			this.output = this.repairOutput;
+			this.usage = this.repairUsage ?? this.usage;
+			if (this.repairCompletesSynchronously) {
+				this.#resolveIdle?.();
+			} else {
+				setTimeout(() => this.#resolveIdle?.(), 0);
+			}
+		}
 	}
 
 	async steer(message: string): Promise<void> {

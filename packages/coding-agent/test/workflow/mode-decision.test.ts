@@ -9,6 +9,7 @@ describe("ModeDecision", () => {
 				selection: { mode: "plan", source: "agent" },
 				reason: "  The task affects several dependent modules  ",
 				riskLevel: "medium",
+				taskLevel: "hard",
 				decidedAt: NOW,
 			}),
 		).toEqual({
@@ -17,6 +18,7 @@ describe("ModeDecision", () => {
 			reasonCode: "mode.agent_plan",
 			reason: "The task affects several dependent modules",
 			riskLevel: "medium",
+			taskLevel: "hard",
 			decidedAt: NOW,
 		});
 	});
@@ -60,5 +62,17 @@ describe("ModeDecision", () => {
 				code: "mode_decision.invalid_risk",
 			}),
 		);
+	});
+
+	it("rejects an invalid runtime task level", () => {
+		expect(() =>
+			createModeDecision({
+				selection: { mode: "plan", source: "agent" },
+				reason: "Invalid classifier output",
+				riskLevel: "medium",
+				taskLevel: "extreme" as "hard",
+				decidedAt: NOW,
+			}),
+		).toThrowError(expect.objectContaining({ code: "mode_decision.invalid_task_level" }));
 	});
 });

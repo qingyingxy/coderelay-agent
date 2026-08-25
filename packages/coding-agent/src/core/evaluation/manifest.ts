@@ -1,9 +1,26 @@
+import { MODEL_TIERS, type ModelRouteRole } from "../workflow/model-gateway.ts";
 import {
+	EVALUATION_DIFFICULTIES,
 	EVALUATION_SCHEMA_VERSION,
+	EVALUATION_STRATEGIES,
 	type EvaluationBudget,
+	type EvaluationExpectedModelRoute,
+	type EvaluationLocalRuntime,
 	type EvaluationTask,
 	type EvaluationTaskSet,
+	type EvaluationTaskSource,
 } from "./types.ts";
+
+const MODEL_ROUTE_ROLES: readonly ModelRouteRole[] = [
+	"mode_advisor",
+	"planner",
+	"planner_lite",
+	"explorer",
+	"worker",
+	"reviewer",
+	"main",
+	"repair",
+];
 
 export class EvaluationManifestError extends Error {
 	readonly code: string;
@@ -35,6 +52,34 @@ function requireStrings(record: Readonly<Record<string, unknown>>, key: string, 
 	return [...value];
 }
 
+function requireProtectedPaths(record: Readonly<Record<string, unknown>>, context: string): readonly string[] {
+	const paths = requireStrings(record, "protectedPaths", context);
+	if (paths.length === 0) {
+		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.protectedPaths must not be empty`);
+	}
+	const normalized = paths.map((path) => path.replaceAll("\\", "/"));
+	if (
+		normalized.some(
+			(path) =>
+				path.startsWith("/") ||
+				/^[a-z]:/i.test(path) ||
+				path.split("/").some((segment) => segment === ".." || segment === ""),
+		)
+	) {
+		throw new EvaluationManifestError(
+			"evaluation.invalid_manifest",
+			`${context}.protectedPaths must contain normalized relative paths`,
+		);
+	}
+	if (new Set(normalized).size !== normalized.length) {
+		throw new EvaluationManifestError(
+			"evaluation.invalid_manifest",
+			`${context}.protectedPaths must not contain duplicates`,
+		);
+	}
+	return normalized;
+}
+
 function parseBudget(value: unknown, context: string): EvaluationBudget {
 	if (!isRecord(value)) {
 		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.budget must be an object`);
@@ -56,10 +101,83 @@ function parseBudget(value: unknown, context: string): EvaluationBudget {
 	};
 }
 
+function parseExpectedModelRoutes(value: unknown, context: string): readonly EvaluationExpectedModelRoute[] {
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new EvaluationManifestError(
+			"evaluation.invalid_manifest",
+			`${context}.expectedModelRoutes must be a non-empty array`,
+		);
+	}
+	return value.map((entry, index) => {
+		const routeContext = `${context}.expectedModelRoutes[${index}]`;
+		if (!isRecord(entry)) {
+			throw new EvaluationManifestError("evaluation.invalid_manifest", `${routeContext} must be an object`);
+		}
+		const role = requireString(entry, "role", routeContext);
+		if (!MODEL_ROUTE_ROLES.includes(role as ModelRouteRole)) {
+			throw new EvaluationManifestError("evaluation.invalid_manifest", `${routeContext}.role is unsupported`);
+		}
+		const tier = requireString(entry, "tier", routeContext);
+		if (!MODEL_TIERS.includes(tier as (typeof MODEL_TIERS)[number])) {
+			throw new EvaluationManifestError("evaluation.invalid_manifest", `${routeContext}.tier is unsupported`);
+		}
+		const minimumCount = entry.minimumCount ?? 1;
+		if (typeof minimumCount !== "number" || !Number.isInteger(minimumCount) || minimumCount < 1) {
+			throw new EvaluationManifestError(
+				"evaluation.invalid_manifest",
+				`${routeContext}.minimumCount must be a positive integer`,
+			);
+		}
+		return { role: role as ModelRouteRole, tier: tier as EvaluationExpectedModelRoute["tier"], minimumCount };
+	});
+}
+
+function parseTaskSource(value: unknown, context: string): EvaluationTaskSource {
+	if (!isRecord(value)) {
+		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.source must be an object`);
+	}
+	return {
+		dataset: requireString(value, "dataset", `${context}.source`),
+		repository: requireString(value, "repository", `${context}.source`),
+		revision: requireString(value, "revision", `${context}.source`),
+		taskId: requireString(value, "taskId", `${context}.source`),
+		license: requireString(value, "license", `${context}.source`),
+		adaptation: requireString(value, "adaptation", `${context}.source`),
+	};
+}
+
+function parseLocalRuntime(value: unknown, context: string): EvaluationLocalRuntime {
+	if (!isRecord(value)) {
+		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.localRuntime must be an object`);
+	}
+	return {
+		executable: requireString(value, "executable", `${context}.localRuntime`),
+		executableBaseline: requireString(value, "executableBaseline", `${context}.localRuntime`),
+		nodeModules: requireString(value, "nodeModules", `${context}.localRuntime`),
+		nodeModulesBaseline: requireString(value, "nodeModulesBaseline", `${context}.localRuntime`),
+	};
+}
+
 function parseTask(value: unknown, index: number): EvaluationTask {
 	const context = `tasks[${index}]`;
 	if (!isRecord(value)) {
 		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context} must be an object`);
+	}
+	const difficulty = value.difficulty;
+	if (
+		difficulty !== undefined &&
+		(typeof difficulty !== "string" ||
+			!EVALUATION_DIFFICULTIES.includes(difficulty as (typeof EVALUATION_DIFFICULTIES)[number]))
+	) {
+		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.difficulty is unsupported`);
+	}
+	const expectedStrategy = value.expectedStrategy;
+	if (
+		expectedStrategy !== undefined &&
+		(typeof expectedStrategy !== "string" ||
+			!EVALUATION_STRATEGIES.includes(expectedStrategy as (typeof EVALUATION_STRATEGIES)[number]))
+	) {
+		throw new EvaluationManifestError("evaluation.invalid_manifest", `${context}.expectedStrategy is unsupported`);
 	}
 	return {
 		id: requireString(value, "id", context),
@@ -69,9 +187,17 @@ function parseTask(value: unknown, index: number): EvaluationTask {
 		prompt: requireString(value, "prompt", context),
 		promptVersion: requireString(value, "promptVersion", context),
 		verificationCommands: requireStrings(value, "verificationCommands", context),
+		protectedPaths: requireProtectedPaths(value, context),
 		successCriteria: requireStrings(value, "successCriteria", context),
 		expectedReviewerFindings: requireStrings(value, "expectedReviewerFindings", context),
 		budget: parseBudget(value.budget, context),
+		...(difficulty ? { difficulty: difficulty as EvaluationTask["difficulty"] } : {}),
+		...(expectedStrategy ? { expectedStrategy: expectedStrategy as EvaluationTask["expectedStrategy"] } : {}),
+		...(value.expectedModelRoutes !== undefined
+			? { expectedModelRoutes: parseExpectedModelRoutes(value.expectedModelRoutes, context) }
+			: {}),
+		...(value.source !== undefined ? { source: parseTaskSource(value.source, context) } : {}),
+		...(value.localRuntime !== undefined ? { localRuntime: parseLocalRuntime(value.localRuntime, context) } : {}),
 	};
 }
 

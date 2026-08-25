@@ -5,7 +5,7 @@
 import * as Diff from "diff";
 import { constants } from "fs";
 import { access, readFile } from "fs/promises";
-import { resolveToCwd } from "./path-utils.ts";
+import { resolveWritePath } from "./path-utils.ts";
 
 export function detectLineEnding(content: string): "\r\n" | "\n" {
 	const crlfIdx = content.indexOf("\r\n");
@@ -520,7 +520,7 @@ export async function computeEditsDiff(
 	edits: Edit[],
 	cwd: string,
 ): Promise<EditDiffResult | EditDiffError> {
-	const absolutePath = resolveToCwd(path, cwd);
+	const absolutePath = resolveWritePath(path, cwd);
 
 	try {
 		// Check if file exists and is readable

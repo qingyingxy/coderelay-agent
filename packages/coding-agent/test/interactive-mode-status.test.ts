@@ -388,6 +388,7 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			skillCommands: Map<string, string>;
 			sessionManager: { getCwd: () => string };
 			fdPath: null;
+			getActiveProviderModelCandidates: () => Promise<TestModel[]>;
 		};
 
 		const createBaseAutocompleteProvider = (
@@ -411,6 +412,7 @@ describe("InteractiveMode.createBaseAutocompleteProvider", () => {
 			skillCommands: new Map(),
 			sessionManager: { getCwd: () => "/tmp" },
 			fdPath: null,
+			getActiveProviderModelCandidates: async () => models,
 		};
 
 		const provider = createBaseAutocompleteProvider.call(fakeThis);

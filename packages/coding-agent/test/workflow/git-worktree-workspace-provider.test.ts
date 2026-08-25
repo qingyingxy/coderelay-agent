@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -132,6 +132,141 @@ describe("GitWorktreeWorkspaceProvider", () => {
 		}
 	});
 
+	it("retries transient Worktree removal failures before releasing metadata", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-release-retry-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		let removalAttempts = 0;
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: join(root, "workspaces"),
+			artifactDirectory: join(root, "artifacts"),
+			releaseRetryDelayMs: 0,
+			removeWorktree: async (repositoryRoot, worktreeRoot) => {
+				removalAttempts++;
+				if (removalAttempts < 3) {
+					throw new Error("transient access denied");
+				}
+				execFileSync("git", ["-C", repositoryRoot, "worktree", "remove", "--force", worktreeRoot], {
+					windowsHide: true,
+				});
+			},
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-release-retry",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+
+			await provider.release(workspace);
+
+			expect(removalAttempts).toBe(3);
+			expect(existsSync(workspace.path)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("finishes cleanup when Git unregisters the Worktree before directory removal fails", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-unregistered-release-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		let removalAttempts = 0;
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: join(root, "workspaces"),
+			artifactDirectory: join(root, "artifacts"),
+			releaseRetryDelayMs: 0,
+			removeWorktree: async (repositoryRoot, worktreeRoot) => {
+				removalAttempts++;
+				execFileSync("git", ["-C", repositoryRoot, "worktree", "remove", "--force", worktreeRoot], {
+					windowsHide: true,
+				});
+				mkdirSync(worktreeRoot, { recursive: true });
+				throw new Error("directory removal failed after Worktree unregister");
+			},
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-unregistered-release",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+
+			await provider.release(workspace);
+
+			expect(removalAttempts).toBe(1);
+			expect(existsSync(workspace.path)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("deduplicates concurrent release calls for one Worktree", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-concurrent-release-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		let removalAttempts = 0;
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: join(root, "workspaces"),
+			artifactDirectory: join(root, "artifacts"),
+			removeWorktree: async (repositoryRoot, worktreeRoot) => {
+				removalAttempts++;
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				execFileSync("git", ["-C", repositoryRoot, "worktree", "remove", "--force", worktreeRoot], {
+					windowsHide: true,
+				});
+			},
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-concurrent-release",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+
+			await Promise.all([provider.release(workspace), provider.release(workspace)]);
+
+			expect(removalAttempts).toBe(1);
+			expect(existsSync(workspace.path)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("removes an orphaned Worktree after its source repository was deleted", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-missing-repository-"));
+		const repository = join(root, "repository");
+		const workspaceBase = join(root, "workspaces");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: workspaceBase,
+			artifactDirectory: join(root, "artifacts"),
+		});
+		try {
+			const workspace = await provider.prepare({
+				agentId: "agent-missing-repository",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+			const worktreeRoot = workspace.path;
+			rmSync(repository, { recursive: true, force: true });
+
+			await provider.release(workspace);
+
+			expect(existsSync(worktreeRoot)).toBe(false);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("recovers metadata and removes a Worktree whose owner process is gone", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-worktree-orphan-"));
 		const repository = join(root, "repository");
@@ -214,6 +349,43 @@ describe("GitWorktreeWorkspaceProvider", () => {
 		}
 	});
 
+	it("restores a failed Agent Artifact into a fresh Worktree", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-worktree-repair-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		const provider = new GitWorktreeWorkspaceProvider({
+			baseDirectory: join(root, "workspaces"),
+			artifactDirectory: join(root, "artifacts"),
+		});
+		try {
+			const first = await provider.prepare({
+				agentId: "agent-first",
+				backend: "rpc",
+				write: true,
+				input: spawnInput(repository),
+			});
+			writeFileSync(join(first.path, "file.txt"), "partial repair\n", "utf8");
+			const artifact = await provider.createArtifact(first, []);
+			expect(artifact?.changedFiles).toEqual(["file.txt"]);
+			await provider.release(first);
+
+			const second = await provider.prepare({
+				agentId: "agent-second",
+				backend: "rpc",
+				write: true,
+				input: { ...spawnInput(repository), attemptId: "attempt-2" },
+			});
+			await provider.restoreArtifact(second, artifact!);
+
+			expect(text(join(second.path, "file.txt"))).toBe("partial repair\n");
+			expect(text(join(repository, "file.txt"))).toBe("initial\n");
+			await provider.release(second);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects corrupt recovery metadata without deleting the Worktree", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-worktree-corrupt-metadata-"));
 		const repository = join(root, "repository");
@@ -278,6 +450,91 @@ describe("WorkspaceIntegrationQueue", () => {
 });
 
 describe("SubagentRuntime Worktree integration", () => {
+	it("preserves failed Worker code and diagnostics for the next repair Agent", async () => {
+		const root = mkdtempSync(join(tmpdir(), "pi-runtime-worktree-repair-"));
+		const repository = join(root, "repository");
+		execFileSync("git", ["init", repository], { windowsHide: true });
+		initializeRepository(repository);
+		const factory = new FakeSubagentSessionFactory();
+		const runtime = new SubagentRuntime({
+			sessionFactory: factory,
+			workspaceProvider: new GitWorktreeWorkspaceProvider({
+				baseDirectory: join(root, "workspaces"),
+				artifactDirectory: join(root, "artifacts"),
+			}),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		try {
+			const first = await runtime.spawn({
+				...spawnInput(repository),
+				parentBudget: { maxRetries: 1 },
+				workflowBudget: { maxRetries: 1 },
+				taskBudget: { maxRetries: 1 },
+			});
+			await runtime.send(first.id, "Implement the scoped repair and run npm test");
+			writeFileSync(join(first.workspace!.path, "file.txt"), "partial implementation\n", "utf8");
+			factory.sessions[0]?.emit({
+				type: "tool_execution_start",
+				toolCallId: "command-1",
+				toolName: "bash",
+				args: { command: "npm test" },
+			});
+			factory.sessions[0]?.fail(new Error("Worker timed out"));
+
+			const failed = await runtime.wait(first.id);
+			expect(failed).toMatchObject({
+				status: "failed",
+				artifact: { changedFiles: ["file.txt"] },
+			});
+			expect(text(join(repository, "file.txt"))).toBe("initial\n");
+
+			const second = await runtime.retry(first.id, {
+				attemptId: "attempt-2",
+				autoStart: false,
+				failureReason: "Worker timed out",
+			});
+			expect(text(join(second.workspace!.path, "file.txt"))).toBe("partial implementation\n");
+			expect(second.recoveryContext).toMatchObject({
+				originalPrompt: "Implement the scoped repair and run npm test",
+				artifact: { changedFiles: ["file.txt"] },
+				commandDiagnostics: [
+					{
+						command: "npm test",
+						status: "failed",
+						output: "Agent ended before the command completed: Worker timed out",
+					},
+				],
+			});
+
+			await runtime.send(second.id, "Continue the repair");
+			for (let index = 0; index < 5; index++) {
+				factory.sessions[1]?.emit({
+					type: "turn_end",
+					message: {
+						usage: {
+							input: 10,
+							output: 5,
+							cacheRead: 0,
+							cacheWrite: 0,
+							cost: { total: 0.001 },
+						},
+					},
+				});
+			}
+			expect(factory.sessions[1]?.steerCalls).toEqual([]);
+			expect(factory.sessions[1]?.abortCalls).toBe(0);
+			factory.sessions[1]?.complete(
+				subagentHandoff({ changedFiles: ["file.txt"], verificationSummary: ["npm test passed"] }),
+			);
+			await expect(runtime.wait(second.id)).resolves.toMatchObject({ status: "completed" });
+			expect(text(join(repository, "file.txt"))).toBe("partial implementation\n");
+		} finally {
+			await runtime.dispose();
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("publishes an integrated Artifact before completing the Agent Handoff", async () => {
 		const root = mkdtempSync(join(tmpdir(), "pi-runtime-worktree-"));
 		const repository = join(root, "repository");

@@ -57,6 +57,8 @@ export interface CreateAgentSessionFromServicesOptions {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	modelRouting?: CreateAgentSessionOptions["modelRouting"];
+	modelRoutingUserOverride?: CreateAgentSessionOptions["modelRoutingUserOverride"];
 	tools?: string[];
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
@@ -210,6 +212,8 @@ export async function createAgentSessionFromServices(
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
 		scopedModels: options.scopedModels,
+		modelRouting: options.modelRouting,
+		modelRoutingUserOverride: options.modelRoutingUserOverride,
 		tools: options.tools,
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,

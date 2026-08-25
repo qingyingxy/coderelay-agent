@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import type {
 	AgentWorkspace,
@@ -21,6 +22,10 @@ import {
 
 const execFileAsync = promisify(execFile);
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+const WORKTREE_RELEASE_MAX_ATTEMPTS = 3;
+const WORKTREE_RELEASE_RETRY_DELAY_MS = 100;
+
+type RemoveWorktree = (repositoryRoot: string, worktreeRoot: string) => Promise<void>;
 
 interface GitWorkspaceMetadata {
 	readonly schemaVersion: 1;
@@ -40,6 +45,8 @@ export interface GitWorktreeWorkspaceProviderOptions {
 	readonly createId?: () => string;
 	readonly now?: () => number;
 	readonly fallback?: WorkspaceProvider;
+	readonly removeWorktree?: RemoveWorktree;
+	readonly releaseRetryDelayMs?: number;
 }
 
 export class GitWorktreeWorkspaceError extends Error {
@@ -59,6 +66,12 @@ async function git(cwd: string, args: readonly string[]): Promise<string> {
 		windowsHide: true,
 	});
 	return result.stdout;
+}
+
+async function removeGitWorktree(repositoryRoot: string, worktreeRoot: string): Promise<void> {
+	await execFileAsync("git", ["-C", repositoryRoot, "worktree", "remove", "--force", worktreeRoot], {
+		windowsHide: true,
+	});
 }
 
 function normalizedIdentity(path: string): string {
@@ -123,8 +136,22 @@ async function workingTreeFingerprint(root: string): Promise<string> {
 	return hash.digest("hex");
 }
 
+function isSafeUntrackedPath(path: string): boolean {
+	if (process.platform !== "win32") {
+		return true;
+	}
+	return !path.split(/[\\/]/).some((segment) => {
+		const normalized = segment.replace(/[ .]+$/, "").toUpperCase();
+		return /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])(?:\..*)?$/.test(normalized);
+	});
+}
+
 async function createInternalCommit(root: string, parent: string, message: string): Promise<string> {
-	await git(root, ["add", "--all", "--", "."]);
+	await git(root, ["add", "--update", "--", "."]);
+	const safeUntracked = (await untrackedFiles(root)).filter(isSafeUntrackedPath);
+	if (safeUntracked.length > 0) {
+		await git(root, ["add", "--", ...safeUntracked]);
+	}
 	const tree = (await git(root, ["write-tree"])).trim();
 	const result = await execFileAsync(
 		"git",
@@ -173,7 +200,10 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 	readonly #createId: () => string;
 	readonly #now: () => number;
 	readonly #fallback: WorkspaceProvider;
+	readonly #removeWorktree: RemoveWorktree;
+	readonly #releaseRetryDelayMs: number;
 	readonly #metadata = new Map<string, GitWorkspaceMetadata>();
+	readonly #releasePromises = new Map<string, Promise<void>>();
 
 	constructor(options: GitWorktreeWorkspaceProviderOptions = {}) {
 		this.#baseDirectory = resolve(options.baseDirectory ?? join(tmpdir(), "pi-subagent-worktrees"));
@@ -181,6 +211,8 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		this.#createId = options.createId ?? randomUUID;
 		this.#now = options.now ?? Date.now;
 		this.#fallback = options.fallback ?? new CurrentWorkspaceProvider();
+		this.#removeWorktree = options.removeWorktree ?? removeGitWorktree;
+		this.#releaseRetryDelayMs = options.releaseRetryDelayMs ?? WORKTREE_RELEASE_RETRY_DELAY_MS;
 	}
 
 	async prepare(request: WorkspacePrepareRequest): Promise<AgentWorkspace> {
@@ -325,6 +357,36 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		};
 		await writeFile(`${patchPath}.json`, JSON.stringify(artifact, null, 2), "utf8");
 		return artifact;
+	}
+
+	async restoreArtifact(workspace: AgentWorkspace, artifact: WorkspaceArtifact): Promise<void> {
+		if (workspace.kind !== "git-worktree") {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.restore_unsupported",
+				`Workspace ${workspace.id} cannot restore a Git Artifact`,
+			);
+		}
+		if (artifact.repositoryIdentity !== workspace.repositoryIdentity) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.restore_repository_mismatch",
+				`Artifact ${artifact.id} belongs to a different repository`,
+			);
+		}
+		if (!isWithin(this.#artifactDirectory, artifact.patchPath)) {
+			throw new GitWorktreeWorkspaceError(
+				"workspace.restore_artifact_path_escape",
+				`Artifact ${artifact.id} Patch is outside the configured Artifact directory`,
+			);
+		}
+		await this.#verifyArtifactDigest(artifact);
+		const patch = await readFile(artifact.patchPath, "utf8");
+		if (!patch) {
+			return;
+		}
+		const metadata = await this.#requireMetadata(workspace);
+		const worktreeRoot = this.#worktreeRoot(metadata);
+		await git(worktreeRoot, ["apply", "--check", "--binary", artifact.patchPath]);
+		await git(worktreeRoot, ["apply", "--binary", artifact.patchPath]);
 	}
 
 	async integrateArtifact(artifact: WorkspaceArtifact): Promise<WorkspaceArtifact> {
@@ -481,6 +543,19 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 			await this.#fallback.release(workspace);
 			return;
 		}
+		const activeRelease = this.#releasePromises.get(workspace.id);
+		if (activeRelease) {
+			await activeRelease;
+			return;
+		}
+		const releasePromise = this.#releaseWorktree(workspace).finally(() => {
+			this.#releasePromises.delete(workspace.id);
+		});
+		this.#releasePromises.set(workspace.id, releasePromise);
+		await releasePromise;
+	}
+
+	async #releaseWorktree(workspace: AgentWorkspace): Promise<void> {
 		const metadata = await this.#metadataFor(workspace);
 		if (!metadata) {
 			return;
@@ -489,26 +564,18 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		if (!isWithin(this.#baseDirectory, worktreeRoot)) {
 			throw new GitWorktreeWorkspaceError("workspace.release_path_escape", "Refused to release an unsafe path");
 		}
-		try {
-			await execFileAsync("git", ["-C", metadata.targetRoot, "worktree", "remove", "--force", worktreeRoot], {
-				windowsHide: true,
-			});
-		} catch (error) {
-			if (await this.#directoryExists(worktreeRoot)) {
+		if (await this.#directoryExists(metadata.targetRoot)) {
+			await this.#removeWorktreeWithRetry(metadata.targetRoot, worktreeRoot);
+			try {
+				await git(metadata.targetRoot, ["branch", "-D", metadata.branch]);
+			} catch (error) {
 				throw new GitWorktreeWorkspaceError(
-					"workspace.release_failed",
-					`Failed to remove Worktree ${worktreeRoot}: ${error instanceof Error ? error.message : String(error)}`,
+					"workspace.branch_release_failed",
+					`Failed to remove internal branch ${metadata.branch}: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
-			await git(metadata.targetRoot, ["worktree", "prune"]);
-		}
-		try {
-			await git(metadata.targetRoot, ["branch", "-D", metadata.branch]);
-		} catch (error) {
-			throw new GitWorktreeWorkspaceError(
-				"workspace.branch_release_failed",
-				`Failed to remove internal branch ${metadata.branch}: ${error instanceof Error ? error.message : String(error)}`,
-			);
+		} else {
+			await rm(worktreeRoot, { recursive: true, force: true });
 		}
 		await rm(this.#metadataPath(metadata), { force: true });
 		this.#metadata.delete(workspace.id);
@@ -627,6 +694,54 @@ export class GitWorktreeWorkspaceProvider implements WorkspaceProvider {
 		const key = storageKey(metadata.targetRoot);
 		const agentSegment = metadata.workspace.id.split(":").at(-1) ?? safeAgentSegment(metadata.workspace.id);
 		return join(this.#baseDirectory, key, "metadata", `${agentSegment}.json`);
+	}
+
+	async #removeWorktreeWithRetry(repositoryRoot: string, worktreeRoot: string): Promise<void> {
+		let lastError: unknown;
+		for (let attempt = 1; attempt <= WORKTREE_RELEASE_MAX_ATTEMPTS; attempt++) {
+			try {
+				await this.#removeWorktree(repositoryRoot, worktreeRoot);
+				return;
+			} catch (error) {
+				lastError = error;
+				if (!(await this.#directoryExists(worktreeRoot))) {
+					await git(repositoryRoot, ["worktree", "prune"]);
+					return;
+				}
+				if (!(await this.#worktreeIsRegistered(repositoryRoot, worktreeRoot))) {
+					try {
+						await rm(worktreeRoot, {
+							recursive: true,
+							force: true,
+							maxRetries: WORKTREE_RELEASE_MAX_ATTEMPTS,
+							retryDelay: this.#releaseRetryDelayMs,
+						});
+						await git(repositoryRoot, ["worktree", "prune"]);
+						return;
+					} catch (cleanupError) {
+						lastError = cleanupError;
+					}
+				}
+				if (attempt < WORKTREE_RELEASE_MAX_ATTEMPTS && this.#releaseRetryDelayMs > 0) {
+					await delay(this.#releaseRetryDelayMs * attempt);
+				}
+			}
+		}
+		throw new GitWorktreeWorkspaceError(
+			"workspace.release_failed",
+			`Failed to remove Worktree ${worktreeRoot} after ${WORKTREE_RELEASE_MAX_ATTEMPTS} attempts: ${
+				lastError instanceof Error ? lastError.message : String(lastError)
+			}`,
+		);
+	}
+
+	async #worktreeIsRegistered(repositoryRoot: string, worktreeRoot: string): Promise<boolean> {
+		const output = await git(repositoryRoot, ["worktree", "list", "--porcelain"]);
+		const identity = normalizedIdentity(worktreeRoot);
+		return output
+			.split(/\r?\n/)
+			.filter((line) => line.startsWith("worktree "))
+			.some((line) => normalizedIdentity(line.slice("worktree ".length)) === identity);
 	}
 
 	async #writeMetadata(metadata: GitWorkspaceMetadata): Promise<void> {

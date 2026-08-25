@@ -11,6 +11,7 @@
 | 工具与异步执行 | Pi Tool Calling 复用、后台 Job、增量日志、超时和取消 | 强 |
 | 可靠性与安全 | 权限/预算交集、单 Writer Lease、级联取消、幂等和恢复 | 强 |
 | 代码交付闭环 | Diff、只读 Review、Test/Build、Repair、Completion Gate | 强 |
+| 多模型成本治理 | Model Gateway、角色/风险/预算路由、显式选择保护、决策与回退留痕 | 强 |
 | CLI 产品化 | TUI 状态、控制命令、Print/JSON/RPC Workflow View | 强 |
 | 大规模线上效果 | 当前没有真实生产流量和线上指标 | 不支持，不写 |
 
@@ -18,7 +19,7 @@
 
 项目必须表述为“基于 Pi Fork 二次开发”。多模型 Provider、Agent Loop、基础 Tool Calling、AgentSession、会话能力和 TUI 来自 Pi；个人贡献是 Workflow 产品层、受控 Runtime、交付恢复闭环和 CLI 输出集成。
 
-## 3. 简历可用版本
+## 3. 简历可用版本（稳定成果）
 
 **项目：基于 Pi 的 CLI Coding Agent（二次开发）**
 
@@ -30,6 +31,7 @@
 - 产品化 Plan 审批、Task Graph 与 Scheduler，接入独立 Subagent、结构化 Handoff 和后台 Job，实现串并行执行、依赖调度及 Agent/Job CLI 控制。
 - 建立权限与预算继承、只读角色、跨进程单 Writer Lease、级联取消等运行保障，避免子 Agent 越权和同工作区并发写冲突。
 - 打通 Diff、只读 Review、Test/Build、受限 Repair 与 Completion Gate，统一 TUI、Print、JSON、RPC 输出；16 个 CLI 专项集成用例和 6 个确定性评测用例通过。
+- 稳定集成基于角色、风险和预算压力的 Model Gateway，将简单任务路由到低成本模型、规划和高风险交付路由到高能力模型；保护 CLI 与交互式显式模型选择，并持久化路由原因及回退记录。
 
 ## 4. 面试说明
 

@@ -10,7 +10,7 @@ import { validateWorkflowTransition } from "../../src/core/workflow/transitions.
 import { NOW } from "./fixtures.ts";
 
 describe("Direct to Plan upgrade", () => {
-	it("continues a confident low-risk Direct task", () => {
+	it("continues a newly discovered bounded medium task in Direct", () => {
 		expect(
 			decideDirectPlanUpgrade(
 				{
@@ -28,6 +28,7 @@ describe("Direct to Plan upgrade", () => {
 				riskLevel: "low",
 				confidence: "high",
 				reason: "The change remains localized",
+				taskLevel: "medium",
 				suggestedMode: "direct",
 			},
 			evaluatedAt: NOW,
@@ -52,6 +53,7 @@ describe("Direct to Plan upgrade", () => {
 				riskLevel: "high",
 				confidence: "low",
 				reason: "The discovered change crosses security and storage boundaries",
+				taskLevel: "high_risk",
 				suggestedMode: "plan",
 			},
 			evaluatedAt: NOW,

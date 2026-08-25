@@ -3,13 +3,14 @@ import type { DeliveryWorkflowPort } from "../delivery/types.ts";
 import type { JobRuntime } from "../jobs/job-runtime.ts";
 import type { Job } from "../jobs/types.ts";
 import type { SessionManager } from "../session-manager.ts";
-import { aggregateHandoffs } from "../subagents/handoff.ts";
+import { aggregateHandoffs, STRUCTURED_HANDOFF_RETRY_INSTRUCTION } from "../subagents/handoff.ts";
 import type { SubagentService } from "../subagents/subagent-service.ts";
 import type { TeamTaskProposal } from "../subagents/team-types.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
 import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
 import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
+import type { ModelEscalationReason } from "./model-gateway.ts";
 import { derivePlanProgress } from "./plan-progress.ts";
 import { buildDeliveryWorkflowFinalReport, type DeliveryWorkflowFinalReport } from "./report.ts";
 import {
@@ -75,6 +76,204 @@ export interface WorkflowTaskExecution {
 	readonly completion: Promise<AgentRunResult | Job>;
 	readonly subagent?: SubagentTaskExecution;
 	readonly job?: JobTaskExecution;
+}
+
+const MINIMUM_DELIVERY_RESERVE_MS = 60_000;
+const MAXIMUM_DELIVERY_RESERVE_MS = 180_000;
+const MINIMUM_REPAIR_RESERVE_MS = 30_000;
+const MAXIMUM_REPAIR_RESERVE_MS = 120_000;
+const MAXIMUM_INITIAL_WORKER_SHARE = 0.4;
+const MINIMUM_INITIAL_WORKER_MS = 90_000;
+const MAXIMUM_INITIAL_WORKER_MS = 240_000;
+const REVIEWER_DELIVERY_RESERVE_MS = 30_000;
+
+function taskAttemptBudget(workflow: Workflow, task: Task, completedAttempts: number): Task["budget"] {
+	const workflowDurationMs = workflow.budget.maxDurationMs;
+	if (workflowDurationMs === undefined) {
+		return task.budget;
+	}
+	const elapsedMs = Math.max(0, Date.now() - Date.parse(workflow.createdAt));
+	const remainingMs = Math.max(0, workflowDurationMs - elapsedMs);
+	const deliveryReserveMs =
+		task.kind === "repair"
+			? Math.min(MINIMUM_DELIVERY_RESERVE_MS, Math.max(1, Math.floor(workflowDurationMs * 0.1)))
+			: task.recommendedAgentRole === "reviewer"
+				? Math.min(REVIEWER_DELIVERY_RESERVE_MS, Math.max(1, Math.floor(workflowDurationMs * 0.05)))
+				: Math.min(
+						MAXIMUM_DELIVERY_RESERVE_MS,
+						Math.max(MINIMUM_DELIVERY_RESERVE_MS, Math.floor(workflowDurationMs * 0.3)),
+					);
+	const repairReserveMs =
+		completedAttempts === 0 &&
+		task.kind !== "repair" &&
+		task.recommendedAgentRole !== "reviewer" &&
+		(task.budget.maxRetries ?? 0) > 0
+			? Math.min(
+					MAXIMUM_REPAIR_RESERVE_MS,
+					Math.max(MINIMUM_REPAIR_RESERVE_MS, Math.floor(workflowDurationMs * 0.15)),
+				)
+			: 0;
+	const availableMs = remainingMs - deliveryReserveMs - repairReserveMs;
+	if (availableMs < 1) {
+		throw new Error(
+			`Workflow duration budget has ${remainingMs}ms remaining; ${deliveryReserveMs}ms is reserved for delivery verification and ${repairReserveMs}ms for repair`,
+		);
+	}
+	const initialWorkerLimitMs =
+		completedAttempts === 0 && task.accessMode === "writer" && task.recommendedAgentRole === "worker"
+			? Math.min(
+					MAXIMUM_INITIAL_WORKER_MS,
+					Math.max(MINIMUM_INITIAL_WORKER_MS, Math.floor(workflowDurationMs * MAXIMUM_INITIAL_WORKER_SHARE)),
+				)
+			: availableMs;
+	return {
+		...task.budget,
+		maxDurationMs: Math.min(task.budget.maxDurationMs ?? availableMs, availableMs, initialWorkerLimitMs),
+	};
+}
+
+function workerPromptLines(
+	plan: Plan,
+	task: Task,
+	agent: AgentInstance,
+	verificationCommands: readonly string[],
+): readonly string[] {
+	const step = plan.steps.find(({ id }) => id === task.sourcePlanStepId);
+	const fileIntents = step?.fileIntents ?? [];
+	const recovery = agent.recoveryContext;
+	const changedFiles = recovery?.artifact?.changedFiles ?? [];
+	const diagnostics = recovery?.commandDiagnostics ?? [];
+	return [
+		"Execution role: implementation Worker. Do not create, restate, review, or revise a plan. Start editing after only the minimum reads needed for the listed files.",
+		`Workflow goal: ${plan.goal}`,
+		`Assigned Task: ${task.title}`,
+		task.description,
+		...(fileIntents.length > 0
+			? [
+					"Required file operations:",
+					...fileIntents.map(({ path, action, reason }) => `- ${action} ${path}: ${reason}`),
+				]
+			: []),
+		`Acceptance criteria:\n${task.verificationRequirements.map(({ description }) => `- ${description}`).join("\n")}`,
+		...(verificationCommands.length > 0
+			? [
+					`Required verification commands:\n${verificationCommands.map((command) => `- ${command}`).join("\n")}`,
+					"Run these commands yourself. If one fails, inspect its output, modify the code, and rerun it in this same Session until it passes or the budget is exhausted.",
+				]
+			: []),
+		...(agent.effectivePermissions.deniedPaths.length > 0
+			? [
+					`Do not modify these protected paths:\n${agent.effectivePermissions.deniedPaths.map((path) => `- ${path}`).join("\n")}`,
+				]
+			: []),
+		...(recovery
+			? [
+					`Previous attempt status: ${recovery.reason}`,
+					changedFiles.length > 0
+						? `The previous implementation has already been restored into this Workspace. Continue from these changed files: ${changedFiles.join(", ")}. Do not restart from scratch.`
+						: "The previous attempt produced no code. Implement the listed file operations now; do not repeat its planning or exploration.",
+					...(diagnostics.length > 0
+						? [
+								`Previous command diagnostics:\n${diagnostics.map(({ command, status, output }) => `- ${command}: ${status}${output ? `\n${output}` : ""}`).join("\n")}`,
+							]
+						: []),
+				]
+			: []),
+		"Complete all related edits and test-driven repairs in this one Worker Session. Return the structured Handoff only after implementation and required verification.",
+	];
+}
+
+function workerVerificationCommands(task: Task, tasks: readonly Task[]): readonly string[] {
+	const commands = task.verificationRequirements.flatMap(({ command }) => (command ? [command] : []));
+	for (const candidate of tasks) {
+		if (
+			candidate.kind === "command" &&
+			candidate.command &&
+			candidate.dependencyIds.length === 1 &&
+			candidate.dependencyIds[0] === task.id &&
+			candidate.verificationRequirements.some(({ required, command }) => required && command === candidate.command)
+		) {
+			commands.push(candidate.command);
+		}
+	}
+	return [...new Set(commands)];
+}
+
+function retryEscalationReason(task: Task, previousAttempt: Attempt | undefined): ModelEscalationReason | undefined {
+	if (task.kind === "repair") return "verification_failure";
+	const failureCode = previousAttempt?.failure?.code;
+	if (failureCode === "subagent.no_progress" || failureCode === "subagent.duration_exceeded") {
+		return "no_progress";
+	}
+	if (failureCode === "subagent.verification_failed") return "verification_failure";
+	return undefined;
+}
+
+function withAgentHandoffVerifications(content: PlanContent): PlanContent {
+	const verificationRequirements = [...structuredClone(content.verificationRequirements)];
+	const requirementsById = new Map(verificationRequirements.map((requirement) => [requirement.id, requirement]));
+	const usedIds = new Set(requirementsById.keys());
+	let agentSequence = 0;
+	let commandSequence = 0;
+	const steps = content.steps.map((step) => {
+		const kind = step.kind ?? "agent";
+		if (kind === "command" && step.verificationRequirementIds.length === 0 && step.command) {
+			const matchingRequirement = verificationRequirements.find(
+				(requirement) => requirement.required && requirement.command === step.command,
+			);
+			if (matchingRequirement) {
+				return {
+					...structuredClone(step),
+					verificationRequirementIds: [matchingRequirement.id],
+				};
+			}
+			let requirementId: string;
+			do {
+				requirementId = `command-verification-${++commandSequence}`;
+			} while (usedIds.has(requirementId));
+			usedIds.add(requirementId);
+			const requirement = {
+				id: requirementId,
+				kind: "test" as const,
+				description: `Command succeeds: ${step.command}`,
+				required: true,
+				command: step.command,
+			};
+			verificationRequirements.push(requirement);
+			requirementsById.set(requirementId, requirement);
+			return {
+				...structuredClone(step),
+				verificationRequirementIds: [requirementId],
+			};
+		}
+		if (
+			kind !== "agent" ||
+			step.verificationRequirementIds.some((id) => {
+				const requirement = requirementsById.get(id);
+				return requirement?.required && !requirement.command;
+			})
+		) {
+			return structuredClone(step);
+		}
+		let requirementId: string;
+		do {
+			requirementId = `agent-handoff-${++agentSequence}`;
+		} while (usedIds.has(requirementId));
+		usedIds.add(requirementId);
+		const requirement = {
+			id: requirementId,
+			kind: "manual" as const,
+			description: `Structured Handoff validates Agent Task: ${step.title}`,
+			required: true,
+		};
+		verificationRequirements.push(requirement);
+		requirementsById.set(requirementId, requirement);
+		return {
+			...structuredClone(step),
+			verificationRequirementIds: [...step.verificationRequirementIds, requirementId],
+		};
+	});
+	return { ...structuredClone(content), steps, verificationRequirements };
 }
 
 export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
@@ -476,6 +675,13 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 						network: false,
 					};
 		const attemptId = `attempt-${randomUUID()}`;
+		const verificationCommands =
+			profile.role === "worker"
+				? workerVerificationCommands(task, this.tasks)
+				: task.verificationRequirements.flatMap(({ command }) => (command ? [command] : []));
+		const taskAttempts = this.#controller.listAttempts(task.id);
+		const previousAttempt = taskAttempts.at(-1);
+		const attemptsById = new Map(taskAttempts.map((attempt) => [attempt.id, attempt]));
 		const recoverySource = input.retryAgentId
 			? undefined
 			: runtime
@@ -484,14 +690,37 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 						(candidate) =>
 							candidate.taskId === task.id &&
 							candidate.attemptId === task.currentAttemptId &&
-							candidate.status === "interrupted",
+							candidate.status === "interrupted" &&
+							attemptsById.get(candidate.attemptId)?.status === "interrupted",
 					)
 					.at(-1);
-		const sourceAgentId = input.retryAgentId ?? recoverySource?.id;
+		const failedSource = input.retryAgentId
+			? undefined
+			: runtime
+					.list(workflow.id)
+					.filter(
+						(candidate) =>
+							candidate.taskId === task.id &&
+							candidate.attemptId === previousAttempt?.id &&
+							(candidate.status === "failed" || candidate.status === "interrupted") &&
+							previousAttempt?.status === "failed",
+					)
+					.at(-1);
+		const sourceAgentId = input.retryAgentId ?? recoverySource?.id ?? failedSource?.id;
 		const recoveryReason = recoverySource
 			? (recoverySource.lastError ??
 				"Recovered after the previous runtime stopped before reporting a terminal state")
 			: undefined;
+		const failureReason =
+			!recoveryReason && previousAttempt?.failure
+				? `${previousAttempt.failure.code}: ${previousAttempt.failure.message}`
+				: undefined;
+		const modelEscalationReason = retryEscalationReason(task, previousAttempt);
+		const attemptBudget = taskAttemptBudget(workflow, task, taskAttempts.length);
+		const workflowDeadlineAtMs =
+			workflow.budget.maxDurationMs === undefined
+				? undefined
+				: Date.parse(workflow.createdAt) + workflow.budget.maxDurationMs;
 		const dependencyArtifactIds = runtime
 			.list(workflow.id)
 			.filter(
@@ -503,6 +732,9 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					attemptId,
 					autoStart: false,
 					recoveryReason,
+					failureReason,
+					modelEscalationReason,
+					taskBudget: attemptBudget,
 				})
 			: await runtime.spawn({
 					workflowId: workflow.id,
@@ -526,7 +758,11 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					taskPermission,
 					parentBudget: workflow.budget,
 					workflowBudget: workflow.budget,
-					taskBudget: task.budget,
+					taskBudget: attemptBudget,
+					workflowDeadlineAtMs,
+					riskLevel: workflow.modeDecision?.riskLevel,
+					modelEscalationReason,
+					verificationCommands,
 				});
 		if (agent.taskId !== task.id || agent.workflowId !== workflow.id) {
 			await runtime.interrupt(agent.id, "Retry Agent ownership mismatch").catch(() => undefined);
@@ -561,14 +797,34 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 				const handoff = handoffId ? runtime.getHandoff(handoffId) : undefined;
 				return handoff ? [handoff] : [];
 			});
-			const promptLines = [
-				`Workflow: ${workflow.id}`,
-				`Task: ${task.id} | ${task.title}`,
-				task.description,
-				`Access mode: ${task.accessMode}`,
-				`Verification requirements: ${task.verificationRequirements.map(({ description }) => description).join("; ")}`,
-			];
-			if (agent.recoveryContext) {
+			const promptLines =
+				profile.role === "worker"
+					? [...workerPromptLines(this.currentPlan, task, agent, verificationCommands)]
+					: [
+							`Workflow: ${workflow.id}`,
+							`Approved Plan: ${JSON.stringify(this.currentPlan)}`,
+							`Task: ${task.id} | ${task.title}`,
+							task.description,
+							`Access mode: ${task.accessMode}`,
+							`Verification requirements: ${task.verificationRequirements.map(({ description }) => description).join("; ")}`,
+						];
+			if (previousAttempt?.failure) {
+				const diagnostic = `${previousAttempt.failure.code}: ${previousAttempt.failure.message}`.slice(
+					0,
+					16 * 1024,
+				);
+				if (profile.role === "worker") {
+					promptLines.push(`Previous attempt failure: ${diagnostic}`);
+				} else {
+					promptLines.push(
+						STRUCTURED_HANDOFF_RETRY_INSTRUCTION,
+						"Continue as a repair pass. Preserve the previous implementation, inspect its diff and diagnostics, and modify only what remains incorrect. Do not restart repository exploration from scratch.",
+						`Previous attempt failure: ${diagnostic}`,
+						`Unfinished acceptance criteria: ${task.verificationRequirements.map(({ description }) => description).join("; ")}`,
+					);
+				}
+			}
+			if (agent.recoveryContext && profile.role !== "worker") {
 				promptLines.push(
 					`Recovery context (stable persisted facts; revalidate before relying on them): ${JSON.stringify(agent.recoveryContext)}`,
 				);
@@ -584,7 +840,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		const completion = runtime
 			.wait(agent.id)
 			.then((result) => this.#finishSubagentTask(task.id, attemptId, result))
-			.finally(() => this.#checkpoint());
+			.finally(async () => {
+				await runtime.release(agent.id);
+				this.#checkpoint();
+			});
 		return { agent: runtime.get(agent.id) ?? agent, completion };
 	}
 
@@ -775,7 +1034,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 			planId: plan.id,
-			content,
+			content: withAgentHandoffVerifications(content),
 			plannerReadOnly: true,
 		});
 		this.#checkpoint();
@@ -879,6 +1138,9 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 
 	failDelivery(reason: string): void {
 		const workflow = this.workflow;
+		if (workflow.status === "cancelling" || workflow.status === "cancelled") {
+			return;
+		}
 		const rootTaskId = workflow.rootTaskId;
 		if (!rootTaskId) {
 			throw new Error(`Workflow ${workflow.id} has no root Task`);
@@ -924,7 +1186,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 					},
 				});
 			}
-			const requirement = task.verificationRequirements.find(({ required }) => required);
+			const requirement = task.verificationRequirements.find(({ required, command }) => required && !command);
 			if (!requirement) {
 				throw new Error(`Task ${task.id} has no required verification`);
 			}
@@ -971,7 +1233,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 			usage: result.usage,
 			willRetry,
 			failure: {
-				code: result.status === "interrupted" ? "subagent_interrupted" : "subagent_failed",
+				code: result.errorCode ?? (result.status === "interrupted" ? "subagent.interrupted" : "subagent.failed"),
 				message: result.error ?? `Subagent ${result.agentId} failed`,
 			},
 		});

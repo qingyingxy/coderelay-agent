@@ -15,6 +15,7 @@ export * from "./mode-advisor.ts";
 export * from "./mode-advisor-runtime.ts";
 export * from "./mode-decision.ts";
 export * from "./mode-selector.ts";
+export * from "./model-gateway.ts";
 export * from "./plan-progress.ts";
 export * from "./plan-runtime.ts";
 export * from "./planner-runtime.ts";

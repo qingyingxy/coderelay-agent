@@ -1,6 +1,6 @@
 import { resolveModeDecisionReasonCode } from "./decision-reasons.ts";
 import type { ModeSelection } from "./mode-selector.ts";
-import type { IsoDateTime, ModeDecision, RiskLevel } from "./types.ts";
+import { type IsoDateTime, type ModeDecision, type RiskLevel, TASK_LEVELS, type TaskLevel } from "./types.ts";
 
 const RISK_LEVELS: readonly RiskLevel[] = ["low", "medium", "high"];
 
@@ -8,6 +8,7 @@ export interface CreateModeDecisionInput {
 	readonly selection: ModeSelection;
 	readonly reason: string;
 	readonly riskLevel: RiskLevel;
+	readonly taskLevel?: TaskLevel;
 	readonly decidedAt: IsoDateTime;
 }
 
@@ -29,6 +30,9 @@ export function createModeDecision(input: CreateModeDecisionInput): ModeDecision
 	if (!RISK_LEVELS.includes(input.riskLevel)) {
 		throw new ModeDecisionError("mode_decision.invalid_risk", `Unsupported risk level: ${input.riskLevel}`);
 	}
+	if (input.taskLevel !== undefined && !TASK_LEVELS.includes(input.taskLevel)) {
+		throw new ModeDecisionError("mode_decision.invalid_task_level", `Unsupported task level: ${input.taskLevel}`);
+	}
 	if (!Number.isFinite(Date.parse(input.decidedAt))) {
 		throw new ModeDecisionError("mode_decision.invalid_timestamp", "Mode decision timestamp must be valid");
 	}
@@ -38,6 +42,7 @@ export function createModeDecision(input: CreateModeDecisionInput): ModeDecision
 		reasonCode: resolveModeDecisionReasonCode(input.selection.mode, input.selection.source),
 		reason,
 		riskLevel: input.riskLevel,
+		...(input.taskLevel ? { taskLevel: input.taskLevel } : {}),
 		decidedAt: input.decidedAt,
 	};
 }

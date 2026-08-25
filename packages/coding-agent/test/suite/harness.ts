@@ -22,6 +22,7 @@ import { convertToLlm } from "../../src/core/messages.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
+import type { ModelRoutingOptions } from "../../src/core/workflow/model-gateway.ts";
 import type {
 	InlineExtension,
 	JobRuntime,
@@ -68,6 +69,8 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	models?: FauxModelDefinition[];
+	modelRouting?: ModelRoutingOptions;
+	modelRoutingUserOverride?: boolean;
 	settings?: Partial<Settings>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
@@ -194,6 +197,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		settingsManager,
 		cwd: tempDir,
 		modelRuntime: getModelRuntime(modelRegistry),
+		modelRouting: options.modelRouting,
+		modelRoutingUserOverride: options.modelRoutingUserOverride,
 		resourceLoader,
 		baseToolsOverride: toolMap,
 		initialActiveToolNames: options.initialActiveToolNames,

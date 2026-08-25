@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { SUBAGENT_PATH_POLICY_ENV } from "../src/core/subagents/enforcement-plan.ts";
-import { expandPath, resolveReadPath, resolveToCwd } from "../src/core/tools/path-utils.ts";
+import { expandPath, resolveReadPath, resolveToCwd, resolveWritePath } from "../src/core/tools/path-utils.ts";
 
 describe("path-utils", () => {
 	const originalPathPolicy = process.env[SUBAGENT_PATH_POLICY_ENV];
@@ -74,6 +74,27 @@ describe("path-utils", () => {
 			} finally {
 				rmdirSync(allowed);
 				rmdirSync(outside);
+			}
+		});
+
+		it("allows protected paths to be read but denies writes", () => {
+			const allowed = mkdtempSync(join(tmpdir(), "pi-path-policy-write-denied-"));
+			try {
+				const protectedFile = join(allowed, "verify.js");
+				writeFileSync(protectedFile, "module.exports = true;");
+				process.env[SUBAGENT_PATH_POLICY_ENV] = JSON.stringify({
+					readableRoots: [allowed],
+					writableRoots: [allowed],
+					deniedRoots: [],
+					writeDeniedRoots: [protectedFile],
+					denyAll: false,
+				});
+
+				expect(resolveToCwd("verify.js", allowed)).toBe(protectedFile);
+				expect(() => resolveWritePath("verify.js", allowed)).toThrow("denied write path");
+			} finally {
+				unlinkSync(join(allowed, "verify.js"));
+				rmdirSync(allowed);
 			}
 		});
 	});

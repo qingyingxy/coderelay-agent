@@ -454,6 +454,7 @@ export class WorkflowController {
 					selection: modeSelection,
 					reason: command.modeDecision.reason,
 					riskLevel: command.modeDecision.riskLevel,
+					taskLevel: command.modeDecision.taskLevel,
 					decidedAt: command.modeDecision.decidedAt,
 				})
 			: createModeDecision({
@@ -650,6 +651,7 @@ export class WorkflowController {
 								selection: modeSelection,
 								reason: command.modeDecision.reason,
 								riskLevel: command.modeDecision.riskLevel,
+								taskLevel: command.modeDecision.taskLevel,
 								decidedAt: command.modeDecision.decidedAt,
 							})
 						: createModeDecision({

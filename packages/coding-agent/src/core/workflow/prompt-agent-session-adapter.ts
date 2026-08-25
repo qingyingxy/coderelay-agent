@@ -1,4 +1,4 @@
-import type { PromptOptions } from "../agent-session.ts";
+import type { AgentSessionEvent, PromptOptions } from "../agent-session.ts";
 import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import type { PromptContextSource, PromptEnvelope } from "./prompt-envelope.ts";
 import { validatePromptEnvelope } from "./prompt-envelope.ts";
@@ -14,6 +14,10 @@ export interface PromptAgentSession {
 	getActiveToolNames(): string[];
 	setActiveToolsByName(toolNames: string[]): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
+	steer?(text: string): Promise<void>;
+	abort?(): Promise<void>;
+	subscribe?(listener: (event: AgentSessionEvent) => void): () => void;
+	getLastAssistantText?(): string | undefined;
 }
 
 export interface RenderedPromptEnvelope {

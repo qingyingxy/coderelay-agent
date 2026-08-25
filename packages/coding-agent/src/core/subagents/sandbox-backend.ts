@@ -25,6 +25,8 @@ const BASE_ENVIRONMENT_KEYS = [
 	"PATH",
 	"PATHEXT",
 	"PI_CODING_AGENT_DIR",
+	"PI_EVALUATION_NODE",
+	"PI_EVALUATION_NODE_MODULES",
 	"PI_OFFLINE",
 	"PI_PACKAGE_DIR",
 	"PROGRAMDATA",
@@ -149,6 +151,7 @@ export class BaselineSandboxBackend implements SandboxBackend {
 			readableRoots: request.plan.filesystem.readableRoots,
 			writableRoots: request.plan.filesystem.writableRoots,
 			deniedRoots: request.plan.filesystem.deniedRoots,
+			writeDeniedRoots: request.plan.filesystem.writeDeniedRoots,
 			denyAll: request.plan.filesystem.denyAll,
 		});
 		environment[SUBAGENT_ASSURANCE_ENV] = assurance;

@@ -7,7 +7,7 @@ import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts"
 import { getLanguageFromPath, highlightCode, type Theme } from "../../modes/interactive/theme/theme.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { withFileMutationQueue } from "./file-mutation-queue.ts";
-import { resolveToCwd } from "./path-utils.ts";
+import { resolveWritePath } from "./path-utils.ts";
 import { normalizeDisplayText, renderToolPath, replaceTabs, str } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -198,7 +198,7 @@ export function createWriteToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
-			const absolutePath = resolveToCwd(path, cwd);
+			const absolutePath = resolveWritePath(path, cwd);
 			const dir = dirname(absolutePath);
 			return withFileMutationQueue(absolutePath, async () => {
 				// Do not reject from an abort event listener here: that would release the

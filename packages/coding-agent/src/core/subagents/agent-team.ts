@@ -91,6 +91,7 @@ function teamRole(agent: AgentInstance, task: Task): TeamRole {
 	}
 	switch (agent.profile?.role) {
 		case "planner":
+		case "planner_lite":
 		case "mode_advisor":
 			return "coordinator";
 		case "reviewer":

@@ -1,4 +1,4 @@
-import { defineConfig, mergeConfig } from "vitest/config";
+import { configDefaults, defineConfig, mergeConfig } from "vitest/config";
 import baseConfig, { workspaceSourcePaths } from "../../vitest.base.ts";
 
 export default mergeConfig(
@@ -8,6 +8,7 @@ export default mergeConfig(
 			globals: true,
 			environment: "node",
 			testTimeout: 30000,
+			exclude: [...configDefaults.exclude, "evals/**"],
 			reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot"],
 			silent: "passed-only",
 			server: {

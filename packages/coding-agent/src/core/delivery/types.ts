@@ -33,6 +33,7 @@ export interface DeliveryDiff {
 
 export interface ReviewResult {
 	readonly status: "passed" | "failed";
+	readonly failureKind?: "finding" | "infrastructure";
 	readonly summary: string;
 	readonly evidenceRefs: readonly string[];
 	readonly risks: readonly string[];

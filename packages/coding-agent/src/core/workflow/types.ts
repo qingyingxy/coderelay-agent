@@ -34,6 +34,8 @@ export function isResolvedExecutionMode(value: unknown): value is ResolvedExecut
 }
 export type ModeDecisionSource = "user" | "forced_policy" | "agent" | "default";
 export type RiskLevel = "low" | "medium" | "high";
+export const TASK_LEVELS = ["simple", "medium", "hard", "high_risk"] as const;
+export type TaskLevel = (typeof TASK_LEVELS)[number];
 export type DirectPlanUpgradeTrigger = "complexity" | "risk" | "confidence";
 
 export interface DirectPlanUpgradeRequest {
@@ -115,6 +117,7 @@ export interface ModeDecision {
 	readonly reasonCode?: ModeDecisionReasonCode;
 	readonly reason: string;
 	readonly riskLevel: RiskLevel;
+	readonly taskLevel?: TaskLevel;
 	readonly decidedAt: IsoDateTime;
 }
 

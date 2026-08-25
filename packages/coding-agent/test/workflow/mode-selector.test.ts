@@ -7,6 +7,7 @@ const DIRECT_ADVICE: ModeAdvice = {
 	riskLevel: "low",
 	confidence: "high",
 	reason: "The task is localized",
+	taskLevel: "simple",
 	suggestedMode: "direct",
 };
 
@@ -15,6 +16,7 @@ const PLAN_ADVICE: ModeAdvice = {
 	riskLevel: "medium",
 	confidence: "high",
 	reason: "The task changes multiple architectural boundaries",
+	taskLevel: "hard",
 	suggestedMode: "plan",
 };
 

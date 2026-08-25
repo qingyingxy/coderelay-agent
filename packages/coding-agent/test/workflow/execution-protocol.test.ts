@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import type { AgentInstance } from "../../src/core/subagents/types.ts";
 import {
 	applyExecutionProtocolToPlan,
+	createAdaptiveExecutionProtocol,
 	EXECUTION_PROTOCOL_VERSION,
+	FULL_PERMISSION_SET,
 	SessionExecutionProtocolRuntime,
+	validateExecutionProtocol,
 	type WorkflowExecutionProtocol,
 } from "../../src/core/workflow/index.ts";
+import { NOW, ZERO_USAGE } from "./fixtures.ts";
 
 const PROTOCOL: WorkflowExecutionProtocol = {
 	version: EXECUTION_PROTOCOL_VERSION,
@@ -32,7 +37,47 @@ const PROTOCOL: WorkflowExecutionProtocol = {
 	],
 };
 
+function reviewer(
+	id: string,
+	creationReasonCode: AgentInstance["creationReasonCode"],
+	status: AgentInstance["status"],
+	handoffId?: string,
+): AgentInstance {
+	return {
+		id,
+		workflowId: "workflow-1",
+		taskId: `task-${id}`,
+		attemptId: `attempt-${id}`,
+		profileName: "reviewer",
+		creationReasonCode,
+		scope: "task",
+		backend: "in-process",
+		status,
+		depth: 1,
+		retryCount: 0,
+		effectivePermissions: FULL_PERMISSION_SET,
+		budget: {},
+		usage: ZERO_USAGE,
+		revision: 0,
+		createdAt: NOW,
+		updatedAt: NOW,
+		handoffId,
+	};
+}
+
 describe("Execution Protocol", () => {
+	it.each([
+		["simple", [], "adaptive-simple"],
+		["medium", [], "adaptive-medium"],
+		["hard", ["worker", "reviewer"], "adaptive-hard"],
+		["high_risk", ["worker", "reviewer"], "adaptive-high-risk"],
+	] as const)("maps %s classification to its deterministic protocol", (taskLevel, roles, name) => {
+		const protocol = createAdaptiveExecutionProtocol(taskLevel);
+		expect(protocol.name).toBe(name);
+		expect(protocol.requirements.map(({ role }) => role)).toEqual(roles);
+		expect(validateExecutionProtocol(protocol)).toEqual([]);
+	});
+
 	it("persists stage runs and recovers without duplicating a stable run", () => {
 		const sessionManager = SessionManager.inMemory();
 		const runtime = new SessionExecutionProtocolRuntime(sessionManager, "workflow-1", PROTOCOL);
@@ -114,5 +159,35 @@ describe("Execution Protocol", () => {
 		runtime.fail(second.id, "review failed");
 
 		expect(() => runtime.begin("reviewer-before-delivery", undefined, "review-3")).toThrow("exceeded maxRuns=2");
+	});
+
+	it("does not let Plan Reviewer retries consume the before-delivery Reviewer budget", () => {
+		const runtime = new SessionExecutionProtocolRuntime(SessionManager.inMemory(), "workflow-1", PROTOCOL);
+
+		runtime.observeAgents([
+			reviewer("plan-review-1", "agent.read_only_task_ready", "interrupted"),
+			reviewer("plan-review-2", "agent.read_only_task_ready", "interrupted"),
+			reviewer("delivery-review", "agent.review_requested", "idle", "handoff-delivery"),
+		]);
+
+		expect(runtime.view.requirements.find(({ id }) => id === "reviewer-before-delivery")).toMatchObject({
+			succeededRuns: 1,
+			failedRuns: 0,
+			satisfied: true,
+		});
+		expect(runtime.view.runs).toEqual([expect.objectContaining({ agentId: "delivery-review", status: "succeeded" })]);
+	});
+
+	it("counts a successful Plan Reviewer Task as before-delivery evidence", () => {
+		const runtime = new SessionExecutionProtocolRuntime(SessionManager.inMemory(), "workflow-1", PROTOCOL);
+
+		runtime.observeAgents([reviewer("plan-review", "agent.read_only_task_ready", "idle", "handoff-plan")]);
+
+		expect(runtime.view.requirements.find(({ id }) => id === "reviewer-before-delivery")).toMatchObject({
+			succeededRuns: 1,
+			failedRuns: 0,
+			satisfied: true,
+		});
+		expect(runtime.view.runs).toEqual([expect.objectContaining({ agentId: "plan-review", status: "succeeded" })]);
 	});
 });

@@ -10,6 +10,7 @@ interface SubagentPathPolicy {
 	readonly readableRoots: readonly string[];
 	readonly writableRoots: readonly string[];
 	readonly deniedRoots: readonly string[];
+	readonly writeDeniedRoots: readonly string[];
 	readonly denyAll: boolean;
 }
 
@@ -32,6 +33,7 @@ function subagentPathPolicy(): SubagentPathPolicy | undefined {
 			readableRoots: stringArray(record.readableRoots),
 			writableRoots: stringArray(record.writableRoots),
 			deniedRoots: stringArray(record.deniedRoots),
+			writeDeniedRoots: stringArray(record.writeDeniedRoots),
 			denyAll: record.denyAll === true,
 		};
 	} catch {
@@ -59,7 +61,7 @@ function pathContains(parent: string, child: string): boolean {
 	return relativePath === "" || (!relativePath.startsWith("..") && !isAbsolute(relativePath));
 }
 
-function enforceSubagentPathPolicy(path: string): void {
+function enforceSubagentPathPolicy(path: string, access: "read" | "write"): void {
 	const policy = subagentPathPolicy();
 	if (!policy) {
 		return;
@@ -70,7 +72,10 @@ function enforceSubagentPathPolicy(path: string): void {
 	if (policy.deniedRoots.some((root) => pathContains(root, path))) {
 		throw new Error(`Subagent filesystem policy denied path: ${path}`);
 	}
-	const allowedRoots = policy.writableRoots.length > 0 ? policy.writableRoots : policy.readableRoots;
+	if (access === "write" && policy.writeDeniedRoots.some((root) => pathContains(root, path))) {
+		throw new Error(`Subagent filesystem policy denied write path: ${path}`);
+	}
+	const allowedRoots = access === "write" ? policy.writableRoots : policy.readableRoots;
 	if (allowedRoots.length > 0 && !allowedRoots.some((root) => pathContains(root, path))) {
 		throw new Error(`Subagent filesystem policy blocked path outside allowed roots: ${path}`);
 	}
@@ -119,7 +124,13 @@ export function expandPath(filePath: string): string {
  */
 export function resolveToCwd(filePath: string, cwd: string): string {
 	const path = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
-	enforceSubagentPathPolicy(path);
+	enforceSubagentPathPolicy(path, "read");
+	return path;
+}
+
+export function resolveWritePath(filePath: string, cwd: string): string {
+	const path = resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true });
+	enforceSubagentPathPolicy(path, "write");
 	return path;
 }
 

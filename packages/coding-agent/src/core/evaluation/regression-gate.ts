@@ -36,6 +36,13 @@ export function evaluateRegressionGate(
 		});
 		return { passed: false, failures };
 	}
+	if ([...baseline.runs, ...candidate.runs].some(({ failureType }) => failureType === "infrastructure")) {
+		failures.push({
+			reasonCode: "evaluation.incomparable",
+			summary: "Reports containing infrastructure failures cannot be used for regression gating",
+		});
+		return { passed: false, failures };
+	}
 	const previous = metrics(baseline, strategy);
 	const next = metrics(candidate, strategy);
 	if (!previous || !next) {

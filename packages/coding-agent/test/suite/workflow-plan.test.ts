@@ -261,6 +261,23 @@ describe("Plan Workflow AgentSession integration", () => {
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
+	it("preserves a Planner provider error instead of reporting malformed JSON", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking();
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				errorMessage: '402: {"message":"Insufficient Balance"}',
+			}),
+		]);
+
+		await harness.session.prompt("/plan");
+		await expect(harness.session.prompt("Plan a CLI change")).rejects.toThrow(
+			'402: {"message":"Insufficient Balance"}',
+		);
+	});
+
 	it("creates a new Plan version for replan and preserves the old decision history", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -450,7 +467,7 @@ describe("Plan Workflow AgentSession integration", () => {
 		expect(workflowOutput).toContain("agent-1 | idle | explorer");
 		expect(workflowOutput).toContain("agent-3 | idle | explorer");
 		expect(workflowOutput).toContain("handoff-2 | CLI Workflow inspected");
-		expect(workflowOutput).toContain("session-1 | rpc | idle | retained");
+		expect(workflowOutput).toContain("session-1 | rpc | idle | released");
 		expect(workflowOutput).toContain("assistant |");
 		expect(workflowOutput).toContain("explorer | explorer | builtin");
 		expect(harness.faux.state.callCount).toBe(1);

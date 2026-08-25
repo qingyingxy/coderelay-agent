@@ -15,6 +15,7 @@ import {
 	WORKFLOW_EVENT_BATCH_CUSTOM_TYPE,
 	WorkflowStore,
 } from "../../src/core/workflow/index.ts";
+import type { BudgetLimit } from "../../src/core/workflow/types.ts";
 
 describe("Direct Workflow request integration", () => {
 	let tempDir: string;
@@ -32,7 +33,11 @@ describe("Direct Workflow request integration", () => {
 		}
 	});
 
-	async function createSession(extensionFactories: ExtensionFactory[] = [], enableWorkflowTracking = true) {
+	async function createSession(
+		extensionFactories: ExtensionFactory[] = [],
+		enableWorkflowTracking = true,
+		workflowBudget?: BudgetLimit,
+	) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = SessionManager.inMemory();
 		const authStorage = AuthStorage.create(join(agentDir, "auth.json"));
@@ -58,7 +63,7 @@ describe("Direct Workflow request integration", () => {
 			resourceLoader,
 		});
 		if (enableWorkflowTracking) {
-			session.enableWorkflowTracking();
+			session.enableWorkflowTracking(undefined, false, undefined, workflowBudget);
 		}
 		session.agent.streamFunction = async () => {
 			throw new Error("Stop after request setup");
@@ -110,6 +115,25 @@ describe("Direct Workflow request integration", () => {
 		expect(workflowEntryIndex).toBeGreaterThanOrEqual(0);
 		expect(userMessageIndex).toBeGreaterThan(workflowEntryIndex);
 
+		session.dispose();
+	});
+
+	it("applies the configured Workflow budget to newly created requests", async () => {
+		const { session } = await createSession([], true, {
+			maxCost: 2,
+			maxTurns: 60,
+			maxDurationMs: 600_000,
+			maxConcurrentAgents: 8,
+		});
+
+		await session.prompt("Implement a bounded change");
+
+		expect(session.getWorkflowView()?.workflow.budget).toEqual({
+			maxCost: 2,
+			maxTurns: 60,
+			maxDurationMs: 600_000,
+			maxConcurrentAgents: 8,
+		});
 		session.dispose();
 	});
 

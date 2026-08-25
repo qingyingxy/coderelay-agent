@@ -16,6 +16,7 @@ import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { InProcessSubagentSessionFactory } from "./subagents/in-process-session.ts";
+import type { SubagentService } from "./subagents/subagent-service.ts";
 import { time } from "./timings.ts";
 import {
 	createBashTool,
@@ -30,6 +31,7 @@ import {
 	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+import type { ModelRoutingOptions } from "./workflow/model-gateway.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -51,6 +53,10 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+	/** Optional cost-aware model routing configuration for Workflow roles. */
+	modelRouting?: ModelRoutingOptions;
+	/** Whether the initial model was explicitly selected. Defaults to `model !== undefined`. */
+	modelRoutingUserOverride?: boolean;
 
 	/**
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
@@ -83,6 +89,8 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
+	/** Optional governed Subagent Runtime. Default: created lazily by AgentSession. */
+	subagentRuntime?: SubagentService;
 }
 
 /** Result from createAgentSession */
@@ -178,6 +186,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const modelRoutingUserOverride = options.modelRoutingUserOverride ?? options.model !== undefined;
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -383,11 +392,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		resourceLoader,
 		customTools: options.customTools,
 		modelRuntime,
+		modelRouting: options.modelRouting,
+		modelRoutingUserOverride,
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
+		subagentRuntime: options.subagentRuntime,
 		inProcessSubagentSessionFactory: new InProcessSubagentSessionFactory(async (config) => {
 			const configuredModel = config.profile.model;
 			const separator = configuredModel?.indexOf("/") ?? -1;

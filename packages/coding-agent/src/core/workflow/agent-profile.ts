@@ -1,7 +1,14 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { BudgetLimit } from "./types.ts";
 
-export const AGENT_PROFILE_ROLES = ["mode_advisor", "planner", "explorer", "worker", "reviewer"] as const;
+export const AGENT_PROFILE_ROLES = [
+	"mode_advisor",
+	"planner",
+	"planner_lite",
+	"explorer",
+	"worker",
+	"reviewer",
+] as const;
 export type AgentProfileRole = (typeof AGENT_PROFILE_ROLES)[number];
 
 export interface AgentPermissionCeiling {
@@ -34,7 +41,13 @@ export interface AgentProfileViolation {
 }
 
 const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
-const READ_ONLY_ROLES: ReadonlySet<AgentProfileRole> = new Set(["mode_advisor", "planner", "explorer", "reviewer"]);
+const READ_ONLY_ROLES: ReadonlySet<AgentProfileRole> = new Set([
+	"mode_advisor",
+	"planner",
+	"planner_lite",
+	"explorer",
+	"reviewer",
+]);
 const READ_TOOLS: ReadonlySet<string> = new Set(READ_ONLY_TOOLS);
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
 
@@ -79,8 +92,22 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		permissionCeiling: READ_ONLY_PERMISSION_CEILING,
 		defaultBudget: {
 			...ISOLATED_ROLE_BUDGET,
-			maxTurns: 8,
-			maxDurationMs: 300_000,
+			maxTurns: 12,
+			maxDurationMs: 240_000,
+		},
+	},
+	planner_lite: {
+		name: "planner-lite",
+		role: "planner_lite",
+		description: "Creates a concise execution contract for a bounded Direct task",
+		systemPrompt:
+			"Inspect repository context and produce a concise execution contract with exact change points, invariants, ordered implementation steps, and verification intent. Do not modify files or execute commands.",
+		allowedTools: READ_ONLY_TOOLS,
+		permissionCeiling: READ_ONLY_PERMISSION_CEILING,
+		defaultBudget: {
+			...ISOLATED_ROLE_BUDGET,
+			maxTurns: 6,
+			maxDurationMs: 180_000,
 		},
 	},
 	explorer: {
@@ -102,7 +129,7 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		role: "worker",
 		description: "Implements an assigned Task within inherited permissions and budget",
 		systemPrompt:
-			"Execute only the assigned Task. Respect inherited permissions and budget, verify changes, and return a structured handoff.",
+			"Execute only the assigned Task. Do not create, restate, or revise a plan. Start implementation after the minimum reads needed for the listed change points, keep implementation and test-driven repairs in this Session, and use every configured verification command before returning. Respect inherited permissions and budget, and do not leave temporary verification scripts or unrelated artifacts in the repository. Return a structured Handoff with a non-empty conclusion and at least one verificationSummary result.",
 		allowedTools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
 		permissionCeiling: {
 			read: true,
@@ -114,9 +141,9 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		},
 		defaultBudget: {
 			...ISOLATED_ROLE_BUDGET,
-			maxTurns: 24,
+			maxTurns: 48,
 			maxDurationMs: 900_000,
-			maxRetries: 2,
+			maxRetries: 1,
 		},
 	},
 	reviewer: {
@@ -124,13 +151,13 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		role: "reviewer",
 		description: "Reviews supplied changes for correctness, safety, and maintainability",
 		systemPrompt:
-			"Review the supplied diff and repository context. Report evidence-backed findings with file locations. Do not modify files or execute commands.",
+			"Review the supplied diff and repository context. Inspect only the changed paths, then promptly return the requested structured Handoff with an explicit review verdict. Do not modify files or execute commands.",
 		allowedTools: READ_ONLY_TOOLS,
 		permissionCeiling: READ_ONLY_PERMISSION_CEILING,
 		defaultBudget: {
 			...ISOLATED_ROLE_BUDGET,
-			maxTurns: 8,
-			maxDurationMs: 300_000,
+			maxTurns: 12,
+			maxDurationMs: 150_000,
 		},
 	},
 };
@@ -139,7 +166,10 @@ export function validateAgentProfile(profile: AgentProfile): readonly AgentProfi
 	const violations: AgentProfileViolation[] = [];
 	const name = profile.name.trim();
 	if (!name) {
-		violations.push({ code: "agent_profile.name_required", message: "Agent Profile name is required" });
+		violations.push({
+			code: "agent_profile.name_required",
+			message: "Agent Profile name is required",
+		});
 	} else if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(name)) {
 		violations.push({
 			code: "agent_profile.invalid_name",

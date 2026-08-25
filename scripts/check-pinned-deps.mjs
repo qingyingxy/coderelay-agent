@@ -3,14 +3,16 @@ import { join } from "node:path";
 
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 const exactVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-const ignoredDirectories = new Set([".git", "dist", "node_modules"]);
+const ignoredDirectories = new Set([".artifacts", ".git", "dist", "node_modules"]);
+const ignoredTrees = new Set(["packages/coding-agent/evals/model-routing-tiered/bugsjs"]);
 const packageJsonFiles = [];
 
 function collectPackageJsonFiles(directory) {
 	for (const entry of readdirSync(directory, { withFileTypes: true })) {
 		if (entry.isDirectory()) {
-			if (!ignoredDirectories.has(entry.name)) {
-				collectPackageJsonFiles(join(directory, entry.name));
+			const child = join(directory, entry.name);
+			if (!ignoredDirectories.has(entry.name) && !ignoredTrees.has(child.replaceAll("\\", "/").replace(/^\.\//, ""))) {
+				collectPackageJsonFiles(child);
 			}
 			continue;
 		}

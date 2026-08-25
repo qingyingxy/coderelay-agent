@@ -32,6 +32,9 @@ describe("Agent Profiles", () => {
 
 	it("gives only the Worker the default write and command ceiling", () => {
 		const worker = BUILTIN_AGENT_PROFILES.worker;
+		expect(worker.systemPrompt).toContain("non-empty conclusion");
+		expect(worker.systemPrompt).toContain("verificationSummary result");
+		expect(worker.systemPrompt).toContain("do not leave temporary verification scripts");
 		expect(worker.permissionCeiling).toMatchObject({
 			read: true,
 			write: true,
@@ -39,6 +42,16 @@ describe("Agent Profiles", () => {
 			network: false,
 		});
 		expect(worker.allowedTools).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write"]);
+		expect(worker.defaultBudget.maxRetries).toBe(1);
+		expect(worker.defaultBudget.maxTurns).toBe(48);
+	});
+
+	it("bounds the delivery Reviewer to one short stage", () => {
+		expect(BUILTIN_AGENT_PROFILES.reviewer.defaultBudget).toMatchObject({
+			maxTurns: 12,
+			maxDurationMs: 150_000,
+			maxRetries: 1,
+		});
 	});
 
 	it("rejects tools that exceed a Profile permission ceiling", () => {

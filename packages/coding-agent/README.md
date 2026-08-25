@@ -670,7 +670,22 @@ pi --thinking high "Solve this complex problem"
 | `PI_SKIP_VERSION_CHECK` | Skip the Pi version update check at startup. This prevents the `pi.dev` latest-version request |
 | `PI_TELEMETRY` | Override install/update telemetry and provider attribution headers. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
 | `PI_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
+| `PI_MODEL_ROUTING` | Set to `auto` to enable Workflow model routing, or `off` to disable it; configuring a tier also enables routing |
+| `PI_MODEL_FAST` | Fully-qualified low-cost model for simple Direct, Mode Advisor, and Explorer work |
+| `PI_MODEL_BALANCED` | Fully-qualified default model for Worker, Reviewer, and medium-risk work |
+| `PI_MODEL_STRONG` | Fully-qualified high-capability model for Planner, high-risk work, and Repair |
+| `PI_MODEL_ROUTING_RESPECT_EXPLICIT` | Defaults to `1`; set to `0` only when automatic routing may override an explicit `--model` choice |
 | `VISUAL`, `EDITOR` | Fallback external editor for Ctrl+G when `externalEditor` is unset; defaults to Notepad on Windows and `nano` elsewhere |
+
+When routing is enabled, the Workflow Model Gateway records the selected tier, model, and reason in the Workflow view. For example:
+
+```bash
+export PI_MODEL_ROUTING=auto
+export PI_MODEL_FAST=deepseek/deepseek-v4-flash
+# Replace these two IDs with models available in your ModelRuntime.
+export PI_MODEL_BALANCED=provider/balanced-model
+export PI_MODEL_STRONG=provider/strong-model
+```
 
 Commands run by the LLM-callable bash tool also receive current session metadata:
 

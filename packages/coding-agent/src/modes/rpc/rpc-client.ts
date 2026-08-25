@@ -47,6 +47,8 @@ export interface RpcClientOptions {
 	model?: string;
 	/** Additional CLI arguments */
 	args?: string[];
+	/** Maximum time to wait for an RPC command response. Default: 30 seconds. */
+	requestTimeoutMs?: number;
 }
 
 export interface ModelInfo {
@@ -179,7 +181,7 @@ export class RpcClient {
 		});
 
 		this.process = null;
-		this.pendingRequests.clear();
+		this.rejectPendingRequests(new Error("RPC client stopped"));
 	}
 
 	/**
@@ -611,7 +613,7 @@ export class RpcClient {
 			const timeout = setTimeout(() => {
 				this.pendingRequests.delete(id);
 				reject(new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.stderr}`));
-			}, 30000);
+			}, this.options.requestTimeoutMs ?? 30_000);
 
 			this.pendingRequests.set(id, {
 				resolve: (response) => {

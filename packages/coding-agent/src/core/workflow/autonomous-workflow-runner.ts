@@ -186,6 +186,13 @@ export class AutonomousWorkflowRunner {
 				});
 			}
 			const settled = await Promise.allSettled(executions.map(({ completion }) => completion));
+			const rejected = settled.find((result) => result.status === "rejected");
+			if (rejected?.status === "rejected") {
+				this.#runtime.failDelivery(
+					`Automatic Task completion failed: ${rejected.reason instanceof Error ? rejected.reason.message : String(rejected.reason)}`,
+				);
+				continue;
+			}
 			for (const [index, result] of settled.entries()) {
 				const execution = executions[index];
 				if (!execution) {

@@ -98,4 +98,33 @@ describe("WorkflowView", () => {
 			result: { reason: "Automatic dispatch failed before Task start" },
 		});
 	});
+
+	it("keeps cancellation authoritative when delivery failure arrives late", async () => {
+		const runtime = PlanWorkflowRuntime.start(SessionManager.inMemory(), {
+			workflowId: "workflow-cancellation-race",
+			rootTaskId: "task-root-cancellation-race",
+			planId: "plan-cancellation-race",
+			request: {
+				text: "Exercise cancellation and delivery failure race",
+				cwd: "C:/repo",
+				attachments: [],
+			},
+		});
+		runtime.submit(CONTENT);
+		runtime.approve();
+
+		const cancellation = runtime.cancel("Evaluation timed out");
+		expect(runtime.workflow.status).toBe("cancelling");
+
+		expect(() => runtime.failDelivery("Workflow automation failed after cancellation")).not.toThrow();
+		expect(runtime.workflow.status).toBe("cancelling");
+
+		await cancellation;
+		expect(runtime.workflow).toMatchObject({
+			status: "cancelled",
+			result: { reason: "Evaluation timed out" },
+		});
+		expect(() => runtime.failDelivery("Workflow automation failed after cancellation completed")).not.toThrow();
+		expect(runtime.workflow.status).toBe("cancelled");
+	});
 });

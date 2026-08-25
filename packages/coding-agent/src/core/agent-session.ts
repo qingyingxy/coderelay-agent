@@ -14,7 +14,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import type {
 	Agent,
@@ -145,6 +145,7 @@ import type { DecisionExplanation } from "./workflow/decision-reasons.ts";
 import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
 import {
 	applyExecutionProtocolToPlan,
+	createAdaptiveExecutionProtocol,
 	type ExecutionProtocolRequirement,
 	SessionExecutionProtocolRuntime,
 	validateExecutionProtocol,
@@ -158,6 +159,13 @@ import {
 import { createModeDecision } from "./workflow/mode-decision.ts";
 import { selectExecutionMode } from "./workflow/mode-selector.ts";
 import {
+	isModelRouteRecord,
+	ModelGateway,
+	type ModelRouteRecord,
+	type ModelRouteRequest,
+	type ModelRoutingOptions,
+} from "./workflow/model-gateway.ts";
+import {
 	type JobTaskExecution,
 	PlanWorkflowRuntime,
 	type SubagentTaskExecution,
@@ -166,11 +174,11 @@ import {
 import {
 	createPlannerPromptEnvelope,
 	executePlannerPrompt,
-	parsePlannerPlanContent,
+	parsePlannerPlanContentWithRepair,
 } from "./workflow/planner-runtime.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
 import type { PermissionSet } from "./workflow/runtime-policy.ts";
-import type { ExecutionMode, ModeDecision } from "./workflow/types.ts";
+import type { BudgetLimit, ExecutionMode, ModeDecision, TaskLevel } from "./workflow/types.ts";
 import type { WorkflowView } from "./workflow/view.ts";
 
 // ============================================================================
@@ -270,6 +278,10 @@ export type AgentSessionEvent =
 	| {
 			type: "workflow_result";
 			workflow: WorkflowView;
+	  }
+	| {
+			type: "model_route_decided";
+			route: ModelRouteRecord;
 	  };
 
 /** Listener function for agent session events */
@@ -327,6 +339,12 @@ export interface AgentSessionConfig {
 	jobRuntime?: JobRuntime;
 	/** Optional read-only delivery Reviewer override used by tests and embedders. */
 	deliveryReviewer?: ReadonlyReviewer;
+	/** Optional budget applied to Workflows created after tracking is enabled. */
+	workflowBudget?: BudgetLimit;
+	/** Optional cost-aware model routing configuration. */
+	modelRouting?: ModelRoutingOptions;
+	/** Preserve the model selected explicitly by the caller during automatic routing. */
+	modelRoutingUserOverride?: boolean;
 }
 
 export interface ExtensionBindings {
@@ -395,6 +413,16 @@ interface WorkflowModePreflight {
 	readonly decision: ModeDecision;
 }
 
+interface DirectVerificationRecord {
+	readonly attempt: number;
+	readonly command: string;
+	readonly status: Job["status"];
+	readonly exitCode?: number;
+	readonly stdout: string;
+	readonly stderr: string;
+	readonly evidenceRef: string;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -431,6 +459,7 @@ export class AgentSession {
 	private _workflowMode: ExecutionMode = "direct";
 	private _workflowModeExplicit = false;
 	private _workflowAutomationEnabled = false;
+	private _workflowBudget: BudgetLimit | undefined;
 	private _autonomousWorkflowRunner: AutonomousWorkflowRunner | undefined;
 	private _autonomousWorkflowId: string | undefined;
 	private _latestWorkflowAutomationResult: WorkflowAutomationResult | undefined;
@@ -440,7 +469,9 @@ export class AgentSession {
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 	private _latestWorkflowView: WorkflowView | undefined;
 	private _workflowExecutionProtocol: WorkflowExecutionProtocol | undefined;
+	private _workflowExecutionProtocolExplicit = false;
 	private _workflowProtocolRuntime: SessionExecutionProtocolRuntime | undefined;
+	private _workflowVerificationCommands: readonly string[] = [];
 	private _planWorkflowRuntime: PlanWorkflowRuntime | undefined;
 	private _subagentRuntime: SubagentService | undefined;
 	private _agentTeam: GovernedAgentTeam | undefined;
@@ -500,6 +531,9 @@ export class AgentSession {
 	private _extensionErrorUnsubscriber?: () => void;
 
 	private _modelRuntime: ModelRuntime;
+	private _modelGateway: ModelGateway;
+	private _modelRoutingUserOverride: boolean;
+	private _modelRoutes: ModelRouteRecord[] = [];
 
 	// Tool registry for extension getTools/setTools
 	private _toolRegistry: Map<string, AgentTool> = new Map();
@@ -521,6 +555,9 @@ export class AgentSession {
 		this._customTools = config.customTools ?? [];
 		this._cwd = config.cwd;
 		this._modelRuntime = config.modelRuntime;
+		this._modelGateway = new ModelGateway(this._modelRuntime, config.modelRouting);
+		this._modelRoutingUserOverride = config.modelRoutingUserOverride ?? false;
+		this._recoverModelRoutes();
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -533,6 +570,7 @@ export class AgentSession {
 		this._multiWriter = config.multiWriter;
 		this._jobRuntime = config.jobRuntime;
 		this._deliveryReviewer = config.deliveryReviewer;
+		this._workflowBudget = config.workflowBudget ? structuredClone(config.workflowBudget) : undefined;
 
 		// Always subscribe to agent events for internal handling
 		// (session persistence, extensions, auto-compaction, retry logic)
@@ -1218,6 +1256,8 @@ export class AgentSession {
 		mode?: ExecutionMode,
 		automationEnabled = false,
 		executionProtocol?: WorkflowExecutionProtocol,
+		workflowBudget?: BudgetLimit,
+		verificationCommands: readonly string[] = [],
 	): void {
 		if (executionProtocol) {
 			const violations = validateExecutionProtocol(executionProtocol);
@@ -1225,12 +1265,20 @@ export class AgentSession {
 				throw new Error(violations.join("; "));
 			}
 		}
+		if (verificationCommands.some((command) => !command.trim())) {
+			throw new Error("Workflow verification commands must be non-empty");
+		}
 		this._workflowTrackingEnabled = true;
 		this._installSubagentTools();
 		this._workflowMode = mode ?? "direct";
 		this._workflowModeExplicit = mode !== undefined;
 		this._workflowAutomationEnabled = automationEnabled;
+		if (workflowBudget !== undefined) {
+			this._workflowBudget = structuredClone(workflowBudget);
+		}
 		this._workflowExecutionProtocol = executionProtocol ? structuredClone(executionProtocol) : undefined;
+		this._workflowExecutionProtocolExplicit = executionProtocol !== undefined;
+		this._workflowVerificationCommands = verificationCommands.map((command) => command.trim());
 		this._workflowProtocolRuntime = undefined;
 		this._recoverPendingWorkflowClarification();
 		this._planWorkflowRuntime ??= PlanWorkflowRuntime.recoverLatest(this.sessionManager);
@@ -1258,6 +1306,10 @@ export class AgentSession {
 	setWorkflowMode(mode: ExecutionMode): void {
 		this._workflowMode = mode;
 		this._workflowModeExplicit = true;
+		if (!this._workflowExecutionProtocolExplicit) {
+			this._workflowExecutionProtocol = undefined;
+			this._workflowProtocolRuntime = undefined;
+		}
 		this._autonomousWorkflowRunner?.stop();
 		this._autonomousWorkflowRunner = undefined;
 		this._autonomousWorkflowId = undefined;
@@ -1513,6 +1565,59 @@ export class AgentSession {
 		return this._latestWorkflowReport ? structuredClone(this._latestWorkflowReport) : undefined;
 	}
 
+	private _recoverModelRoutes(): void {
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== "workflow-model-routing") {
+				continue;
+			}
+			if (isModelRouteRecord(entry.data)) {
+				this._modelRoutes.push(structuredClone(entry.data));
+			}
+		}
+	}
+
+	private _appendModelRoute(route: ModelRouteRecord): void {
+		this._modelRoutes.push(structuredClone(route));
+		const entryId = this.sessionManager.appendCustomEntry("workflow-model-routing", structuredClone(route));
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) {
+			this._emit({ type: "entry_appended", entry });
+		}
+		this._emit({ type: "model_route_decided", route: structuredClone(route) });
+	}
+
+	private async _applyRoutedModel(model: Model<any> | undefined): Promise<void> {
+		if (!model) {
+			return;
+		}
+		if (!(await this._modelRuntime.checkAuth(model.provider))) {
+			return;
+		}
+		const previousModel = this.model;
+		if (modelsAreEqual(previousModel, model)) {
+			return;
+		}
+		this.agent.state.model = model;
+		this.agent.state.thinkingLevel = clampThinkingLevel(model, this.thinkingLevel) as ThinkingLevel;
+		await this._emitModelSelect(model, previousModel, "set");
+	}
+
+	private async _routeWorkflowModel(
+		input: Omit<ModelRouteRequest, "currentModel" | "currentModelName">,
+	): Promise<void> {
+		const decision = this._modelGateway.route({
+			...input,
+			currentModel: this.model ?? undefined,
+			explicitModel: this._modelRoutingUserOverride || input.explicitModel,
+			budget: input.budget ?? this._workflowBudget,
+		});
+		if (decision.record.reasonCode === "model.routing_disabled") {
+			return;
+		}
+		await this._applyRoutedModel(decision.model);
+		this._appendModelRoute(decision.record);
+	}
+
 	/** Return a serializable, UI-independent view of the current or latest Workflow. */
 	getWorkflowView(): WorkflowView | undefined {
 		const active = this._activeWorkflowAdapter?.view;
@@ -1538,7 +1643,16 @@ export class AgentSession {
 		return {
 			...this._withWorkflowAutomation({ ...view, agents }),
 			executionProtocol: protocol?.view,
+			modelRoutes: structuredClone(this._modelRoutes),
 		};
+	}
+
+	private _applyAdaptiveExecutionProtocol(taskLevel: TaskLevel): void {
+		if (this._workflowExecutionProtocolExplicit) {
+			return;
+		}
+		this._workflowExecutionProtocol = createAdaptiveExecutionProtocol(taskLevel);
+		this._workflowProtocolRuntime = undefined;
 	}
 
 	private _protocolRuntimeFor(workflowId: string): SessionExecutionProtocolRuntime | undefined {
@@ -1592,12 +1706,25 @@ export class AgentSession {
 	/** Return the current or latest Workflow summary rendered by `/workflow`. */
 	getWorkflowReportLines(): readonly string[] | undefined {
 		const lines = this.getWorkflowView()?.reportLines ?? this._latestWorkflowReport?.lines;
-		return lines ? [...lines] : undefined;
+		if (!lines) {
+			return undefined;
+		}
+		const routeLines =
+			this._modelRoutes.length === 0
+				? []
+				: [
+						"Model routing:",
+						...this._modelRoutes.map(
+							({ role, tier, modelName, reasonCode }) => `- ${role} -> ${modelName} (${tier}; ${reasonCode})`,
+						),
+					];
+		return [...lines, ...routeLines];
 	}
 
 	private _getSubagentRuntime(): SubagentService {
 		this._subagentRuntime ??= new SubagentRuntime({
 			sessionFactory: new RpcSubagentSessionFactory(),
+			modelGateway: this._modelGateway,
 			inProcessSessionFactory: this._inProcessSubagentSessionFactory,
 			persistence: new SessionSubagentPersistence(this.sessionManager),
 			multiWriter: this._multiWriter
@@ -1786,11 +1913,13 @@ export class AgentSession {
 			return { requestText: effectiveRequestText, decision };
 		}
 		if (requiresPlanMode({ text: effectiveRequestText })) {
+			this._applyAdaptiveExecutionProtocol("high_risk");
 			const decision = createModeDecision({
 				selection: selectExecutionMode({ forcePlan: true }),
 				reason:
 					"Safety policy requires Plan mode for destructive, release, migration, or permission-sensitive work",
 				riskLevel: "high",
+				taskLevel: "high_risk",
 				decidedAt,
 			});
 			this._emit({ type: "workflow_mode_decided", decision });
@@ -1811,6 +1940,7 @@ export class AgentSession {
 		}
 
 		try {
+			await this._routeWorkflowModel({ role: "mode_advisor", budget: this._workflowBudget });
 			const envelope = createModeAdvisorPromptEnvelope({
 				createdAt: decidedAt,
 				requestText: effectiveRequestText,
@@ -1858,17 +1988,21 @@ export class AgentSession {
 				selection: selectExecutionMode({ agentAdvice: result.advice }),
 				reason: result.advice.reason,
 				riskLevel: result.advice.riskLevel,
+				taskLevel: result.advice.taskLevel,
 				decidedAt,
 			});
+			this._applyAdaptiveExecutionProtocol(result.advice.taskLevel);
 			this._emit({ type: "workflow_mode_decided", decision });
 			return { requestText: effectiveRequestText, decision };
 		} catch (error) {
+			this._applyAdaptiveExecutionProtocol("hard");
 			const decision = createModeDecision({
 				selection: selectExecutionMode({ forcePlan: true }),
 				reason: `Mode Advisor unavailable; conservatively selected Plan: ${
 					error instanceof Error ? error.message : String(error)
 				}`,
 				riskLevel: "medium",
+				taskLevel: "hard",
 				decidedAt,
 			});
 			this._emit({ type: "workflow_mode_decided", decision });
@@ -1887,12 +2021,18 @@ export class AgentSession {
 					attachments: [],
 				},
 				modeDecision,
+				budget: this._workflowBudget,
 			});
 			this._planWorkflowRuntime = runtime;
 			this._autonomousWorkflowRunner = undefined;
 			this._autonomousWorkflowId = undefined;
 		}
 		const workflow = runtime.workflow;
+		await this._routeWorkflowModel({
+			role: "planner",
+			riskLevel: workflow.modeDecision?.riskLevel,
+			budget: workflow.budget,
+		});
 		const rootTask = runtime.tasks.find(({ id }) => id === workflow.rootTaskId);
 		if (!rootTask) {
 			throw new Error(`Plan Workflow ${workflow.id} has no root Task`);
@@ -1904,16 +2044,24 @@ export class AgentSession {
 			userRequest: workflow.request.text,
 			activeToolNames: this.getActiveToolNames(),
 			currentPlan: currentPlan.version > 1 ? currentPlan : undefined,
+			allowedVerificationCommands: this._workflowVerificationCommands,
 			revisionRequest: this._pendingPlanRevisionRequest
 				? `${this._pendingPlanRevisionRequest}\n\nUser refinement: ${requestText}`
 				: undefined,
 		});
-		await executePlannerPrompt(this, envelope);
+		await executePlannerPrompt(this, envelope, { budget: rootTask.budget });
 		const message = this._findLastAssistantMessage();
 		if (!message) {
 			throw new Error("Planner completed without an Assistant message");
 		}
-		const parsedPlan = parsePlannerPlanContent(contentText(message.content, ""));
+		if (message.stopReason === "error") {
+			throw new Error(message.errorMessage || "Planner provider request failed");
+		}
+		const parsedPlan = await parsePlannerPlanContentWithRepair(
+			this,
+			contentText(message.content, ""),
+			this._workflowVerificationCommands,
+		);
 		runtime.submit(
 			this._workflowExecutionProtocol
 				? applyExecutionProtocolToPlan(parsedPlan, this._workflowExecutionProtocol)
@@ -1934,9 +2082,11 @@ export class AgentSession {
 			this._planWorkflowRuntime = undefined;
 		}
 		const requiresDeliveryGate =
-			this._workflowExecutionProtocol?.requirements.some(
+			this._workflowVerificationCommands.length > 0 ||
+			(this._workflowExecutionProtocol?.requirements.some(
 				({ required, stage }) => required && (stage === "after_main" || stage === "before_delivery"),
-			) ?? false;
+			) ??
+				false);
 		const adapter = startDirectAgentSessionWorkflow(
 			this,
 			{
@@ -1950,6 +2100,7 @@ export class AgentSession {
 					attachments: [],
 				},
 				modeDecision,
+				budget: this._workflowBudget,
 			},
 			{ deferCompletion: requiresDeliveryGate },
 		);
@@ -1972,7 +2123,10 @@ export class AgentSession {
 		if (!workflow || !task) {
 			throw new Error(`Workflow ${adapter.workflowId} is unavailable for protocol execution`);
 		}
-		const profile = BUILTIN_AGENT_PROFILES[requirement.role];
+		const profile =
+			requirement.role === "planner"
+				? BUILTIN_AGENT_PROFILES.planner_lite
+				: BUILTIN_AGENT_PROFILES[requirement.role];
 		const parentPermission = this._subagentParentPermission();
 		const readOnlyPermission: PermissionSet = {
 			...parentPermission,
@@ -1983,6 +2137,10 @@ export class AgentSession {
 		const run = protocol.begin(requirement.id, undefined, stableRunId);
 		try {
 			const runtime = this._getSubagentRuntime();
+			const workflowDeadlineAtMs =
+				workflow.budget.maxDurationMs === undefined
+					? undefined
+					: Date.parse(workflow.createdAt) + workflow.budget.maxDurationMs;
 			const agent = await runtime.spawn({
 				workflowId: workflow.id,
 				taskId: task.id,
@@ -1997,6 +2155,7 @@ export class AgentSession {
 				parentBudget: workflow.budget,
 				workflowBudget: workflow.budget,
 				taskBudget: profile.defaultBudget,
+				workflowDeadlineAtMs,
 			});
 			await runtime.send(agent.id, prompt);
 			const result = await runtime.wait(agent.id);
@@ -2027,9 +2186,10 @@ export class AgentSession {
 		}
 		const handoffMessages: CustomMessage[] = [];
 		for (const requirement of protocol.requirements("before_main")) {
-			if (requirement.role !== "explorer") {
-				throw new Error(`Direct before_main protocol only supports explorer, received ${requirement.role}`);
+			if (requirement.role !== "explorer" && requirement.role !== "planner") {
+				throw new Error(`Direct before_main protocol does not support ${requirement.role}`);
 			}
+			const title = requirement.role === "planner" ? "Execution Contract" : "Explorer Handoff";
 			const recoveredRun = protocol.view.runs
 				.filter(
 					({ requirementId, status, handoffId }) =>
@@ -2039,12 +2199,12 @@ export class AgentSession {
 			if (recoveredRun?.handoffId) {
 				const handoff = this._getSubagentRuntime().getHandoff(recoveredRun.handoffId);
 				if (!handoff) {
-					throw new Error(`Recovered Explorer Handoff ${recoveredRun.handoffId} is unavailable`);
+					throw new Error(`Recovered ${title} ${recoveredRun.handoffId} is unavailable`);
 				}
 				handoffMessages.push({
 					role: "custom",
 					customType: "workflow-protocol-handoff",
-					content: `Explorer Handoff (required by ${requirement.id}):\n${JSON.stringify(handoff)}`,
+					content: `${title} (required by ${requirement.id}):\n${JSON.stringify(handoff)}`,
 					display: false,
 					details: { requirementId: requirement.id, handoffId: handoff.id },
 					timestamp: Date.now(),
@@ -2054,6 +2214,10 @@ export class AgentSession {
 			const attempts = requirement.failurePolicy === "retry_once" ? Math.min(2, requirement.maxRuns) : 1;
 			let result: AgentRunResult | undefined;
 			for (let attempt = 0; attempt < attempts; attempt++) {
+				const workflowStatus = adapter.controller.getWorkflow(adapter.workflowId)?.status;
+				if (workflowStatus === "cancelling" || workflowStatus === "cancelled") {
+					break;
+				}
 				const stableRunId = `protocol-${adapter.workflowId}-${requirement.id}-${attempt + 1}`;
 				const existing = protocol.view.runs.find(({ id }) => id === stableRunId);
 				if (existing?.status === "failed") {
@@ -2063,22 +2227,30 @@ export class AgentSession {
 					protocol.fail(existing.id, "Recovered interrupted protocol run");
 					continue;
 				}
+				const instructions =
+					requirement.role === "planner"
+						? [
+								"Create a lightweight execution contract for this bounded Direct task.",
+								"Inspect the repository and identify exact change points, invariants, ordered implementation steps, and verification intent.",
+								"Return a structured Handoff: put the ordered contract in conclusion, file locations in evidence, constraints in architectureFindings, and planned checks in verificationSummary.",
+								"Do not implement, modify files, or execute commands.",
+							]
+						: [
+								"Inspect the repository for the following request before implementation.",
+								"Return a structured Handoff with exact file evidence, risks, and recommended next steps.",
+								"Do not modify files or execute commands.",
+							];
 				result = await this._runProtocolAgent(
 					adapter,
 					requirement,
-					[
-						"Inspect the repository for the following request before implementation.",
-						"Return a structured Handoff with exact file evidence, risks, and recommended next steps.",
-						"Do not modify files or execute commands.",
-						requestText,
-					].join("\n\n"),
+					[...instructions, requestText].join("\n\n"),
 					stableRunId,
 				);
 				if (result.status === "completed" && result.handoff) {
 					handoffMessages.push({
 						role: "custom",
 						customType: "workflow-protocol-handoff",
-						content: `Explorer Handoff (required by ${requirement.id}):\n${JSON.stringify(result.handoff)}`,
+						content: `${title} (required by ${requirement.id}):\n${JSON.stringify(result.handoff)}`,
 						display: false,
 						details: { requirementId: requirement.id, handoffId: result.handoff.id },
 						timestamp: Date.now(),
@@ -2096,16 +2268,171 @@ export class AgentSession {
 		return handoffMessages;
 	}
 
+	private async _runDirectVerificationCommands(
+		adapter: AgentSessionAdapter,
+		attempt: number,
+	): Promise<readonly DirectVerificationRecord[]> {
+		const commands = this._workflowVerificationCommands;
+		if (commands.length === 0) {
+			return [];
+		}
+		const workflow = adapter.controller.getWorkflow(adapter.workflowId);
+		const rootTask = adapter.controller.getTask(adapter.taskId);
+		if (!workflow || !rootTask) {
+			throw new Error(`Workflow ${adapter.workflowId} is unavailable for deterministic verification`);
+		}
+		const deadlineAt = Date.parse(workflow.createdAt) + (workflow.budget.maxDurationMs ?? 10 * 60_000);
+		const records: DirectVerificationRecord[] = [];
+		for (const [index, command] of commands.entries()) {
+			const timeoutMs = deadlineAt - Date.now();
+			if (timeoutMs <= 0) {
+				throw new Error(`Workflow duration budget exhausted before verification command: ${command}`);
+			}
+			const jobRuntime = this._getJobRuntime();
+			const job = jobRuntime.queue({
+				workflowId: workflow.id,
+				taskId: rootTask.id,
+				attemptId: `direct-verification-${attempt}-${index + 1}-${randomUUID()}`,
+				command,
+				cwd: workflow.request.cwd,
+				timeoutMs,
+			});
+			const result = await jobRuntime.start(job.id);
+			const chunks = jobRuntime.logs(result.id).chunks;
+			const stdout = chunks
+				.filter(({ stream }) => stream === "stdout")
+				.map(({ text }) => text)
+				.join("")
+				.slice(-16_000);
+			const stderr = chunks
+				.filter(({ stream }) => stream === "stderr")
+				.map(({ text }) => text)
+				.join("")
+				.slice(-16_000);
+			const entryId = this.sessionManager.appendCustomEntry("workflow-direct-verification", {
+				kind: "command_result",
+				version: 1,
+				workflowId: workflow.id,
+				taskId: rootTask.id,
+				attempt,
+				command,
+				jobId: result.id,
+				status: result.status,
+				exitCode: result.exitCode,
+				stdout,
+				stderr,
+				startedAt: result.startedAt,
+				endedAt: result.endedAt,
+			});
+			const entry = this.sessionManager.getEntry(entryId);
+			if (entry) {
+				this._emit({ type: "entry_appended", entry });
+			}
+			records.push({
+				attempt,
+				command,
+				status: result.status,
+				exitCode: result.exitCode,
+				stdout,
+				stderr,
+				evidenceRef: `session-entry:${entryId}`,
+			});
+			if (result.status !== "succeeded") {
+				break;
+			}
+		}
+		return records;
+	}
+
+	private async _runDirectVerificationGate(
+		adapter: AgentSessionAdapter,
+		evidenceRefs: string[],
+		previousAttempts: number,
+	): Promise<number> {
+		if (this._workflowVerificationCommands.length === 0) {
+			return previousAttempts;
+		}
+		const firstAttempt = previousAttempts + 1;
+		let records = await this._runDirectVerificationCommands(adapter, firstAttempt);
+		evidenceRefs.push(...records.map(({ evidenceRef }) => evidenceRef));
+		let failure = records.find(({ status }) => status !== "succeeded");
+		if (!failure) {
+			return firstAttempt;
+		}
+		const workflow = adapter.controller.getWorkflow(adapter.workflowId);
+		const rootTask = adapter.controller.getTask(adapter.taskId);
+		if (!workflow || !rootTask) {
+			throw new Error(`Workflow ${adapter.workflowId} is unavailable for verification repair`);
+		}
+		const protocol = this._protocolRuntimeFor(adapter.workflowId);
+		const contractRun = protocol?.view.runs
+			.filter(
+				({ role, stage, status, handoffId }) =>
+					role === "planner" && stage === "before_main" && status === "succeeded" && handoffId !== undefined,
+			)
+			.at(-1);
+		const contract = contractRun?.handoffId
+			? this._getSubagentRuntime().getHandoff(contractRun.handoffId)
+			: undefined;
+		const diff = new DiffCollector().collect(workflow.request.cwd, [rootTask]);
+		await this._routeWorkflowModel({
+			role: "repair",
+			riskLevel: workflow.modeDecision?.riskLevel,
+			escalationReason: "verification_failure",
+			budget: workflow.budget,
+		});
+		adapter.prepareProtocolRepair(
+			`Deterministic verification failed: ${failure.command} (${failure.status}${
+				failure.exitCode === undefined ? "" : `, exit ${failure.exitCode}`
+			})`,
+			[failure.evidenceRef],
+		);
+		await this._runAgentPrompt({
+			role: "custom",
+			customType: "workflow-protocol-repair",
+			content: [
+				"Repair the implementation so the configured deterministic verification passes.",
+				"Follow the execution contract and address only evidence-backed failures. Do not modify protected verification assets.",
+				`Execution Contract:\n${contract ? JSON.stringify(contract) : "Not configured"}`,
+				`Scoped diff before repair:\n${JSON.stringify(diff)}`,
+				`Verification evidence:\n${JSON.stringify(records)}`,
+			].join("\n\n"),
+			display: true,
+			details: {
+				verificationAttempt: firstAttempt,
+				verificationEvidenceRefs: records.map(({ evidenceRef }) => evidenceRef),
+				contractHandoffId: contract?.id,
+			},
+			timestamp: Date.now(),
+		});
+		if (!adapter.hasDeferredCompletion) {
+			throw new Error("Deterministic verification Repair did not produce a successful deferred completion");
+		}
+		const secondAttempt = firstAttempt + 1;
+		records = await this._runDirectVerificationCommands(adapter, secondAttempt);
+		evidenceRefs.push(...records.map(({ evidenceRef }) => evidenceRef));
+		failure = records.find(({ status }) => status !== "succeeded");
+		if (failure) {
+			throw new Error(
+				`Deterministic verification still failed after Repair: ${failure.command} (${failure.status}${
+					failure.exitCode === undefined ? "" : `, exit ${failure.exitCode}`
+				})`,
+			);
+		}
+		return secondAttempt;
+	}
+
 	private async _runDirectBeforeDeliveryProtocol(adapter: AgentSessionAdapter): Promise<void> {
 		if (!adapter.hasDeferredCompletion) {
 			return;
 		}
 		const protocol = this._protocolRuntimeFor(adapter.workflowId);
+		const evidenceRefs: string[] = [];
+		let verificationAttempts = await this._runDirectVerificationGate(adapter, evidenceRefs, 0);
 		if (!protocol) {
-			adapter.completeDeferredVerification();
+			adapter.completeDeferredVerification({ evidenceRefs });
 			return;
 		}
-		const evidenceRefs: string[] = [];
 		const risks: string[] = [];
 		const reviewerRequirements = [
 			...protocol.requirements("after_main"),
@@ -2136,6 +2463,10 @@ export class AgentSession {
 			let passed = false;
 			let failure = "Reviewer did not complete";
 			for (let attempt = 0; attempt < attempts; attempt++) {
+				const workflowStatus = adapter.controller.getWorkflow(adapter.workflowId)?.status;
+				if (workflowStatus === "cancelling" || workflowStatus === "cancelled") {
+					break;
+				}
 				const stableRunId = `protocol-${adapter.workflowId}-${requirement.id}-${attempt + 1}`;
 				const existing = protocol.view.runs.find(({ id }) => id === stableRunId);
 				if (existing?.status === "failed") {
@@ -2177,6 +2508,12 @@ export class AgentSession {
 				failure = result.summary;
 				protocol.fail(run.id, failure, agentId);
 				if (result.handoff && attempt + 1 < attempts) {
+					await this._routeWorkflowModel({
+						role: "repair",
+						riskLevel: workflow.modeDecision?.riskLevel,
+						escalationReason: "verification_failure",
+						budget: workflow.budget,
+					});
 					adapter.prepareProtocolRepair(failure, result.evidenceRefs);
 					await this._runAgentPrompt({
 						role: "custom",
@@ -2197,6 +2534,11 @@ export class AgentSession {
 					if (!adapter.hasDeferredCompletion) {
 						throw new Error("Protocol Repair did not produce a successful deferred completion");
 					}
+					verificationAttempts = await this._runDirectVerificationGate(
+						adapter,
+						evidenceRefs,
+						verificationAttempts,
+					);
 				}
 			}
 			if (!passed) {
@@ -2459,6 +2801,9 @@ export class AgentSession {
 
 		preflightResult?.(true);
 		try {
+			if (directRequestText !== undefined) {
+				await this._routeWorkflowModel({ role: "main", riskLevel: directModeDecision?.riskLevel });
+			}
 			if (workflowAdapter && directRequestText !== undefined) {
 				messages.push(...(await this._runDirectBeforeMainProtocol(workflowAdapter, directRequestText)));
 			}
@@ -3325,6 +3670,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
+		this._modelRoutingUserOverride = true;
 		const previousModel = this.model;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.agent.state.model = model;
@@ -3370,6 +3716,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(next.thinkingLevel);
 
 		// Apply model
+		this._modelRoutingUserOverride = true;
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
@@ -3398,6 +3745,7 @@ export class AgentSession {
 		const nextModel = availableModels[nextIndex];
 
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
+		this._modelRoutingUserOverride = true;
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
@@ -4993,18 +5341,17 @@ export class AgentSession {
 			cwd: this.sessionManager.getCwd(),
 		};
 
-		const branchEntries = this.sessionManager.getBranch();
-		const lines = [JSON.stringify(header)];
-
-		// Re-chain parentIds to form a linear sequence
-		let prevId: string | null = null;
-		for (const entry of branchEntries) {
-			const linear = { ...entry, parentId: prevId };
-			lines.push(JSON.stringify(linear));
-			prevId = entry.id;
+		const descriptor = openSync(filePath, "w");
+		try {
+			writeSync(descriptor, `${JSON.stringify(header)}\n`);
+			let prevId: string | null = null;
+			for (const entry of this.sessionManager.getBranch()) {
+				writeSync(descriptor, `${JSON.stringify({ ...entry, parentId: prevId })}\n`);
+				prevId = entry.id;
+			}
+		} finally {
+			closeSync(descriptor);
 		}
-
-		writeFileSync(filePath, `${lines.join("\n")}\n`);
 		return filePath;
 	}
 

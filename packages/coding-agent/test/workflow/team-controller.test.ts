@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { BUILTIN_AGENT_PROFILES } from "../../src/core/workflow/agent-profile.ts";
 import {
 	SessionWorkflowEventLog,
 	WorkflowController,
@@ -99,7 +100,7 @@ describe("WorkflowController Team Task admission", () => {
 			status: "pending",
 			accessMode: "read_only",
 			dependencyIds: [dependency!.id],
-			budget: { maxTurns: 8 },
+			budget: { maxTurns: BUILTIN_AGENT_PROFILES.reviewer.defaultBudget.maxTurns },
 		});
 	});
 

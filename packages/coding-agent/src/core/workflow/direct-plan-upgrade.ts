@@ -67,7 +67,7 @@ export function decideDirectPlanUpgrade(
 	}
 
 	const triggers: DirectPlanUpgradeTrigger[] = [];
-	if (advice.complexity === "high") {
+	if (advice.complexity !== "low") {
 		triggers.push("complexity");
 	}
 	if (advice.riskLevel !== "low") {

@@ -13,6 +13,15 @@ import {
 import { createPromptEnvelope, type PromptEnvelope, type PromptTaskContext } from "./prompt-envelope.ts";
 import type { IsoDateTime } from "./types.ts";
 
+const CLARIFICATION_IMPACTS = [
+	"scope",
+	"behavior",
+	"architecture",
+	"safety",
+	"verification",
+	"preference",
+] as const satisfies readonly ClarificationCandidate["impact"][];
+
 const MODE_ADVISOR_OUTPUT_SCHEMA = {
 	type: "object",
 	required: ["complexity", "riskLevel", "confidence", "reason", "clarificationCandidates"],
@@ -21,7 +30,27 @@ const MODE_ADVISOR_OUTPUT_SCHEMA = {
 		riskLevel: { enum: ["low", "medium", "high"] },
 		confidence: { enum: ["low", "medium", "high"] },
 		reason: { type: "string" },
-		clarificationCandidates: { type: "array" },
+		clarificationCandidates: {
+			type: "array",
+			items: {
+				type: "object",
+				required: ["id", "question", "impact", "changesImplementation"],
+				properties: {
+					id: { type: "string" },
+					question: { type: "string" },
+					impact: { enum: CLARIFICATION_IMPACTS },
+					changesImplementation: { type: "boolean" },
+					safeDefault: {
+						type: "object",
+						required: ["answer", "reason"],
+						properties: {
+							answer: { type: "string" },
+							reason: { type: "string" },
+						},
+					},
+				},
+			},
+		},
 	},
 } as const;
 
@@ -59,7 +88,7 @@ export function createModeAdvisorPromptEnvelope(input: CreateModeAdvisorPromptIn
 		verificationRequirements: [],
 	};
 	return createPromptEnvelope({
-		promptVersion: "mode-advisor-v1",
+		promptVersion: "mode-advisor-v3",
 		createdAt: input.createdAt,
 		role: "mode_advisor",
 		profileName: profile.name,
@@ -105,19 +134,30 @@ export function createModeAdvisorPromptEnvelope(input: CreateModeAdvisorPromptIn
 				id: "mode-advisor-conservative",
 				kind: "safety",
 				description:
-					"Use Plan for high complexity, medium/high risk, destructive operations, releases, migrations, permission changes, or low confidence that changes implementation.",
+					"Use Direct for bounded low-risk work that one coding Agent can inspect, implement, and verify, even when it spans a few closely related files. Use Plan for high complexity, medium/high operational risk, destructive operations, releases, migrations, permission changes, or low confidence that changes implementation. Do not raise risk solely because a localized implementation is subtle.",
+			},
+			{
+				id: "mode-advisor-complexity-rubric",
+				kind: "workflow",
+				description:
+					"Classify low complexity as a localized deterministic change. Classify medium as bounded work inside one component with focused verification, including local asynchronous state, Promise coalescing, TTL handling, or cache refresh. Classify high as cross-module or distributed concurrency, orchestration across multiple state owners, security boundaries, graph algorithms, migrations, or broad interacting invariants.",
+			},
+			{
+				id: "mode-advisor-risk-rubric",
+				kind: "safety",
+				description:
+					"Classify risk by blast radius and reversibility: low for isolated reversible changes with explicit verification; medium for persisted or user-visible behavior spanning components or requiring difficult rollback; high for destructive, security, permission, release, migration, or irreversible operations.",
 			},
 			{
 				id: "mode-advisor-clarification",
 				kind: "workflow",
 				description:
-					"Only propose a clarification when its answer materially changes implementation. Include a safeDefault when a conservative answer is available.",
+					"Only propose a clarification when its answer materially changes the requested implementation. Treat omitted optional enhancements as out of scope instead of inventing requirements. Include a safeDefault when a conservative answer is available.",
 			},
 			{
 				id: "mode-advisor-output",
 				kind: "output",
-				description:
-					"Return only one JSON object. Each clarification candidate has id, question, impact, changesImplementation, and optional safeDefault {answer, reason}.",
+				description: `Return only one JSON object. Each clarification candidate has id, question, impact (${CLARIFICATION_IMPACTS.join(" | ")}), changesImplementation, and optional safeDefault {answer, reason}.`,
 			},
 		],
 		outputSchema: {
@@ -161,7 +201,7 @@ function parseCandidate(value: unknown): ClarificationCandidate {
 		);
 	}
 	const impact = requiredString(value, "impact");
-	if (!["scope", "behavior", "architecture", "safety", "verification", "preference"].includes(impact)) {
+	if (!CLARIFICATION_IMPACTS.some((candidate) => candidate === impact)) {
 		throw new ModeAdvisorRuntimeError(
 			"mode_advisor.output_invalid_shape",
 			`Unsupported clarification impact: ${impact}`,
@@ -187,6 +227,20 @@ function parseCandidate(value: unknown): ClarificationCandidate {
 		changesImplementation: value.changesImplementation,
 		safeDefault,
 	};
+}
+
+function parseCandidates(values: readonly unknown[]): readonly ClarificationCandidate[] {
+	const candidates: ClarificationCandidate[] = [];
+	for (const value of values) {
+		try {
+			candidates.push(parseCandidate(value));
+		} catch (error) {
+			if (!(error instanceof ModeAdvisorRuntimeError) || error.code !== "mode_advisor.output_invalid_shape") {
+				throw error;
+			}
+		}
+	}
+	return candidates;
 }
 
 export function parseModeAdvisorResult(text: string): ModeAdvisorResult {
@@ -215,13 +269,13 @@ export function parseModeAdvisorResult(text: string): ModeAdvisorResult {
 			"Mode Advisor response does not match the required object shape",
 		);
 	}
-	const candidates = value.clarificationCandidates.map(parseCandidate);
 	const advice = adviseExecutionMode({
 		complexity: requiredString(value, "complexity") as ModeAdvice["complexity"],
 		riskLevel: requiredString(value, "riskLevel") as ModeAdvice["riskLevel"],
 		confidence: requiredString(value, "confidence") as ModeAdvice["confidence"],
 		reason: requiredString(value, "reason"),
 	});
+	const candidates = parseCandidates(value.clarificationCandidates);
 	return {
 		advice,
 		clarification: evaluateClarificationGate(candidates),

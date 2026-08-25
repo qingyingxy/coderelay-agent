@@ -22,6 +22,14 @@
 - Added R18 opt-in multi-Writer Worktrees with per-Workspace Writer Leases, repository-scoped Integration Leases, dependency and overlap analysis, durable Conflict Resolution Attempts, reversible Artifact application, mandatory post-integration verification, Integration CLI views, and a benefit-evidence default-candidate gate.
 - Added the R19 versioned Workflow Execution Protocol with persisted stage runs, Runtime-enforced Direct Explorer and Reviewer gates, Plan Worker/Reviewer role compilation, protocol state in Workflow views, and Faux Provider compliance regressions.
 
+### Changed
+
+- Changed automatic hard and high-risk workflows to use a strong read-only Planner that decomposes bounded Worker Tasks before balanced implementation and review.
+
+### Fixed
+
+- Fixed explanatory `review:passed` verdicts being rejected and needlessly escalating a successful Reviewer to the strong tier.
+
 ## [0.82.1] - 2026-07-25
 
 ### New Features

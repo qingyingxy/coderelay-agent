@@ -3,6 +3,7 @@ import type { AgentInstance } from "../subagents/types.ts";
 import type { WorkflowAutomationWaitReason } from "./autonomous-workflow-types.ts";
 import { type DecisionExplanation, resolveModeDecisionReasonCode } from "./decision-reasons.ts";
 import type { ExecutionProtocolView } from "./execution-protocol.ts";
+import type { ModelRouteRecord } from "./model-gateway.ts";
 import type { TaskSchedulingDecision } from "./scheduler.ts";
 import type { Attempt, ExecutionMode, Plan, Task, VerificationResult, Workflow } from "./types.ts";
 import { WORKFLOW_SCHEMA_VERSION } from "./types.ts";
@@ -38,6 +39,7 @@ export interface WorkflowView {
 	readonly availableActions: readonly WorkflowViewAction[];
 	readonly stopReason?: string;
 	readonly executionProtocol?: ExecutionProtocolView;
+	readonly modelRoutes?: readonly ModelRouteRecord[];
 	readonly automation?: {
 		readonly enabled: boolean;
 		readonly mode: ExecutionMode;

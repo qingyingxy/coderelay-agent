@@ -6,6 +6,7 @@ import {
 } from "./prompt-agent-session-adapter.ts";
 import { createPromptEnvelope, type PromptEnvelope, type PromptTaskContext } from "./prompt-envelope.ts";
 import {
+	type BudgetLimit,
 	FILE_INTENT_ACTIONS,
 	type FileIntentAction,
 	type IsoDateTime,
@@ -16,6 +17,15 @@ import {
 	type VerificationKind,
 	type VerificationRequirement,
 } from "./types.ts";
+
+export type PlannerPhase = "investigating" | "finalizing" | "repairing_json";
+
+const PLANNER_INVESTIGATION_TIMEOUT_MS = 90_000;
+const PLANNER_FINALIZE_INSTRUCTION = [
+	"The single investigation round is complete. Stop repository exploration now.",
+	"Use the evidence already collected and return only the complete PlanContent JSON object required by the envelope.",
+	"Do not call another tool.",
+].join(" ");
 
 const PLANNER_OUTPUT_SCHEMA = {
 	type: "object",
@@ -88,6 +98,12 @@ export interface CreatePlannerPromptInput {
 	readonly activeToolNames: readonly string[];
 	readonly currentPlan?: Plan;
 	readonly revisionRequest?: string;
+	readonly allowedVerificationCommands?: readonly string[];
+}
+
+export interface ExecutePlannerPromptOptions {
+	readonly budget?: BudgetLimit;
+	readonly investigationTimeoutMs?: number;
 }
 
 export class PlannerRuntimeError extends Error {
@@ -144,7 +160,7 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 			: []),
 	];
 	return createPromptEnvelope({
-		promptVersion: "planner-v1",
+		promptVersion: "planner-v2",
 		createdAt: input.createdAt,
 		role: "planner",
 		profileName: profile.name,
@@ -158,10 +174,37 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 				description: "Use only read, grep, find, and ls. Do not modify files or execute shell commands.",
 			},
 			{
+				id: "planner-command-success",
+				kind: "workflow",
+				description:
+					"Every command step is a completion gate and must be expected to exit successfully. Never create a command step for a baseline check that is expected to fail; assign diagnosis to an explorer or worker Agent instead.",
+			},
+			{
+				id: "planner-worker-decomposition",
+				kind: "workflow",
+				description:
+					"Minimize handoffs while keeping Worker Tasks coherent. Keep strongly coupled changes for one behavior in one Worker even when they span several files; do not split by file alone. Split only independent outcomes that can be implemented or verified separately, and prefer one Worker for bounded defect repairs. Give every Worker an explicit file boundary, outcome, dependencies, and verification intent.",
+			},
+			{
+				id: "planner-bounded-investigation",
+				kind: "budget",
+				description:
+					"Use at most one investigation round. If repository context is needed, issue every necessary read, grep, find, or ls call together in the first response so they can run in parallel. After those results, the tool boundary closes and the next response must be the complete PlanContent JSON. If the request already contains enough information, return PlanContent immediately without tools.",
+			},
+			{
+				id: "planner-verification-efficiency",
+				kind: "workflow",
+				description: `Use only deterministic verification commands explicitly supplied by the user or Task as command gates; never invent additional verification commands. ${
+					input.allowedVerificationCommands?.length
+						? `The configured commands are exactly: ${input.allowedVerificationCommands.join("; ")}.`
+						: ""
+				} Do not create additional Worker Tasks solely to run verification, and do not ask Workers to create temporary verification scripts or other repository artifacts. Do not create a Reviewer Agent step; the Delivery Runtime owns the single read-only review stage. Express review needs as review verification requirements instead.`,
+			},
+			{
 				id: "planner-structured-output",
 				kind: "output",
 				description:
-					"Return only one JSON object matching PlanContent. Agent steps must declare requiredAgentRole: use worker for implementation, explorer for read-only investigation, and reviewer only for read-only review. Use step kind 'command' with a non-empty command for deterministic test/build commands and omit requiredAgentRole.",
+					"Return only one JSON object matching PlanContent. Agent steps must declare requiredAgentRole: use worker for implementation and explorer for read-only investigation. The Delivery Runtime owns review, so never create a reviewer Agent step. Use step kind 'command' with a non-empty command for deterministic test/build commands and omit requiredAgentRole.",
 			},
 		],
 		outputSchema: {
@@ -193,27 +236,164 @@ export function validatePlannerPromptEnvelope(envelope: PromptEnvelope): void {
 			"Planner read-only constraint is required",
 		);
 	}
+	if (!envelope.constraints.some(({ id }) => id === "planner-command-success")) {
+		throw new PlannerRuntimeError(
+			"planner.command_success_constraint_required",
+			"Planner command success constraint is required",
+		);
+	}
+	if (!envelope.constraints.some(({ id }) => id === "planner-worker-decomposition")) {
+		throw new PlannerRuntimeError(
+			"planner.worker_decomposition_constraint_required",
+			"Planner Worker decomposition constraint is required",
+		);
+	}
+	if (!envelope.constraints.some(({ id }) => id === "planner-verification-efficiency")) {
+		throw new PlannerRuntimeError(
+			"planner.verification_efficiency_constraint_required",
+			"Planner verification efficiency constraint is required",
+		);
+	}
 }
 
 export async function executePlannerPrompt(
 	session: PromptAgentSession,
 	envelope: PromptEnvelope,
+	options: ExecutePlannerPromptOptions = {},
 ): Promise<PromptEnvelopeExecutionResult> {
 	validatePlannerPromptEnvelope(envelope);
-	return executePromptEnvelope(session, envelope);
+	const budget = options.budget ?? BUILTIN_AGENT_PROFILES.planner.defaultBudget;
+	const maxTurns = budget.maxTurns;
+	const maxDurationMs = budget.maxDurationMs;
+	const investigationTimeoutMs = Math.min(
+		options.investigationTimeoutMs ?? PLANNER_INVESTIGATION_TIMEOUT_MS,
+		maxDurationMs ?? Number.POSITIVE_INFINITY,
+	);
+	let phase: PlannerPhase = "investigating";
+	let assistantTurns = 0;
+	let investigationUsedTools = false;
+	let budgetFailure: PlannerRuntimeError | undefined;
+	let durationTimeout: ReturnType<typeof setTimeout> | undefined;
+	let investigationTimeout: ReturnType<typeof setTimeout> | undefined;
+
+	const requestFinalOutput = (): void => {
+		if (phase !== "investigating") return;
+		phase = "finalizing";
+		if (investigationTimeout) clearTimeout(investigationTimeout);
+		session.setActiveToolsByName([]);
+		void session.steer?.(PLANNER_FINALIZE_INSTRUCTION).catch(() => undefined);
+	};
+	const abortForBudget = (code: string, message: string): void => {
+		if (budgetFailure) return;
+		budgetFailure = new PlannerRuntimeError(code, message);
+		void session.abort?.().catch(() => undefined);
+	};
+	const unsubscribe = session.subscribe?.((event) => {
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			assistantTurns++;
+			if (maxTurns !== undefined && assistantTurns > maxTurns) {
+				abortForBudget("planner.max_turns", `Planner exceeded its ${maxTurns}-turn budget before producing a plan`);
+				return;
+			}
+			if (event.message.stopReason === "toolUse") {
+				if (phase !== "investigating" || investigationUsedTools) {
+					abortForBudget(
+						"planner.investigation_round_exceeded",
+						"Planner attempted another tool round after the single investigation round",
+					);
+					return;
+				}
+				investigationUsedTools = true;
+			}
+		}
+		if (event.type === "turn_end" && phase === "investigating" && investigationUsedTools) {
+			requestFinalOutput();
+		}
+	});
+	if (maxDurationMs !== undefined) {
+		durationTimeout = setTimeout(
+			() =>
+				abortForBudget(
+					"planner.max_duration",
+					`Planner exceeded its ${maxDurationMs}ms duration budget before producing a plan`,
+				),
+			maxDurationMs,
+		);
+	}
+	if (Number.isFinite(investigationTimeoutMs)) {
+		investigationTimeout = setTimeout(
+			() =>
+				abortForBudget(
+					"planner.investigation_timeout",
+					`Planner exceeded its ${investigationTimeoutMs}ms investigation budget before finalizing`,
+				),
+			investigationTimeoutMs,
+		);
+	}
+
+	try {
+		const result = await executePromptEnvelope(session, envelope);
+		if (budgetFailure) throw budgetFailure;
+		return result;
+	} catch (error) {
+		if (budgetFailure) throw budgetFailure;
+		throw error;
+	} finally {
+		if (durationTimeout) clearTimeout(durationTimeout);
+		if (investigationTimeout) clearTimeout(investigationTimeout);
+		unsubscribe?.();
+	}
 }
 
 function extractJsonObject(text: string): string {
-	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
-	if (fenced) {
-		return fenced;
-	}
-	const start = text.indexOf("{");
-	const end = text.lastIndexOf("}");
-	if (start < 0 || end <= start) {
+	const fenced = text.match(/```json[ \t]*\r?\n([\s\S]*?)```/i)?.[1]?.trim();
+	const unlabeledFence = text.match(/```[ \t]*\r?\n([\s\S]*?)```/)?.[1]?.trim();
+	const candidate = fenced ?? unlabeledFence ?? text;
+	const start = candidate.indexOf("{");
+	if (start < 0) {
 		throw new PlannerRuntimeError("planner.output_not_json", "Planner response does not contain a JSON object");
 	}
-	return text.slice(start, end + 1);
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+	for (let index = start; index < candidate.length; index++) {
+		const character = candidate[index];
+		if (inString) {
+			if (escaped) {
+				escaped = false;
+			} else if (character === "\\") {
+				escaped = true;
+			} else if (character === '"') {
+				inString = false;
+			}
+			continue;
+		}
+		if (character === '"') {
+			inString = true;
+		} else if (character === "{") {
+			depth++;
+		} else if (character === "}" && --depth === 0) {
+			return candidate.slice(start, index + 1);
+		}
+	}
+	throw new PlannerRuntimeError("planner.output_not_json", "Planner response contains an incomplete JSON object");
+}
+
+function parseJsonObject(text: string): unknown {
+	const payload = extractJsonObject(text);
+	try {
+		return JSON.parse(payload);
+	} catch (initialError) {
+		const repaired = payload.replace(/\\u(?![0-9a-fA-F]{4})/g, "\\\\u").replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+		if (repaired !== payload) {
+			try {
+				return JSON.parse(repaired);
+			} catch {
+				// Preserve the original parser error because it identifies the malformed model output.
+			}
+		}
+		throw initialError;
+	}
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -318,10 +498,13 @@ function parseVerificationRequirement(value: unknown, index: number): Verificati
 	};
 }
 
-export function parsePlannerPlanContent(text: string): PlanContent {
+export function parsePlannerPlanContent(
+	text: string,
+	allowedVerificationCommands: readonly string[] = [],
+): PlanContent {
 	let value: unknown;
 	try {
-		value = JSON.parse(extractJsonObject(text));
+		value = parseJsonObject(text);
 	} catch (error) {
 		if (error instanceof PlannerRuntimeError) {
 			throw error;
@@ -349,11 +532,81 @@ export function parsePlannerPlanContent(text: string): PlanContent {
 	) {
 		throw new PlannerRuntimeError("planner.output_invalid_shape", "Planner response does not match PlanContent");
 	}
-	return {
+	let content: PlanContent = {
 		goal: nonEmptyString(value.goal, "goal"),
 		assumptions: stringArray(value.assumptions, "assumptions"),
 		steps: value.steps.map(parsePlanStep),
 		risks: value.risks.map(parsePlanRisk),
 		verificationRequirements: value.verificationRequirements.map(parseVerificationRequirement),
 	};
+	const reviewerSteps = content.steps.filter(({ requiredAgentRole }) => requiredAgentRole === "reviewer");
+	if (reviewerSteps.length > 0) {
+		throw new PlannerRuntimeError(
+			"planner.reviewer_step_not_allowed",
+			`Planner must leave review to the Delivery Runtime instead of creating Reviewer steps: ${reviewerSteps.map(({ id }) => id).join(", ")}`,
+		);
+	}
+	if (allowedVerificationCommands.length > 0) {
+		const allowed = new Set(allowedVerificationCommands.map((command) => command.trim()));
+		const unsupportedSteps = [
+			...new Set(
+				content.steps.flatMap(({ kind, command }) =>
+					kind === "command" && command && !allowed.has(command.trim()) ? [command] : [],
+				),
+			),
+		];
+		if (unsupportedSteps.length > 0) {
+			throw new PlannerRuntimeError(
+				"planner.command_not_configured",
+				`Planner introduced command steps that were not configured: ${unsupportedSteps.join("; ")}`,
+			);
+		}
+		content = {
+			...content,
+			verificationRequirements: content.verificationRequirements.map((requirement) =>
+				requirement.command && !allowed.has(requirement.command.trim())
+					? {
+							id: requirement.id,
+							kind: requirement.kind,
+							description: requirement.description,
+							required: requirement.required,
+						}
+					: requirement,
+			),
+		};
+	}
+	return content;
+}
+
+export async function parsePlannerPlanContentWithRepair(
+	session: PromptAgentSession,
+	text: string,
+	allowedVerificationCommands: readonly string[] = [],
+): Promise<PlanContent> {
+	try {
+		return parsePlannerPlanContent(text, allowedVerificationCommands);
+	} catch (error) {
+		if (!(error instanceof PlannerRuntimeError)) throw error;
+		const previousToolNames = session.getActiveToolNames();
+		try {
+			session.setActiveToolsByName([]);
+			await session.prompt(
+				[
+					`PlanContent validation failed: ${error.message}`,
+					"Do not call tools. Return only the corrected complete PlanContent JSON object.",
+				].join("\n"),
+				{ expandPromptTemplates: false, source: "extension" },
+			);
+			const repairedText = session.getLastAssistantText?.();
+			if (!repairedText) {
+				throw new PlannerRuntimeError(
+					"planner.repair_output_missing",
+					"Planner JSON repair completed without an Assistant response",
+				);
+			}
+			return parsePlannerPlanContent(repairedText, allowedVerificationCommands);
+		} finally {
+			session.setActiveToolsByName(previousToolNames);
+		}
+	}
 }
