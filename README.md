@@ -28,7 +28,26 @@ Run the deterministic showcase without an API key:
 npm run demo:cli-agent-showcase
 ```
 
+## Code map
+
+| Area | Entry point |
+|---|---|
+| Workflow state, planning, scheduling, and recovery | [`packages/coding-agent/src/core/workflow`](packages/coding-agent/src/core/workflow) |
+| Governed Subagent and team execution | [`packages/coding-agent/src/core/subagents`](packages/coding-agent/src/core/subagents) |
+| Background process lifecycle | [`packages/coding-agent/src/core/jobs`](packages/coding-agent/src/core/jobs) |
+| Diff, review, verification, and bounded repair | [`packages/coding-agent/src/core/delivery`](packages/coding-agent/src/core/delivery) |
+| AgentSession integration | [`agent-session.ts`](packages/coding-agent/src/core/agent-session.ts) |
+| Representative CLI regression test | [`workflow-direct.test.ts`](packages/coding-agent/test/suite/workflow-direct.test.ts) |
+
+## Current limitations
+
+- The fork is currently distributed from source; a signed Windows installer is not yet available.
+- Windows 11 and PowerShell are the primary development targets. Other platforms retain upstream support but are not the focus of this fork.
+- Upstream release and package-publishing workflows are not used for this personal fork.
+
 ## Upstream Pi
+
+The remaining sections describe the shared upstream packages, development commands, security model, and license retained by this fork.
 
 <p align="center">
   <a href="https://pi.dev">
@@ -39,8 +58,6 @@ npm run demo:cli-agent-showcase
   <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
   <a href="https://www.npmjs.com/package/@earendil-works/pi-coding-agent"><img alt="npm" src="https://img.shields.io/npm/v/@earendil-works/pi-coding-agent?style=flat-square" /></a>
 </p>
-
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ### Pi Agent Harness
 
