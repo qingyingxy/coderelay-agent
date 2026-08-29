@@ -11,6 +11,15 @@ packages/*/dist-firefox/
 packages/ai/src/providers/data/
 packages/ai/src/providers/.model-generation-*/
 *.cpuprofile
+/tmp/
+__pycache__/
+*.pyc
+
+# Local evaluation datasets and adapters
+/packages/coding-agent/evals/model-routing-cost/
+/packages/coding-agent/evals/model-routing-tiered/
+/packages/coding-agent/evals/quixbugs-python/
+/packages/coding-agent/evals/terminal_bench/
 
 # Environment
 .env

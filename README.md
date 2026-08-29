@@ -1,3 +1,35 @@
+# Pi Windows Agent
+
+Windows-first experimental fork of [Pi](https://github.com/earendil-works/pi) focused on governed coding workflows, multi-agent execution, deterministic verification, and recovery.
+
+> **Status:** Beta. Developed and tested primarily on Windows 11 with PowerShell. This is a secondary-development project based on Pi, not an independently implemented agent framework.
+
+This fork reuses Pi's provider abstraction, Agent Loop, tool calling, sessions, extensions, and terminal UI. Its main additions are:
+
+- Direct, Plan, and automatic workflow selection with approval-backed plans and persistent task graphs.
+- Governed Subagent and background Job runtimes with inherited permissions, budgets, structured handoffs, and single-writer enforcement.
+- Delivery verification, bounded repair, recovery, and unified Interactive, Print, JSON, and RPC workflow output.
+- Role-aware model routing across fast, balanced, and strong model tiers.
+
+[Architecture](docs/cli-agent-architecture.md) | [Offline showcase](docs/cli-agent-showcase.md) | [Coding agent documentation](packages/coding-agent/README.md)
+
+## Windows quick start
+
+Requires Node.js 22.19 or newer.
+
+```powershell
+npm install --ignore-scripts
+.\pi-test.ps1
+```
+
+Run the deterministic showcase without an API key:
+
+```powershell
+npm run demo:cli-agent-showcase
+```
+
+## Upstream Pi
+
 <p align="center">
   <a href="https://pi.dev">
     <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
@@ -10,25 +42,13 @@
 
 > New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-# Pi Agent Harness
+### Pi Agent Harness
 
 This is the home of the Pi agent harness project including our self extensible coding agent.
 
 * **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
 * **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
 * **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
-
-## Personal CLI Agent Fork
-
-This branch is a secondary-development project based on Pi, not an independently implemented agent framework. It reuses Pi's provider abstraction, Agent Loop, tool calling, sessions, extensions, and terminal UI.
-
-The personal-project contribution is the productized CLI workflow layer: Direct/Plan mode selection, approval-backed Plans, persistent Task Graphs, Subagent and background Job runtimes, inherited runtime guardrails, structured Handoffs, delivery verification and bounded Repair, recovery, and unified interactive/Print/JSON/RPC Workflow output.
-
-- [Architecture and design](docs/cli-agent-architecture.md)
-- [Deterministic evaluation](docs/cli-agent-evaluation.md)
-- [Reproducible showcase](docs/cli-agent-showcase.md)
-- [Development roadmap](docs/cli-agent-long-term-roadmap.md)
-- [Autonomous workflow implementation plan](docs/design/m6-autonomous-workflow-implementation-plan.md)
 
 To learn more about Pi:
 
