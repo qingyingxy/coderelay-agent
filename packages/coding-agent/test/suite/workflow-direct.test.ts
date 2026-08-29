@@ -346,6 +346,40 @@ describe("Direct Workflow AgentSession integration", () => {
 		});
 	});
 
+	it("reserves configured deterministic verification for the Workflow controller", async () => {
+		const verificationFactory = new SequencedVerificationFactory([0]);
+		const harness = await createHarness({
+			jobRuntime: new JobRuntime({
+				processFactory: verificationFactory,
+				runtimeRegistry: new WorkflowRuntimeRegistry(),
+			}),
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct", false, undefined, { maxDurationMs: 60_000 }, [
+			"node verify.mjs",
+		]);
+		let providerMessages: readonly unknown[] = [];
+		harness.setResponses([
+			(context) => {
+				providerMessages = context.messages;
+				return fauxAssistantMessage("Implementation ready for controller verification");
+			},
+		]);
+
+		await harness.session.prompt("Fix the defect without running the full verification suite");
+
+		const policyMessage = harness.session.messages.find(
+			(message) => message.role === "custom" && message.customType === "workflow-direct-verification-policy",
+		);
+		expect(policyMessage).toMatchObject({ display: false });
+		expect(getMessageText(policyMessage)).toContain("Workflow controller owns deterministic verification");
+		expect(getMessageText(policyMessage)).toContain("Do not run the configured verification commands");
+		expect(getMessageText(policyMessage)).toContain("node verify.mjs");
+		expect(providerMessages.some((message) => getMessageText(message).includes("node verify.mjs"))).toBe(true);
+		expect(verificationFactory.commands).toEqual(["node verify.mjs"]);
+		expect(harness.session.getWorkflowView()?.workflow.status).toBe("completed");
+	});
+
 	it("runs a balanced Plan Lite contract and deterministic verification before Reviewer", async () => {
 		const factory = new FakeSubagentSessionFactory();
 		const verificationFactory = new SequencedVerificationFactory([0]);

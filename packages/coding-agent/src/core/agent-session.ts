@@ -2806,6 +2806,22 @@ export class AgentSession {
 			}
 			if (workflowAdapter && directRequestText !== undefined) {
 				messages.push(...(await this._runDirectBeforeMainProtocol(workflowAdapter, directRequestText)));
+				if (this._workflowVerificationCommands.length > 0) {
+					messages.push({
+						role: "custom",
+						customType: "workflow-direct-verification-policy",
+						content: [
+							"The Workflow controller owns deterministic verification for this Direct task.",
+							"Do not run the configured verification commands or an equivalent complete test/build suite yourself.",
+							"Focus on diagnosis and implementation. Use only narrowly scoped, timeout-bounded checks when necessary, then return as soon as the change is ready for controller verification.",
+							"If controller verification fails, its logs will be supplied to a Strong Repair attempt.",
+							`Controller-owned commands:\n${this._workflowVerificationCommands.map((command) => `- ${command}`).join("\n")}`,
+						].join("\n\n"),
+						display: false,
+						details: { commands: [...this._workflowVerificationCommands] },
+						timestamp: Date.now(),
+					});
+				}
 			}
 			await this._runAgentPrompt(messages, (options?.source ?? "interactive") !== "extension");
 			if (workflowAdapter) {
