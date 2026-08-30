@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/images/pi-windows-agent-icon.png" alt="Pi Windows Agent icon" width="176">
+</p>
+
 # Pi Windows Agent
 
 Windows-first experimental fork of [Pi](https://github.com/earendil-works/pi) focused on governed coding workflows, multi-agent execution, deterministic verification, and recovery.
