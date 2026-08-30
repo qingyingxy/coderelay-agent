@@ -63,6 +63,7 @@ concurrency:
 
 jobs:
   authorize:
+    if: github.repository == 'earendil-works/pi'
     runs-on: ubuntu-latest
     outputs:
       should_run: ${{ steps.verify.outputs.should_run }}

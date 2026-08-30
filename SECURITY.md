@@ -1,87 +1,61 @@
 # Security Policy
 
-This document should guide you about understanding the security concept behind
-Pi and also where the boundaries are.
+## Project scope
 
-In general Pi is a coding agent that runs locally within the security boundary
-of the user that is running it.  It's the responsibiltiy of the user to monitor
-its operations or to contain it within a container, virtual machine or other
-Sandbox solution.
+Pi Windows Agent is a personal, Windows-focused fork of
+[earendil-works/pi](https://github.com/earendil-works/pi). This policy covers
+security issues introduced by this fork's workflow, subagent, job, delivery,
+recovery, model-routing, and Windows integration changes.
 
-Pi treats the local user account and files writable by that account as inside
-the same trust boundary as the Pi process itself.  If an attacker can modify files
-under the user's home directory, workspace, shell startup files, environment, or
-Pi configuration, they can generally influence Pi or other local developer tools.
-Reports that depend on such prior local write access are not security
-vulnerabilities unless they demonstrate how Pi grants that write access or crosses
-an operating-system privilege boundary.
+Issues that also reproduce on upstream Pi should be reported through the
+[upstream security policy](https://github.com/earendil-works/pi/security/policy).
 
-Pi relies on users installing trustworthy extensions and loading trustworthy
-skills and only to use pi within trusted repositories.  This is because files
-like `AGENTS.md` or instructions in comments can be used to prompt inject the
-coding agent trivially and this cannot be protected against.
+## Security model
 
-## Reporting a Vulnerability
+The agent runs with the filesystem, process, network, and credential permissions
+of the user who starts it. It is not a security sandbox.
 
-If you believe you found a security vulnerability in pi or another package in
-this repository, please report it privately by either:
+- Run it only in repositories and worktrees you trust.
+- Review commands and permission-expansion requests before approving them.
+- Use a dedicated worktree, virtual machine, container, or external sandbox for
+  untrusted code.
+- Treat project instructions, extensions, skills, shell configuration, and local
+  agent configuration as trusted inputs.
+- Do not include API keys, access tokens, private source code, or personal data in
+  reports or logs.
 
-- Emailing `security@earendil.com`, or
-- Opening a private report through GitHub Security Advisories for this repository
+The fork's permission inheritance, read-only roles, budgets, single-writer lease,
+bounded repair, and cancellation controls reduce accidental workflow damage. They
+do not create an operating-system security boundary.
 
-Please include:
+## Reporting a vulnerability
 
-- A description of the issue and its impact
-- Steps to reproduce, proof of concept, or relevant logs
-- Affected package, version, commit, or configuration
-- Any known mitigations
+Do not open a public issue for a vulnerability that affects this fork.
 
-Do not open a public issue for security-sensitive reports.  We will review
-reports and coordinate disclosure as appropriate.
+Use GitHub's private vulnerability reporting for
+[`qingyingxy/pi-windows-agent`](https://github.com/qingyingxy/pi-windows-agent/security/advisories/new).
+Include:
 
-## Scope
+- affected commit and Windows version;
+- a concise description of the impact;
+- minimal reproduction steps or a proof of concept;
+- the affected workflow, package, or command;
+- relevant logs with credentials and personal data removed.
 
-Security issues in the distributed packages, command-line tools, APIs, and
-repository code are in scope as well as earendil operated infrastricture
-on `pi.dev`.
+## In scope
 
-## Out Of Scope
+- A privilege or permission boundary bypass introduced by this fork.
+- Incorrect permission or budget inheritance between workflows and subagents.
+- Writer-lease failures that permit unintended concurrent workspace mutation.
+- Cancellation or recovery behavior that executes work after it should stop.
+- Credential disclosure caused by fork-specific logging or workflow output.
 
-- Local code execution or sandboxing behavior (the Pi coding agent intentionally does not have a sandbox)
-- Behavior of pi extensions or skills installed by the user
-- Risks from working in untrusted repositories
-- Risks from installing untrusted extensions, skills, packages, or tools
-- Isuses caused by non trustworthy MITM proxies
-- Public internet exposure of a Pi installation
-- Prompt injection attacks
-- Exposed secrets that are third-party/user-controlled credentials
-- Reports requiring the ability to create, modify, delete, or replace files,
-  directories, symlinks, environment variables, shell configuration, or other
-  user-controlled local state on the target machine. This includes `~/.pi`,
-  `~/.pi/agent/models.json`, workspace files, `AGENTS.md`, skills, extensions,
-  extension configuration, dotfiles, and files synchronized through NFS, roaming
-  profiles, or dotfile managers, unless the report shows how Pi itself grants
-  that access.
-- Issues caused by intentionally weakened user configuration.
-- Resource/DOS claims that require trusted local input/config against the pi coding agent.
-- Reports about malicious model output.
-- User-approved or user-initiated local actions presented as vulnerabilities.
+## Out of scope
 
-## Notes for Reporters
-
-The most useful reports show a current, reproducible security boundary bypass
-with demonstrated impact.  Reports that only show expected local-agent behavior,
-prompt injection, or a malicious trusted extension/skill are not security
-vulnerabilities under this model.
-
-For example, a report showing that malicious contents written to a trusted Pi
-configuration file cause Pi to execute commands, load attacker-controlled tools,
-send credentials to an attacker-controlled endpoint, or otherwise change behavior
-is out of scope.
-
-When possible, include the exact affected path, package version or commit SHA,
-configuration, and a proof of concept against the latest release or latest
-`main`.  For dependency reports, include evidence that the shipped dependency is
-affected and that the issue is reachable through Pi.  For exposed-secret reports,
-include evidence that the credential is owned by Earendil or grants access to
-Earendil-operated infrastructure or services.
+- Expected command execution explicitly approved by the user.
+- Prompt injection or malicious instructions in an already trusted repository.
+- Behavior from untrusted third-party extensions, skills, models, or tools.
+- Issues requiring prior write access to the user's workspace, home directory,
+  shell startup files, or Pi configuration.
+- Resource exhaustion caused by intentionally unsafe local configuration.
+- Vulnerabilities that reproduce unchanged on upstream Pi.
