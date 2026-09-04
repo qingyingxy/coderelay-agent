@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.14 已完成
+> 状态：实施中，CW.0-CW.16 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -718,7 +718,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.13 | `DONE` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
 | CW.14 | `DONE` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
 | CW.15 | `DONE` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
-| CW.16 | `TODO` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
+| CW.16 | `DONE` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
 | CW.17 | `TODO` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17 |
 
@@ -860,6 +860,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - trace：`getContextManagementTrace()` 返回逐窗口 boundary、History action/request/result 和 Note operation，并携带当前分支 lineage；可与 Session JSONL 和 Workflow View 一起保存用于失败样本审查。
 - 验证：context-management stats/trace 专项 Vitest 和既有 AgentSession stats 回归通过；`npm run check` 通过。
 - 偏差：未修改正在并行开发的 `core/evaluation/*`；评测层可直接调用公共 trace API，具体持久化接入留在 CW.16 的独立评测脚本中。
+
+### CW.16 实施记录
+
+- 实际文件：`evals/context-window/evaluate.ts`、对应 README、Faux Provider 评测回归和根目录 `eval:context-window` 命令。
+- 矩阵：A=`summary`；B=`windowed + Notes + History`；C=`windowed + Workflow Snapshot + Notes + History`；D=`hybrid` 普通会话和活动 Workflow 分流。
+- 机制断言：完整分支继续保留旧消息、active history 排除旧 Entry、摘要或 seed 保留控制信息、Notes 固化进 seed、History 精确找回旧值并进入 trace、Workflow 边界引用权威 Snapshot、hard cut 不产生摘要模型调用。
+- 失败样本：评测结果在失败时附带当前分支、active messages 和 context-management trace；成功结果只保留聚合指标，避免报告无界膨胀。
+- 验证：`npm run eval:context-window` 和专项 Vitest 均为 4/4 通过；评测固定使用 Faux Provider，不需要网络、凭据或付费 token。
+- 偏差：CW.16 只证明确定性机制和策略路由满足协议，不能衡量真实模型的 Notes 质量、History 使用决策或长任务完成率；默认模式继续保持 `summary`，等待 CW.17。
 
 ## 16. 测试计划
 
