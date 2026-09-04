@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.7 已完成
+> 状态：实施中，CW.0-CW.8 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -710,7 +710,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.5 | `DONE` | 为 Plan 暴露 checkpoint 引用 | `workflow/plan-runtime.ts` | CW.4 |
 | CW.6 | `DONE` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
 | CW.7 | `DONE` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
-| CW.8 | `TODO` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
+| CW.8 | `DONE` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
 | CW.9 | `TODO` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
 | CW.10 | `TODO` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
 | CW.11 | `TODO` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
@@ -789,6 +789,14 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 故障边界：Snapshot 或边界写入失败不会替换 active messages；边界写入后重建失败进入 `failed`，后续采样被拒绝。
 - 验证：Faux Provider 专项 Vitest 3 项、既有 prompt/compaction 回归 29 项通过；`npm run check` 通过。
 - 偏差：Notes 尚未实现，seed 的 `noteEntryIds` 暂为空；无 Workflow 时使用有界的最近用户目标作为最小连续性种子，CW.10 再合并 Notes hint。
+
+### CW.8 实施记录
+
+- 实际文件：`core/agent-session.ts`、`core/tools/new-context.ts`、工具导出、slash 命令清单和 Faux Provider 专项测试。
+- 工具策略：`summary` 不注册 `new_context`；`windowed` 注册并默认启用；`hybrid` 注册工具，但模型请求仅在 Direct/Plan Workflow context provider 存在时接受；allowed/excluded tools 继续生效。
+- 安全行为：`new_context` 是无参数 sequential 工具，只设置 `cut_pending` 并等待当前 tool result 落盘；`/new-context` 仅在空闲状态立即切窗，命令反馈只发 presentation event，不写 Session 或 active history。
+- 验证：CW.8 专项 Vitest 7 项、既有 prompt/硬切回归 16 项通过；`npm run check` 通过。
+- 偏差：显式 `/new-context` 在 `summary` 模式也可使用，因为它是用户明确请求而非自动策略；模型工具仍严格按模式暴露。
 
 ## 16. 测试计划
 

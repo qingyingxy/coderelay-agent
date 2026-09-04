@@ -42,6 +42,7 @@ export {
 	type LsToolInput,
 	type LsToolOptions,
 } from "./ls.ts";
+export { createNewContextToolDefinition } from "./new-context.ts";
 export {
 	createReadTool,
 	createReadToolDefinition,

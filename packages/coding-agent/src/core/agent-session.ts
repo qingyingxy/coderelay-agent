@@ -141,6 +141,7 @@ import {
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
+import { createNewContextToolDefinition } from "./tools/new-context.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { BUILTIN_AGENT_PROFILES } from "./workflow/agent-profile.ts";
@@ -2891,6 +2892,11 @@ export class AgentSession {
 		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
+			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteContextWindowCommand(text))) {
+				preflightResult?.(true);
+				return;
+			}
+
 			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteWorkflowCommand(text))) {
 				preflightResult?.(true);
 				return;
@@ -3119,6 +3125,39 @@ export class AgentSession {
 			}
 			workflowAdapter?.dispose();
 		}
+	}
+
+	/** Execute the built-in hard-cut command without adding its output to model context. */
+	private async _tryExecuteContextWindowCommand(text: string): Promise<boolean> {
+		const [commandName, ...args] = text.trim().split(/\s+/);
+		if (commandName !== "/new-context") {
+			return false;
+		}
+		if (!this.isIdle || this._contextWindowPhase !== "idle") {
+			throw new Error("/new-context can only be used while context-window management is idle");
+		}
+
+		let content: string;
+		let windowId: string | undefined;
+		if (args.length > 0) {
+			content = "Usage: /new-context";
+		} else {
+			const boundary = await this.requestContextWindow("manual");
+			windowId = boundary?.windowId;
+			content = windowId ? `Started a fresh context window (${windowId}).` : "Started a fresh context window.";
+		}
+
+		const message = {
+			role: "custom" as const,
+			customType: "context-window-command",
+			content,
+			display: true,
+			details: { command: commandName, windowId },
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{ readonly command: string; readonly windowId?: string }>;
+		this._emit({ type: "message_start", message });
+		this._emit({ type: "message_end", message });
+		return true;
 	}
 
 	/** Execute built-in Workflow commands without sending them to the model. */
@@ -4931,10 +4970,13 @@ export class AgentSession {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
+		const contextManagementMode = this.settingsManager.getContextManagementSettings().mode;
+		const contextWindowToolEnabled = contextManagementMode !== "summary";
+		const contextWindowToolWasRegistered = this._toolRegistry.has("new_context");
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
-		const baseToolDefinitions = this._baseToolsOverride
+		const baseToolDefinitions: Record<string, ToolDefinition> = this._baseToolsOverride
 			? Object.fromEntries(
 					Object.entries(this._baseToolsOverride).map(([name, tool]) => [
 						name,
@@ -4945,6 +4987,17 @@ export class AgentSession {
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
+		if (contextWindowToolEnabled) {
+			baseToolDefinitions.new_context = createNewContextToolDefinition(async () => {
+				if (
+					contextManagementMode === "hybrid" &&
+					(this._activeWorkflowAdapter ?? this._planWorkflowRuntime) === undefined
+				) {
+					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
+				}
+				await this.requestContextWindow("model", { continueAfterCut: true });
+			}) as ToolDefinition;
+		}
 
 		this._baseToolDefinitions = new Map(
 			Object.entries(baseToolDefinitions).map(([name, tool]) => [name, tool as ToolDefinition]),
@@ -4973,7 +5026,14 @@ export class AgentSession {
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
 			: ["read", "bash", "edit", "write"];
-		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
+		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
+		const canDefaultActivateContextWindowTool =
+			contextWindowToolEnabled &&
+			!contextWindowToolWasRegistered &&
+			(options.activeToolNames === undefined || options.activeToolNames.length > 0);
+		if (canDefaultActivateContextWindowTool) {
+			baseActiveToolNames.push("new_context");
+		}
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
 			includeAllExtensionTools: options.includeAllExtensionTools,
