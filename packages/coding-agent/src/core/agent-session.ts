@@ -67,6 +67,7 @@ import {
 import {
 	CONTEXT_WINDOW_WARNING_MESSAGE_TYPE,
 	type ContextManagementEvent,
+	type ContextManagementMode,
 	type ContextWindowReason,
 	type ContextWindowTokenBudget,
 	calculateContextWindowTokenBudget,
@@ -1297,6 +1298,10 @@ export class AgentSession {
 		return this._activeWorkflowAdapter ?? this._planWorkflowRuntime;
 	}
 
+	private _usesHardContextWindows(mode: ContextManagementMode): boolean {
+		return mode === "windowed" || (mode === "hybrid" && this._getWorkflowContextProvider() !== undefined);
+	}
+
 	private async _runPendingContextWindowCut(): Promise<ContextWindowEntry> {
 		if (this._contextWindowCutPromise) {
 			return await this._contextWindowCutPromise;
@@ -1353,7 +1358,7 @@ export class AgentSession {
 			this._contextWindowPhase = "idle";
 			this._pendingContextWindowCut = undefined;
 			this._contextWindowSoftWarningIssued = false;
-			this._overflowRecoveryAttempted = false;
+			this._overflowRecoveryAttempted = pending.reason === "overflow" && this._overflowRecoveryAttempted;
 			this._contextWindowError = undefined;
 			this._emit({ type: "entry_appended", entry });
 			this._emit({
@@ -4420,11 +4425,17 @@ export class AgentSession {
 			return false;
 		}
 
+		const contextManagement = this.settingsManager.getContextManagementSettings();
+		const useHardContextWindows = this._usesHardContextWindows(contextManagement.mode);
+
 		// Case 1: Overflow - LLM returned context overflow error, or reported usage exceeded
-		// the configured window. A successful response over the configured window should compact
+		// the configured window. A successful response over the configured window should shrink context
 		// but must not retry: the assistant answer already completed and agent.continue() cannot
 		// continue from an assistant message.
 		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
+			if (useHardContextWindows) {
+				return await this._runContextWindowOverflowRecovery(assistantMessage);
+			}
 			const willRetry = assistantMessage.stopReason !== "stop";
 
 			if (!willRetry) {
@@ -4454,10 +4465,6 @@ export class AgentSession {
 			return await this._runAutoCompaction("overflow", willRetry);
 		}
 
-		const contextManagement = this.settingsManager.getContextManagementSettings();
-		const useHardContextWindows =
-			contextManagement.mode === "windowed" ||
-			(contextManagement.mode === "hybrid" && this._getWorkflowContextProvider() !== undefined);
 		if (useHardContextWindows) {
 			const latestBoundary = [...branch]
 				.reverse()
@@ -4502,6 +4509,28 @@ export class AgentSession {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
+	}
+
+	private async _runContextWindowOverflowRecovery(assistantMessage: AssistantMessage): Promise<boolean> {
+		const willRetry = assistantMessage.stopReason !== "stop";
+		if (willRetry && this._overflowRecoveryAttempted) {
+			return false;
+		}
+
+		if (willRetry) {
+			this._overflowRecoveryAttempted = true;
+			const messages = this.agent.state.messages;
+			if (messages.at(-1)?.role === "assistant") {
+				this.agent.state.messages = messages.slice(0, -1);
+			}
+		}
+
+		const continueAfterCut = willRetry || this.agent.hasQueuedMessages();
+		await this.requestContextWindow("overflow", { continueAfterCut });
+		if (this._contextWindowPhase === "cut_pending") {
+			await this._runPendingContextWindowCut();
+		}
+		return continueAfterCut;
 	}
 
 	private async _checkContextWindowBudget(
@@ -5112,7 +5141,7 @@ export class AgentSession {
 				});
 		if (contextWindowToolEnabled) {
 			baseToolDefinitions.new_context = createNewContextToolDefinition(async () => {
-				if (contextManagementMode === "hybrid" && this._getWorkflowContextProvider() === undefined) {
+				if (contextManagementMode === "hybrid" && !this._usesHardContextWindows(contextManagementMode)) {
 					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
 				}
 				await this.requestContextWindow("model", { continueAfterCut: true });

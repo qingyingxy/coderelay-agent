@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.11 已完成
+> 状态：实施中，CW.0-CW.12 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -714,7 +714,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.9 | `DONE` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
 | CW.10 | `DONE` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
 | CW.11 | `DONE` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
-| CW.12 | `TODO` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
+| CW.12 | `DONE` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
 | CW.13 | `TODO` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
 | CW.14 | `TODO` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
 | CW.15 | `TODO` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
@@ -824,6 +824,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 重置：成功切窗继续重置最新 Assistant、soft warning、overflow retry 和窗口 phase；`/new-context` 可在 Notes 收集阶段手动完成切窗。
 - 验证：预算与 Faux Provider 专项 12 项、Context Window/compaction/Notes 相关回归 33 项通过；`npm run check` 通过。
 - 偏差：overflow 分流按任务依赖保留给 CW.12；CW.11 只替换非 overflow threshold 路径。
+
+### CW.12 实施记录
+
+- 实际文件：`core/agent-session.ts`、Faux Provider overflow 专项测试。
+- 路由：`windowed` 和当前有 Workflow provider 的 `hybrid` 使用硬切恢复；`summary` 和普通 `hybrid` 保持原有摘要恢复。
+- 错误恢复：overflow Assistant 错误先写入 Session JSONL，再从 active messages 移除；随后以 `reason = overflow` 建立边界，并从持久化 seed 自动继续一次。
+- 成功响应：provider 成功返回但 usage 已超过窗口时建立硬切边界，不重复采样已经完成的 Assistant 响应。
+- 重试上限：overflow 切窗期间保留 recovery-attempt 标志；重试成功、下一条用户消息或非 overflow 切窗后重置，连续第二次 overflow 不再切窗或重试。
+- 验证：overflow 专项 4 项、compaction/token budget/context window/retry 相关回归 48 项通过；`npm run check` 通过。
+- 偏差：没有把“第二次 overflow”伪装成 `context_window_failed`，因为边界事务本身并未失败；原始 Assistant error 仍是可观测和持久化的失败记录。
 
 ## 16. 测试计划
 
