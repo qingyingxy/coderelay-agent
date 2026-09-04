@@ -556,6 +556,8 @@ export class AgentSession {
 	private _pendingWorkflowClarification: PendingWorkflowClarification | undefined;
 	/** The workflow adapter for the in-flight Direct workflow, if any. */
 	private _activeWorkflowAdapter: AgentSessionAdapter | undefined;
+	/** Last settled Direct workflow, retained so a later runner/manual windowed cut can checkpoint it. */
+	private _latestDirectWorkflowContextProvider: WorkflowContextProvider | undefined;
 	private _latestWorkflowReport: WorkflowFinalReport | undefined;
 	private _latestWorkflowView: WorkflowView | undefined;
 	private _workflowExecutionProtocol: WorkflowExecutionProtocol | undefined;
@@ -1207,6 +1209,7 @@ export class AgentSession {
 		this._overflowRecoveryAttempted = false;
 		this._contextWindowError = undefined;
 		this._lastAssistantMessage = undefined;
+		this._latestDirectWorkflowContextProvider = undefined;
 	}
 
 	/** Request a hard context cut. Active runs apply it after the current turn fully settles. */
@@ -1323,12 +1326,19 @@ export class AgentSession {
 		return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, estimate));
 	}
 
-	private _getWorkflowContextProvider(): WorkflowContextProvider | undefined {
+	private _getActiveWorkflowContextProvider(): WorkflowContextProvider | undefined {
 		return this._activeWorkflowAdapter ?? this._planWorkflowRuntime;
 	}
 
+	private _getWorkflowContextProviderForCut(mode: ContextManagementMode): WorkflowContextProvider | undefined {
+		return (
+			this._getActiveWorkflowContextProvider() ??
+			(mode === "windowed" ? this._latestDirectWorkflowContextProvider : undefined)
+		);
+	}
+
 	private _usesHardContextWindows(mode: ContextManagementMode): boolean {
-		return mode === "windowed" || (mode === "hybrid" && this._getWorkflowContextProvider() !== undefined);
+		return mode === "windowed" || (mode === "hybrid" && this._getActiveWorkflowContextProvider() !== undefined);
 	}
 
 	private async _runPendingContextWindowCut(): Promise<ContextWindowEntry> {
@@ -1360,7 +1370,8 @@ export class AgentSession {
 			}
 			this._flushPendingBashMessages();
 			const tokensBefore = this._contextTokensBeforeCut();
-			const workflowContextProvider = this._getWorkflowContextProvider();
+			const mode = this.settingsManager.getContextManagementSettings().mode;
+			const workflowContextProvider = this._getWorkflowContextProviderForCut(mode);
 			const checkpoint = workflowContextProvider?.checkpointForContextWindow();
 			if (checkpoint) {
 				this._validateWorkflowContextCheckpoint(checkpoint);
@@ -3178,6 +3189,9 @@ export class AgentSession {
 			}
 			if (this._activeWorkflowAdapter === workflowAdapter) {
 				this._activeWorkflowAdapter = undefined;
+			}
+			if (workflowAdapter) {
+				this._latestDirectWorkflowContextProvider = workflowAdapter;
 			}
 			workflowAdapter?.dispose();
 		}

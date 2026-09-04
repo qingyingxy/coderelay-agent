@@ -49,6 +49,7 @@ const ALLOWED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhi
 type AllowedThinkingLevel = (typeof ALLOWED_THINKING_LEVELS)[number];
 type JsonPrimitive = string | number | boolean | null;
 type RepositoryGroup = "A" | "C";
+type BoundaryTrigger = "runner" | "model";
 type VerificationPhase = "initial" | "repair";
 type CreateSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
 type CustomTools = NonNullable<CreateSessionOptions["customTools"]>;
@@ -117,6 +118,7 @@ export interface RealRepositoryCliOptions {
 	readonly repetitions: number;
 	readonly taskId?: string;
 	readonly group?: RepositoryGroup;
+	readonly boundaryTrigger: BoundaryTrigger;
 	readonly verifyTaskSet: boolean;
 }
 
@@ -187,16 +189,43 @@ interface ResumeEvidence {
 	readonly branchEntries: number;
 }
 
+interface BoundaryEvidence {
+	readonly boundary: 1 | 2 | 3;
+	readonly requestedTrigger: BoundaryTrigger | "summary";
+	readonly actualReason: string;
+	readonly boundaryEntryId?: string;
+	readonly modelReply: string;
+	readonly newContextCalls: number;
+	readonly postCutToolNames: readonly string[];
+}
+
+interface BoundaryProtocolMetrics {
+	readonly trigger: BoundaryTrigger;
+	readonly opportunities: number;
+	readonly modelTriggered: number;
+	readonly runnerTriggered: number;
+	readonly modelTriggerMisses: number;
+	readonly newContextCalls: number;
+	readonly duplicateNewContextCalls: number;
+	readonly postCutToolCalls: number;
+	readonly redundantProbeCalls: number;
+}
+
 interface RealRepositoryRunResult {
 	readonly taskId: string;
 	readonly repetition: number;
 	readonly group: RepositoryGroup;
 	readonly strategy: string;
 	readonly passed: boolean;
+	readonly memoryPassed: boolean;
+	readonly protocolPassed: boolean;
 	readonly checks: readonly RepositoryEvaluationCheck[];
+	readonly protocolChecks: readonly RepositoryEvaluationCheck[];
 	readonly metrics: RepositoryRunMetrics;
+	readonly boundaryProtocol: BoundaryProtocolMetrics;
 	readonly phaseReplies: readonly string[];
 	readonly boundaryReplies: readonly string[];
+	readonly boundaryEvidence: readonly BoundaryEvidence[];
 	readonly verificationExecutions: readonly VerificationExecution[];
 	readonly resumeEvidence: readonly ResumeEvidence[];
 	readonly finalResponse: string;
@@ -206,7 +235,7 @@ interface RealRepositoryRunResult {
 }
 
 interface RealRepositoryReport {
-	readonly schemaVersion: 1;
+	readonly schemaVersion: 2;
 	readonly taskSetId: string;
 	readonly deterministicGrading: true;
 	readonly serialExecution: true;
@@ -223,10 +252,12 @@ interface RealRepositoryReport {
 		readonly repetitions: number;
 		readonly taskId?: string;
 		readonly group?: RepositoryGroup;
+		readonly boundaryTrigger: BoundaryTrigger;
 		readonly pricingPerMillionTokens: ModelPrice;
 		readonly pricingSource: string;
 	};
 	readonly passedRuns: number;
+	readonly protocolPassedRuns: number;
 	readonly totalRuns: number;
 	readonly plannedRuns: number;
 	readonly estimatedCostUsd: number;
@@ -357,6 +388,7 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 	let repetitions = 1;
 	let taskId: string | undefined;
 	let group: RepositoryGroup | undefined;
+	let boundaryTrigger: BoundaryTrigger = "runner";
 	let verifyTaskSet = false;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
@@ -401,6 +433,12 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 				if (value !== "A" && value !== "C") throw new Error("--group must be A or C");
 				group = value;
 				break;
+			case "--boundary-trigger":
+				if (value !== "runner" && value !== "model") {
+					throw new Error("--boundary-trigger must be runner or model");
+				}
+				boundaryTrigger = value;
+				break;
 			default:
 				throw new Error(`Unknown option: ${argument}`);
 		}
@@ -416,6 +454,7 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 		repetitions,
 		taskId,
 		group,
+		boundaryTrigger,
 		verifyTaskSet,
 	};
 }
@@ -775,17 +814,29 @@ function phaseOnePrompt(task: RealRepositoryTask, hardCut: boolean): string {
 	].join("\n");
 }
 
-function phaseTwoPrompt(task: RealRepositoryTask): string {
+function phaseTwoPrompt(task: RealRepositoryTask, hardCut: boolean): string {
 	return [
 		"Phase 2: diagnose the real defect without modifying files.",
 		`External case_id: ${task.id}`,
 		`Read ${task.editablePath} and the official tests again.`,
 		"Identify the smallest behavioral repair internally, but do not edit or run verification yet.",
+		...(hardCut
+			? [
+					"Call notes exactly once with these arguments:",
+					JSON.stringify({
+						action: "upsert",
+						note_id: `${task.id}-phase-2`,
+						category: "open_question",
+						content: "Repository diagnosis is complete; implement the real defect after the next boundary.",
+						source_entry_ids: [],
+					}),
+				]
+			: []),
 		"Reply exactly DIAGNOSIS_READY with no explanation.",
 	].join("\n");
 }
 
-function phaseThreePrompt(task: RealRepositoryTask): string {
+function phaseThreePrompt(task: RealRepositoryTask, hardCut: boolean): string {
 	return [
 		"Phase 3: implement the diagnosed QuixBugs repair.",
 		`External case_id: ${task.id}`,
@@ -793,6 +844,20 @@ function phaseThreePrompt(task: RealRepositoryTask): string {
 		"Do not add CW_RECOVERY_MARKER or guess any hidden repair before verification reports it.",
 		'After editing, call benchmark_verify exactly once with {"phase":"initial"}.',
 		"If verification reports HIDDEN_REPAIR_REQUIRED, do not apply it or retry in this phase.",
+		...(hardCut
+			? [
+					"After verification, call notes exactly once with these arguments:",
+					JSON.stringify({
+						action: "upsert",
+						note_id: `${task.id}-phase-3`,
+						category: "open_question",
+						content:
+							"Official tests pass but hidden verification requires exact History recovery after the next boundary.",
+						source_entry_ids: [],
+					}),
+					"Do not include the exact verifier failure in Notes.",
+				]
+			: []),
 		"Reply exactly REPAIR_REQUIRED.",
 	].join("\n");
 }
@@ -835,28 +900,12 @@ function phaseFourPrompt(task: RealRepositoryTask, hardCut: boolean): string {
 	].join("\n");
 }
 
-function boundaryPrompt(boundary: 1 | 2 | 3, hardCut: boolean, task: RealRepositoryTask): string {
+function boundaryPrompt(boundary: 1 | 2 | 3, hardCut: boolean): string {
 	const lines = [
 		`Controlled boundary ${boundary}. Do not inspect or edit files in this turn.`,
 		`Non-authoritative boundary padding: ${"archive-padding ".repeat(256)}`,
 	];
 	if (!hardCut) return [...lines, `Reply exactly WINDOW_${boundary}_READY without calling a tool.`].join("\n");
-	if (boundary > 1) {
-		lines.push(
-			"Call notes exactly once with these arguments:",
-			JSON.stringify({
-				action: "upsert",
-				note_id: `${task.id}-phase-${boundary}`,
-				category: "open_question",
-				content:
-					boundary === 2
-						? "Repository diagnosis is complete; implement the real defect after the next boundary."
-						: "Official tests pass but hidden verification requires exact History recovery after the next boundary.",
-				source_entry_ids: [],
-			}),
-			"Do not include probe output or the exact verifier failure in Notes.",
-		);
-	}
 	lines.push(
 		"Call new_context exactly once with an empty object and do not call any other tool afterward.",
 		`When new_context is no longer available in the fresh window, reply exactly WINDOW_${boundary}_READY.`,
@@ -947,16 +996,17 @@ async function createRepositorySession(options: {
 async function createControlledBoundary(options: {
 	readonly session: AgentSession;
 	readonly boundary: 1 | 2 | 3;
-	readonly task: RealRepositoryTask;
 	readonly configuration: RepositoryGroupConfiguration;
+	readonly boundaryTrigger: BoundaryTrigger;
 	readonly completedCostUsd: number;
 	readonly maxCostUsd: number;
 	readonly price: ModelPrice;
-}): Promise<string> {
+}): Promise<BoundaryEvidence> {
 	const hardCut = options.configuration.group === "C";
 	const before = options.session.getContextManagementTrace();
+	const newContextCallsBefore = toolResultEntries(options.session.sessionManager.getBranch(), "new_context").length;
 	let unsubscribe = () => {};
-	if (hardCut) {
+	if (hardCut && options.boundaryTrigger === "model") {
 		let completed = false;
 		unsubscribe = options.session.subscribe((event) => {
 			if (completed || event.type !== "context_window_end" || event.reason !== "model") return;
@@ -966,13 +1016,23 @@ async function createControlledBoundary(options: {
 			);
 		});
 	}
+	let modelReply = "";
 	try {
-		await options.session.prompt(boundaryPrompt(options.boundary, hardCut, options.task));
-		ensureBudget(options.session, options.completedCostUsd, options.maxCostUsd, options.price);
+		if (!hardCut || options.boundaryTrigger === "model") {
+			await options.session.prompt(boundaryPrompt(options.boundary, hardCut));
+			ensureBudget(options.session, options.completedCostUsd, options.maxCostUsd, options.price);
+			modelReply = lastAssistantEntry(options.session.sessionManager.getBranch())?.text ?? "";
+		}
 		if (!hardCut) {
 			const compacted = await options.session.compactForCommand(compactionInstruction(options.boundary));
 			if (compacted.strategy !== "summary") throw new Error(`Expected summary boundary, got ${compacted.strategy}`);
 			ensureBudget(options.session, options.completedCostUsd, options.maxCostUsd, options.price);
+		} else {
+			const current = options.session.getContextManagementTrace();
+			if (current.stats.hardCuts.count === before.stats.hardCuts.count) {
+				const boundary = await options.session.requestContextWindow("manual");
+				if (!boundary) throw new Error(`Runner could not create boundary ${options.boundary}`);
+			}
 		}
 	} finally {
 		unsubscribe();
@@ -983,7 +1043,26 @@ async function createControlledBoundary(options: {
 	if (afterCount !== beforeCount + 1) {
 		throw new Error(`Boundary ${options.boundary} did not create exactly one ${hardCut ? "hard cut" : "summary"}`);
 	}
-	return lastAssistantEntry(options.session.sessionManager.getBranch())?.text ?? "";
+	const branch = options.session.sessionManager.getBranch();
+	const boundaryEntry = hardCut ? branch.filter((entry) => entry.type === "context_window").at(-1) : undefined;
+	const boundaryIndex = boundaryEntry ? branch.findIndex(({ id }) => id === boundaryEntry.id) : -1;
+	const postCutToolNames = branch
+		.slice(boundaryIndex + 1)
+		.flatMap((entry) =>
+			boundaryIndex >= 0 && entry.type === "message" && entry.message.role === "toolResult"
+				? [entry.message.toolName]
+				: [],
+		);
+	return {
+		boundary: options.boundary,
+		requestedTrigger: hardCut ? options.boundaryTrigger : "summary",
+		actualReason: boundaryEntry?.reason ?? "summary",
+		...(boundaryEntry ? { boundaryEntryId: boundaryEntry.id } : {}),
+		modelReply,
+		newContextCalls:
+			toolResultEntries(options.session.sessionManager.getBranch(), "new_context").length - newContextCallsBefore,
+		postCutToolNames,
+	};
 }
 
 async function reopenRepositorySession(options: {
@@ -994,6 +1073,7 @@ async function reopenRepositorySession(options: {
 	readonly model: Model<Api>;
 	readonly thinking: ThinkingLevel;
 	readonly configuration: RepositoryGroupConfiguration;
+	readonly boundaryTrigger: BoundaryTrigger;
 	readonly customTools: CustomTools;
 	readonly phase: 2 | 3 | 4;
 }): Promise<{ session: AgentSession; manager: SessionManager; evidence: ResumeEvidence }> {
@@ -1010,7 +1090,7 @@ async function reopenRepositorySession(options: {
 		thinking: options.thinking,
 		configuration: options.configuration,
 		customTools: options.customTools,
-		includeNewContext: options.phase < 4,
+		includeNewContext: options.boundaryTrigger === "model" && options.phase < 4,
 	});
 	return {
 		session,
@@ -1041,6 +1121,7 @@ async function runRepositoryCase(options: {
 	readonly taskSetDirectory: string;
 	readonly repetition: number;
 	readonly configuration: RepositoryGroupConfiguration;
+	readonly boundaryTrigger: BoundaryTrigger;
 	readonly modelRuntime: ModelRuntime;
 	readonly model: Model<Api>;
 	readonly thinking: ThinkingLevel;
@@ -1065,6 +1146,7 @@ async function runRepositoryCase(options: {
 	let session: AgentSession | undefined;
 	const phaseReplies: string[] = [];
 	const boundaryReplies: string[] = [];
+	const boundaryEvidence: BoundaryEvidence[] = [];
 	const resumeEvidence: ResumeEvidence[] = [];
 	let probeEntryId: string | undefined;
 	let diagnosisEntryId: string | undefined;
@@ -1086,23 +1168,24 @@ async function runRepositoryCase(options: {
 			thinking,
 			configuration,
 			customTools,
-			includeNewContext: true,
+			includeNewContext: options.boundaryTrigger === "model",
 		});
 		await session.prompt(phaseOnePrompt(task, configuration.group === "C"));
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
 		probeEntryId = toolResultEntries(manager.getBranch(), "benchmark_probe").at(-1)?.id;
-		boundaryReplies.push(
+		boundaryEvidence.push(
 			await createControlledBoundary({
 				session,
 				boundary: 1,
-				task,
 				configuration,
+				boundaryTrigger: options.boundaryTrigger,
 				completedCostUsd,
 				maxCostUsd,
 				price,
 			}),
 		);
+		if (boundaryEvidence.at(-1)?.modelReply) boundaryReplies.push(boundaryEvidence.at(-1)?.modelReply ?? "");
 		probeExcludedAfterBoundary =
 			probeEntryId !== undefined && !manager.buildContextEntries().some(({ id }) => id === probeEntryId);
 
@@ -1114,29 +1197,31 @@ async function runRepositoryCase(options: {
 			model,
 			thinking,
 			configuration,
+			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 2,
 		});
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phaseTwoPrompt(task));
+		await session.prompt(phaseTwoPrompt(task, configuration.group === "C"));
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		const diagnosis = lastAssistantEntry(manager.getBranch());
 		phaseReplies.push(diagnosis?.text ?? "");
 		diagnosisEntryId = diagnosis?.id;
 		sourceUnchangedBeforeImplementation = sha256(readFileSync(fixture.sourcePath)) === fixture.initialSourceHash;
-		boundaryReplies.push(
+		boundaryEvidence.push(
 			await createControlledBoundary({
 				session,
 				boundary: 2,
-				task,
 				configuration,
+				boundaryTrigger: options.boundaryTrigger,
 				completedCostUsd,
 				maxCostUsd,
 				price,
 			}),
 		);
+		if (boundaryEvidence.at(-1)?.modelReply) boundaryReplies.push(boundaryEvidence.at(-1)?.modelReply ?? "");
 		diagnosisExcludedAfterBoundary =
 			diagnosisEntryId !== undefined && !manager.buildContextEntries().some(({ id }) => id === diagnosisEntryId);
 
@@ -1148,28 +1233,30 @@ async function runRepositoryCase(options: {
 			model,
 			thinking,
 			configuration,
+			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 3,
 		});
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phaseThreePrompt(task));
+		await session.prompt(phaseThreePrompt(task, configuration.group === "C"));
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
 		initialVerificationEntryId = toolResultEntries(manager.getBranch(), "benchmark_verify").at(-1)?.id;
 		prematureMarker = readFileSync(fixture.sourcePath, "utf8").includes(task.probe.repairMarker);
-		boundaryReplies.push(
+		boundaryEvidence.push(
 			await createControlledBoundary({
 				session,
 				boundary: 3,
-				task,
 				configuration,
+				boundaryTrigger: options.boundaryTrigger,
 				completedCostUsd,
 				maxCostUsd,
 				price,
 			}),
 		);
+		if (boundaryEvidence.at(-1)?.modelReply) boundaryReplies.push(boundaryEvidence.at(-1)?.modelReply ?? "");
 		failureExcludedAfterBoundary =
 			initialVerificationEntryId !== undefined &&
 			!manager.buildContextEntries().some(({ id }) => id === initialVerificationEntryId);
@@ -1182,6 +1269,7 @@ async function runRepositoryCase(options: {
 			model,
 			thinking,
 			configuration,
+			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 4,
 		});
@@ -1209,17 +1297,25 @@ async function runRepositoryCase(options: {
 	const finalSource = readFileSync(fixture.sourcePath, "utf8");
 	const finalFiles = relativeWorkspaceFiles(fixture.workspace);
 	const protectedStatus = protectedFilesUnchanged(fixture.workspace, fixture.protectedHashes);
+	const modelTriggered = boundaryEvidence.filter(({ actualReason }) => actualReason === "model").length;
+	const runnerTriggered = boundaryEvidence.filter(({ actualReason }) => actualReason === "manual").length;
+	const newContextCalls = boundaryEvidence.reduce((sum, boundary) => sum + boundary.newContextCalls, 0);
+	const postCutToolCalls = boundaryEvidence.reduce((sum, boundary) => sum + boundary.postCutToolNames.length, 0);
+	const modelTriggerOpportunities = hardCut && options.boundaryTrigger === "model" ? 3 : 0;
+	const probeCalls = toolResultEntries(branch, "benchmark_probe").length;
+	const boundaryProtocol: BoundaryProtocolMetrics = {
+		trigger: options.boundaryTrigger,
+		opportunities: modelTriggerOpportunities,
+		modelTriggered,
+		runnerTriggered,
+		modelTriggerMisses: Math.max(0, modelTriggerOpportunities - modelTriggered),
+		newContextCalls,
+		duplicateNewContextCalls: Math.max(0, newContextCalls - modelTriggered),
+		postCutToolCalls,
+		redundantProbeCalls: Math.max(0, probeCalls - 1),
+	};
 	const checks: RepositoryEvaluationCheck[] = [
 		...evaluateRepositoryFinalResponse(finalResponse, task),
-		check("phase-one-reply", phaseReplies[0] === "PHASE_ONE_READY", `received ${JSON.stringify(phaseReplies[0])}`),
-		check("phase-two-reply", phaseReplies[1] === "DIAGNOSIS_READY", `received ${JSON.stringify(phaseReplies[1])}`),
-		check("phase-three-reply", phaseReplies[2] === "REPAIR_REQUIRED", `received ${JSON.stringify(phaseReplies[2])}`),
-		check(
-			"boundary-replies",
-			boundaryReplies.length === 3 && boundaryReplies.every((reply) => reply.trim().length > 0),
-			`received ${JSON.stringify(boundaryReplies)}`,
-		),
-		check("probe-called-once", toolResultEntries(branch, "benchmark_probe").length === 1, "one probe result exists"),
 		check("probe-excluded-after-boundary", probeExcludedAfterBoundary, "first-window probe left active context"),
 		check("diagnosis-excluded-after-boundary", diagnosisExcludedAfterBoundary, "diagnosis left active context"),
 		check("failure-excluded-after-boundary", failureExcludedAfterBoundary, "hidden failure left active context"),
@@ -1326,6 +1422,36 @@ async function runRepositoryCase(options: {
 			),
 		);
 	}
+	const expectedBoundaryReason = hardCut ? (options.boundaryTrigger === "model" ? "model" : "manual") : "summary";
+	const protocolChecks: RepositoryEvaluationCheck[] = [
+		check("phase-one-reply", phaseReplies[0] === "PHASE_ONE_READY", `received ${JSON.stringify(phaseReplies[0])}`),
+		check("phase-two-reply", phaseReplies[1] === "DIAGNOSIS_READY", `received ${JSON.stringify(phaseReplies[1])}`),
+		check("phase-three-reply", phaseReplies[2] === "REPAIR_REQUIRED", `received ${JSON.stringify(phaseReplies[2])}`),
+		check(
+			"boundary-replies",
+			hardCut && options.boundaryTrigger === "runner"
+				? boundaryReplies.length === 0
+				: boundaryReplies.length === 3 &&
+					boundaryReplies.every((reply, index) => reply === `WINDOW_${index + 1}_READY`),
+			`received ${JSON.stringify(boundaryReplies)}`,
+		),
+		check("probe-called-once", probeCalls === 1, `probe calls=${probeCalls}`),
+		check(
+			"boundary-trigger-adherence",
+			boundaryEvidence.length === 3 && boundaryEvidence.every(({ actualReason }) => actualReason === expectedBoundaryReason),
+			`expected ${expectedBoundaryReason}; received ${boundaryEvidence.map(({ actualReason }) => actualReason).join(", ")}`,
+		),
+		check(
+			"new-context-call-count",
+			newContextCalls === modelTriggerOpportunities,
+			`new_context calls=${newContextCalls}; opportunities=${modelTriggerOpportunities}`,
+		),
+		check(
+			"no-post-cut-tool-actions",
+			postCutToolCalls === 0,
+			`post-cut tools=${boundaryEvidence.flatMap(({ postCutToolNames }) => postCutToolNames).join(", ") || "none"}`,
+		),
+	];
 	const metrics = session
 		? collectMetrics(session, price, startedAt, resumeEvidence.length)
 		: emptyMetrics(startedAt, resumeEvidence.length);
@@ -1340,10 +1466,15 @@ async function runRepositoryCase(options: {
 		group: configuration.group,
 		strategy: configuration.strategy,
 		passed: error === undefined && checks.every(({ passed }) => passed),
+		memoryPassed: error === undefined && checks.every(({ passed }) => passed),
+		protocolPassed: error === undefined && protocolChecks.every(({ passed }) => passed),
 		checks,
+		protocolChecks,
 		metrics,
+		boundaryProtocol,
 		phaseReplies,
 		boundaryReplies,
+		boundaryEvidence,
 		verificationExecutions,
 		resumeEvidence,
 		finalResponse,
@@ -1359,7 +1490,8 @@ async function runRepositoryCase(options: {
 function markdownReport(report: RealRepositoryReport): string {
 	const rows = report.results.map((result) => {
 		const metrics = result.metrics;
-		return `| ${result.repetition} | ${result.group} | ${result.taskId} | ${result.passed ? "PASS" : "FAIL"} | ${metrics.resumes} | ${metrics.hardCuts}/${metrics.summaries} | ${metrics.historyQueries}/${metrics.historyHits} | ${metrics.noteOperations} | ${metrics.snapshotReferences} | ${metrics.providerCalls} | ${metrics.tokens.input} | ${metrics.tokens.output} | $${metrics.estimatedCostUsd.toFixed(6)} | ${metrics.durationMs} |`;
+		const boundary = result.boundaryProtocol;
+		return `| ${result.repetition} | ${result.group} | ${result.taskId} | ${result.memoryPassed ? "PASS" : "FAIL"} | ${result.protocolPassed ? "PASS" : "FAIL"} | ${boundary.modelTriggered}/${boundary.runnerTriggered}/${boundary.modelTriggerMisses} | ${boundary.postCutToolCalls} | ${metrics.resumes} | ${metrics.hardCuts}/${metrics.summaries} | ${metrics.historyQueries}/${metrics.historyHits} | ${metrics.noteOperations} | ${metrics.snapshotReferences} | ${metrics.providerCalls} | ${metrics.tokens.input} | ${metrics.tokens.output} | $${metrics.estimatedCostUsd.toFixed(6)} | ${metrics.durationMs} |`;
 	});
 	return [
 		"# Repeated Real-Repository Multi-Window Evaluation",
@@ -1367,13 +1499,15 @@ function markdownReport(report: RealRepositoryReport): string {
 		`- Task Set: \`${report.taskSetId}\``,
 		`- Model: \`${report.configuration.provider}/${report.configuration.model}\``,
 		`- Thinking: \`${report.configuration.thinking}\``,
+		`- Hard-cut boundary trigger: \`${report.configuration.boundaryTrigger}\``,
 		"- Execution: strictly serial",
-		`- Result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
+		`- Memory result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
+		`- Protocol result: ${report.protocolPassedRuns}/${report.totalRuns} passed`,
 		`- Estimated cost: $${report.estimatedCostUsd.toFixed(6)} / $${report.configuration.maxCostUsd.toFixed(2)}`,
 		`- Pricing: [OpenAI API pricing](${report.configuration.pricingSource})`,
 		"",
-		"| Repeat | Group | Task | Result | Resumes | Hard/Summary | History q/h | Notes | Snapshots | Calls | Input | Output | Cost | ms |",
-		"|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+		"| Repeat | Group | Task | Memory | Protocol | Model/runner/miss | Post-cut tools | Resumes | Hard/Summary | History q/h | Notes | Snapshots | Calls | Input | Output | Cost | ms |",
+		"|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
 		...rows,
 		"",
 	].join("\n");
@@ -1387,7 +1521,7 @@ function writeCheckpoint(
 ): void {
 	writeFileSync(
 		path,
-		`${JSON.stringify({ schemaVersion: 1, taskSetId, serialExecution: true, configuration, results }, null, 2)}\n`,
+		`${JSON.stringify({ schemaVersion: 2, taskSetId, serialExecution: true, configuration, results }, null, 2)}\n`,
 		"utf8",
 	);
 }
@@ -1430,6 +1564,7 @@ async function runRealRepositoryEvaluation(
 		repetitions: options.repetitions,
 		...(options.taskId ? { taskId: options.taskId } : {}),
 		...(options.group ? { group: options.group } : {}),
+		boundaryTrigger: options.boundaryTrigger,
 		pricingPerMillionTokens: price,
 		pricingSource: PRICING_SOURCE,
 	};
@@ -1455,6 +1590,7 @@ async function runRealRepositoryEvaluation(
 					taskSetDirectory: dirname(options.taskSetPath),
 					repetition,
 					configuration: group,
+					boundaryTrigger: options.boundaryTrigger,
 					modelRuntime,
 					model,
 					thinking: options.thinking,
@@ -1467,7 +1603,7 @@ async function runRealRepositoryEvaluation(
 				completedCostUsd += result.metrics.estimatedCostUsd;
 				writeCheckpoint(checkpointPath, configuration, taskSet.id, results);
 				console.log(
-					`[${result.passed ? "PASS" : "FAIL"}] repeat ${repetition} / ${group.group} / ${task.id} / $${result.metrics.estimatedCostUsd.toFixed(6)} / cumulative $${completedCostUsd.toFixed(6)}`,
+					`[memory=${result.memoryPassed ? "PASS" : "FAIL"} protocol=${result.protocolPassed ? "PASS" : "FAIL"}] repeat ${repetition} / ${group.group} / ${task.id} / $${result.metrics.estimatedCostUsd.toFixed(6)} / cumulative $${completedCostUsd.toFixed(6)}`,
 				);
 				if (result.error) {
 					aborted = true;
@@ -1479,8 +1615,9 @@ async function runRealRepositoryEvaluation(
 		if (aborted) break;
 	}
 	const passedRuns = results.filter(({ passed }) => passed).length;
+	const protocolPassedRuns = results.filter(({ protocolPassed }) => protocolPassed).length;
 	const report: RealRepositoryReport = {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		taskSetId: taskSet.id,
 		deterministicGrading: true,
 		serialExecution: true,
@@ -1489,6 +1626,7 @@ async function runRealRepositoryEvaluation(
 		aborted,
 		configuration,
 		passedRuns,
+		protocolPassedRuns,
 		totalRuns: results.length,
 		plannedRuns: options.repetitions * tasks.length * groups.length,
 		estimatedCostUsd: completedCostUsd,

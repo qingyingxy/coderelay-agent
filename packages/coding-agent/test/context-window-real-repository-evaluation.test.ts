@@ -25,6 +25,7 @@ describe("repeated real-repository context-window evaluation", () => {
 			thinking: "medium",
 			maxCostUsd: 3,
 			repetitions: 1,
+			boundaryTrigger: "runner",
 		});
 		expect(
 			parseRealRepositoryCliOptions([
@@ -36,10 +37,19 @@ describe("repeated real-repository context-window evaluation", () => {
 				"quixbugs-lis",
 				"--group",
 				"C",
+				"--boundary-trigger",
+				"model",
 			]),
-		).toMatchObject({ thinking: "xhigh", repetitions: 3, taskId: "quixbugs-lis", group: "C" });
+		).toMatchObject({
+			thinking: "xhigh",
+			repetitions: 3,
+			taskId: "quixbugs-lis",
+			group: "C",
+			boundaryTrigger: "model",
+		});
 		expect(() => parseRealRepositoryCliOptions(["--repetitions", "1.5"])).toThrow("positive integer");
 		expect(() => parseRealRepositoryCliOptions(["--group", "B"])).toThrow("A or C");
+		expect(() => parseRealRepositoryCliOptions(["--boundary-trigger", "automatic"])).toThrow("runner or model");
 	});
 
 	it("rejects ambiguous identifiers and unsafe fixture paths", () => {

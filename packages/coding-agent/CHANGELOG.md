@@ -25,6 +25,7 @@
 ### Changed
 
 - Changed automatic hard and high-risk workflows to use a strong read-only Planner that decomposes bounded Worker Tasks before balanced implementation and review.
+- Changed windowed hard cuts requested after a settled Direct Workflow to retain its authoritative Snapshot, enabling deterministic controller boundaries without relying on a model `new_context` call.
 
 ### Fixed
 

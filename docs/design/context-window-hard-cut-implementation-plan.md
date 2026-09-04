@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：CW.0-CW.17.7 已完成，CW.18 待决策
+> 状态：CW.0-CW.17.8 已完成，CW.18 待决策
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -729,7 +729,8 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17.5 | `DONE` | 硬切事务边界的 OS 子进程异常退出恢复评测 | `evals/`、测试、报告 | CW.17.4 |
 | CW.17.6 | `DONE` | JSONL 残缺尾行恢复与续写评测 | `session-manager.ts`、`evals/`、测试、报告 | CW.17.5 |
 | CW.17.7 | `DONE` | 多真实仓库、三窗口、三次重复编码评测 | `evals/`、测试、报告 | CW.17.6 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.7 |
+| CW.17.8 | `DONE` | 拆分记忆正确性与模型主动切窗协议评测 | `agent-session.ts`、`evals/`、测试、报告 | CW.17.7 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.8 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -954,6 +955,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 资源：原始矩阵 `$2.716856`；两次修正后 LIS/C 复测分别为因漏调第二次 `new_context` 中止和严格通过，成本 `$0.088958`/`$0.159868`；全部付费运行合计 `$2.965683`，低于 `$3.00` 上限。
 - 验证：Task Set 离线校验 3/3、两个专项 Vitest 11/11、修正后 LIS/C 严格复测 1/1 和 `npm run check` 退出码 0；Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
 - 结论：硬切组 18-run 的功能完成率与摘要组一致，但 input 增加 28.0%、成本增加 5.1%，严格边界稳定性未达门槛。CW.18 应保持 `summary` 默认，`windowed/hybrid` 继续 opt-in，直到修正后的重复矩阵通过。
+
+### CW.17.8 实施记录
+
+- 指标拆分：真实仓库 runner 将 `memoryPassed` 与 `protocolPassed` 分开；前者覆盖代码修复、精确长期值、Snapshot/Notes/History、active history 排除、lineage 和 resume，后者独立统计阶段回复、模型主动切窗漏调、重复 `new_context`、runner fallback 和切窗后工具动作。
+- 确定性边界：主 C 组默认在每个阶段完整结束后由 runner 调用硬切，不向模型暴露 `new_context`。`windowed` 模式可为这种阶段后切窗复用最近已结算 Direct Workflow 生成 Snapshot；branch/rollback 时清除此引用，`hybrid` 仍只在 Workflow 活动时走硬切。
+- 主结果：三个 QuixBugs 任务、三次重复、9 个 C run 严格串行；记忆 9/9、协议 9/9，27/27 hard cut、Snapshot 和磁盘 resume，27 Notes，History 50/193，0 次冗余 probe 和 0 次切窗后工具动作，成本 `$1.163262`。
+- 对比：复用 CW.17.7 A 组 9-run 基线时，新 C 相对 A input `+4.8%`、output `-49.0%`、成本 `-12.2%`、耗时 `-22.1%`；由于旧 A 仍包含人工边界回复采样，该效率差异只能作方向性证据，默认切换前必须使用同版 runner 重跑 A/C。
+- 主动触发：独立 model-trigger smoke 的 3 个机会中模型触发 2 次、漏调 1 次，runner 成功补切；无重复 `new_context` 和切窗后工具动作。最后一次 Provider 调用使成本越过 `$0.25` 到 `$0.261733`，随后预算检查停止最终评分，因此不把该 run 计作记忆失败。
+- 验证与成本：runner smoke `$0.141360`，主矩阵 `$1.163262`，model-trigger smoke `$0.261733`，CW.17.8 合计 `$1.566355`；Task Set 3/3、专项 Vitest 13/13、`npm run check` 退出码 0。
+- 结论：确定性控制器边界下的硬切记忆链路已稳定通过当前任务集，但仓库规模、任务长度和同版 A/C 成本对比仍不足；CW.18 保持全局 `summary`，`windowed/hybrid` 继续 opt-in。
 
 ## 16. 测试计划
 

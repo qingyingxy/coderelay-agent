@@ -88,6 +88,33 @@ describe("AgentSession new context triggers", () => {
 		expect(lastMessage ? getMessageText(lastMessage) : "").toContain("Started a fresh context window");
 	});
 
+	it("checkpoints the latest settled Direct Workflow for a runner-requested windowed cut", async () => {
+		const harness = await createHarness({ settings: { contextManagement: { mode: "windowed" } } });
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct");
+		harness.setResponses([fauxAssistantMessage("tracked phase complete")]);
+
+		await harness.session.prompt("complete the tracked phase before the runner boundary");
+		const settledAssistant = harness.sessionManager
+			.getBranch()
+			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
+		if (!settledAssistant) throw new Error("Expected a settled Direct Workflow Assistant entry");
+		const boundary = await harness.session.requestContextWindow("manual");
+
+		expect(boundary).toMatchObject({ reason: "manual", windowIndex: 1 });
+		expect(boundary?.snapshotEntryId).toBeDefined();
+		expect(boundary?.workflowId).toBeDefined();
+		expect(boundary?.contextSeed.workflowSnapshotSequence).toBeDefined();
+		expect(boundary?.contextSeed.content).toContain("complete the tracked phase before the runner boundary");
+
+		await harness.session.navigateTree(settledAssistant.id);
+		const rolledBackBoundary = await harness.session.requestContextWindow("manual");
+
+		expect(rolledBackBoundary?.snapshotEntryId).toBeUndefined();
+		expect(rolledBackBoundary?.workflowId).toBeUndefined();
+		expect(rolledBackBoundary?.contextSeed.workflowSnapshotSequence).toBeUndefined();
+	});
+
 	it("shows usage for /new-context arguments without cutting", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
