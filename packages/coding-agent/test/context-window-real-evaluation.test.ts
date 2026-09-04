@@ -3,6 +3,7 @@ import {
 	calculateEstimatedCost,
 	evaluateExpectedOutput,
 	extractJsonObject,
+	parseCliOptions,
 	parseRealTaskSet,
 	type RealContextWindowTask,
 } from "../evals/context-window/evaluate-real.ts";
@@ -18,6 +19,13 @@ const TASK: RealContextWindowTask = {
 };
 
 describe("real context-window evaluation", () => {
+	it("parses an explicit positive repetition count", () => {
+		expect(parseCliOptions([]).repetitions).toBe(1);
+		expect(parseCliOptions(["--repetitions", "3"]).repetitions).toBe(3);
+		expect(() => parseCliOptions(["--repetitions", "0"])).toThrow("requires a positive number");
+		expect(() => parseCliOptions(["--repetitions", "1.5"])).toThrow("requires a positive integer");
+	});
+
 	it("calculates official cost without double-counting reasoning tokens", () => {
 		expect(
 			calculateEstimatedCost(

@@ -29,6 +29,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TASK_SET_PATH = join(SCRIPT_DIR, "real-task-set.json");
 const DEFAULT_MAX_COST_USD = 8;
 const DEFAULT_MAX_OUTPUT_TOKENS = 3_000;
+const DEFAULT_REPETITIONS = 1;
 const EVALUATION_CONTEXT_WINDOW = 272_000;
 const PRICING_SOURCE = "https://developers.openai.com/api/docs/pricing";
 
@@ -99,7 +100,7 @@ interface GroupConfiguration {
 	readonly workflow: boolean;
 }
 
-interface CliOptions {
+export interface CliOptions {
 	readonly provider?: string;
 	readonly model?: string;
 	readonly thinking: AllowedThinkingLevel;
@@ -107,6 +108,7 @@ interface CliOptions {
 	readonly outputDirectory: string;
 	readonly maxCostUsd: number;
 	readonly maxOutputTokens: number;
+	readonly repetitions: number;
 	readonly verifyTaskSet: boolean;
 }
 
@@ -127,6 +129,7 @@ interface RunMetrics {
 interface RealEvaluationRunResult {
 	readonly taskId: string;
 	readonly group: EvaluationGroup;
+	readonly repetition: number;
 	readonly strategy: string;
 	readonly passed: boolean;
 	readonly checks: readonly EvaluationCheck[];
@@ -153,6 +156,7 @@ interface RealEvaluationReport {
 		readonly contextWindow: number;
 		readonly maxOutputTokens: number;
 		readonly maxCostUsd: number;
+		readonly repetitions: number;
 		readonly pricingPerMillionTokens: ModelPrice;
 		readonly pricingSource: string;
 	};
@@ -252,7 +256,7 @@ function defaultOutputDirectory(): string {
 	return resolve(".artifacts", `context-window-real-${suffix}`);
 }
 
-function parseCliOptions(args: readonly string[]): CliOptions {
+export function parseCliOptions(args: readonly string[]): CliOptions {
 	let provider: string | undefined;
 	let model: string | undefined;
 	let thinking: AllowedThinkingLevel = "medium";
@@ -260,6 +264,7 @@ function parseCliOptions(args: readonly string[]): CliOptions {
 	let outputDirectory = defaultOutputDirectory();
 	let maxCostUsd = DEFAULT_MAX_COST_USD;
 	let maxOutputTokens = DEFAULT_MAX_OUTPUT_TOKENS;
+	let repetitions = DEFAULT_REPETITIONS;
 	let verifyTaskSet = false;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
@@ -297,11 +302,27 @@ function parseCliOptions(args: readonly string[]): CliOptions {
 				maxOutputTokens = parsed;
 				break;
 			}
+			case "--repetitions": {
+				const parsed = parsePositiveNumber(value, argument);
+				if (!Number.isSafeInteger(parsed)) throw new Error(`${argument} requires a positive integer`);
+				repetitions = parsed;
+				break;
+			}
 			default:
 				throw new Error(`Unknown option: ${argument}`);
 		}
 	}
-	return { provider, model, thinking, taskSetPath, outputDirectory, maxCostUsd, maxOutputTokens, verifyTaskSet };
+	return {
+		provider,
+		model,
+		thinking,
+		taskSetPath,
+		outputDirectory,
+		maxCostUsd,
+		maxOutputTokens,
+		repetitions,
+		verifyTaskSet,
+	};
 }
 
 export function calculateEstimatedCost(tokens: EvaluationTokens, price: ModelPrice): number {
@@ -606,6 +627,7 @@ function strategyChecks(
 async function runCase(options: {
 	readonly task: RealContextWindowTask;
 	readonly configuration: GroupConfiguration;
+	readonly repetition: number;
 	readonly modelRuntime: ModelRuntime;
 	readonly model: Model<Api>;
 	readonly thinking: ThinkingLevel;
@@ -614,9 +636,13 @@ async function runCase(options: {
 	readonly completedCostUsd: number;
 	readonly maxCostUsd: number;
 }): Promise<RealEvaluationRunResult> {
-	const { task, configuration, modelRuntime, model, thinking, price, completedCostUsd, maxCostUsd } = options;
+	const { task, configuration, repetition, modelRuntime, model, thinking, price, completedCostUsd, maxCostUsd } = options;
 	const startedAt = Date.now();
-	const runDirectory = join(options.outputDirectory, `${task.id}-${configuration.group}`);
+	const runDirectory = join(
+		options.outputDirectory,
+		`repeat-${repetition.toString().padStart(2, "0")}`,
+		`${task.id}-${configuration.group}`,
+	);
 	const workspace = join(runDirectory, "workspace");
 	const sessions = join(runDirectory, "sessions");
 	mkdirSync(workspace, { recursive: true });
@@ -709,6 +735,7 @@ async function runCase(options: {
 	const result: RealEvaluationRunResult = {
 		taskId: task.id,
 		group: configuration.group,
+		repetition,
 		strategy: configuration.strategy,
 		passed: error === undefined && checks.every(({ passed }) => passed),
 		checks,
@@ -728,7 +755,7 @@ async function runCase(options: {
 function markdownReport(report: RealEvaluationReport): string {
 	const rows = report.results.map((result) => {
 		const metrics = result.metrics;
-		return `| ${result.group} | ${result.taskId} | ${result.passed ? "PASS" : "FAIL"} | ${metrics.providerCalls} | ${metrics.tokens.input} | ${metrics.tokens.output} | ${metrics.tokens.reasoning} | ${metrics.tokens.cacheRead} | ${metrics.historyQueries}/${metrics.historyHits} | ${metrics.noteOperations} | ${metrics.snapshotReferences} | $${metrics.estimatedCostUsd.toFixed(6)} | ${metrics.durationMs} |`;
+		return `| ${result.repetition} | ${result.group} | ${result.taskId} | ${result.passed ? "PASS" : "FAIL"} | ${metrics.providerCalls} | ${metrics.tokens.input} | ${metrics.tokens.output} | ${metrics.tokens.reasoning} | ${metrics.tokens.cacheRead} | ${metrics.historyQueries}/${metrics.historyHits} | ${metrics.noteOperations} | ${metrics.snapshotReferences} | $${metrics.estimatedCostUsd.toFixed(6)} | ${metrics.durationMs} |`;
 	});
 	return [
 		"# Real Context Window Evaluation",
@@ -736,13 +763,14 @@ function markdownReport(report: RealEvaluationReport): string {
 		`- Task Set: \`${report.taskSetId}\``,
 		`- Model: \`${report.configuration.provider}/${report.configuration.model}\``,
 		`- Thinking: \`${report.configuration.thinking}\``,
+		`- Repetitions: ${report.configuration.repetitions}`,
 		`- Execution: serial`,
 		`- Result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
 		`- Estimated cost: $${report.estimatedCostUsd.toFixed(6)} / $${report.configuration.maxCostUsd.toFixed(2)}`,
 		`- Pricing: [OpenAI API pricing](${report.configuration.pricingSource})`,
 		"",
-		"| Group | Task | Result | Calls | Input | Output | Reasoning | Cache read | History q/h | Notes | Snapshots | Cost | ms |",
-		"|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+		"| Repeat | Group | Task | Result | Calls | Input | Output | Reasoning | Cache read | History q/h | Notes | Snapshots | Cost | ms |",
+		"|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
 		...rows,
 		"",
 	].join("\n");
@@ -788,6 +816,7 @@ async function runRealEvaluation(options: CliOptions, taskSet: RealContextWindow
 		contextWindow: model.contextWindow,
 		maxOutputTokens: model.maxTokens,
 		maxCostUsd: options.maxCostUsd,
+		repetitions: options.repetitions,
 		pricingPerMillionTokens: price,
 		pricingSource: PRICING_SOURCE,
 	};
@@ -800,34 +829,38 @@ async function runRealEvaluation(options: CliOptions, taskSet: RealContextWindow
 	let completedCostUsd = 0;
 	let aborted = false;
 	const checkpointPath = join(options.outputDirectory, "checkpoint.json");
-	for (const task of taskSet.tasks) {
-		for (const group of GROUP_CONFIGURATIONS) {
-			if (completedCostUsd >= options.maxCostUsd) {
-				aborted = true;
-				break;
+	for (let repetition = 1; repetition <= options.repetitions; repetition++) {
+		for (const task of taskSet.tasks) {
+			for (const group of GROUP_CONFIGURATIONS) {
+				if (completedCostUsd >= options.maxCostUsd) {
+					aborted = true;
+					break;
+				}
+				console.log(`[RUN] repeat ${repetition}/${options.repetitions} / ${group.group} / ${task.id} / serial`);
+				const result = await runCase({
+					task,
+					configuration: group,
+					repetition,
+					modelRuntime,
+					model,
+					thinking: options.thinking,
+					price,
+					outputDirectory: options.outputDirectory,
+					completedCostUsd,
+					maxCostUsd: options.maxCostUsd,
+				});
+				results.push(result);
+				completedCostUsd += result.metrics.estimatedCostUsd;
+				writeCheckpoint(checkpointPath, configuration, taskSet.id, results);
+				console.log(
+					`[${result.passed ? "PASS" : "FAIL"}] repeat ${repetition}/${options.repetitions} / ${group.group} / ${task.id} / $${result.metrics.estimatedCostUsd.toFixed(6)} / cumulative $${completedCostUsd.toFixed(6)}`,
+				);
+				if (result.error) {
+					aborted = true;
+					break;
+				}
 			}
-			console.log(`[RUN] ${group.group} / ${task.id} / serial`);
-			const result = await runCase({
-				task,
-				configuration: group,
-				modelRuntime,
-				model,
-				thinking: options.thinking,
-				price,
-				outputDirectory: options.outputDirectory,
-				completedCostUsd,
-				maxCostUsd: options.maxCostUsd,
-			});
-			results.push(result);
-			completedCostUsd += result.metrics.estimatedCostUsd;
-			writeCheckpoint(checkpointPath, configuration, taskSet.id, results);
-			console.log(
-				`[${result.passed ? "PASS" : "FAIL"}] ${group.group} / ${task.id} / $${result.metrics.estimatedCostUsd.toFixed(6)} / cumulative $${completedCostUsd.toFixed(6)}`,
-			);
-			if (result.error) {
-				aborted = true;
-				break;
-			}
+			if (aborted) break;
 		}
 		if (aborted) break;
 	}
@@ -843,7 +876,7 @@ async function runRealEvaluation(options: CliOptions, taskSet: RealContextWindow
 		configuration,
 		passedRuns,
 		totalRuns: results.length,
-		plannedRuns: taskSet.tasks.length * GROUPS.length,
+		plannedRuns: taskSet.tasks.length * GROUPS.length * options.repetitions,
 		estimatedCostUsd: completedCostUsd,
 		results,
 	};
@@ -857,7 +890,19 @@ if (isMain) {
 	const options = parseCliOptions(process.argv.slice(2));
 	const taskSet = parseRealTaskSet(JSON.parse(readFileSync(options.taskSetPath, "utf8")));
 	if (options.verifyTaskSet) {
-		console.log(JSON.stringify({ valid: true, id: taskSet.id, tasks: taskSet.tasks.length, plannedRuns: taskSet.tasks.length * GROUPS.length }, null, 2));
+		console.log(
+			JSON.stringify(
+				{
+					valid: true,
+					id: taskSet.id,
+					tasks: taskSet.tasks.length,
+					repetitions: options.repetitions,
+					plannedRuns: taskSet.tasks.length * GROUPS.length * options.repetitions,
+				},
+				null,
+				2,
+			),
+		);
 	} else {
 		const report = await runRealEvaluation(options, taskSet);
 		console.log(`Report: ${join(options.outputDirectory, "report.md")}`);

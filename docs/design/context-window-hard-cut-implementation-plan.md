@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.1 已完成
+> 状态：实施中，CW.0-CW.17.2 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -721,7 +721,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.16 | `DONE` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
 | CW.17 | `DONE` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
 | CW.17.1 | `DONE` | 强化内部/外部 ID 命名空间 | Snapshot 投影、真实评测协议 | CW.17 |
-| CW.17.2 | `TODO` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
+| CW.17.2 | `DONE` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.2 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
@@ -890,6 +890,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 评测 Prompt 明确区分 `case_id`、`domain_task_id`、`record_id` 和 Workflow 内部 ID；解析器拒绝缺失或不匹配的 `case_id`。
 - 验证：投影与真实 runner 专项 Vitest 9/9 通过；v2 Task Set 校验通过；`npm run check` 退出码 0。Biome 仍对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
 - 默认模式继续保持 `summary`；下一步 CW.17.2 使用相同模型与 effort 做三次重复的 24-run 串行矩阵，旧 CW.17 结果不改写。
+
+### CW.17.2 实施记录
+
+- 实际文件：真实评测 runner、专项测试、评测 README、`cw17.2-report.md` 和本计划；runner 新增正整数 `--repetitions`，每条结果记录 repetition，并用独立 `repeat-NN` 目录保存 Artifact。
+- 固定配置：`qingyingxy/gpt-5.6-terra`、`medium` effort、3 次重复、24 个 run、严格串行、Provider 重试关闭、总估算成本上限 `$2.00`。
+- 结果：24/24 严格输出通过，三轮各 8/8；`case_id` 24/24 正确，冲突样本的 `domain_task_id` 12/12 正确，未再出现 record ID 或 Workflow 内部 Task ID 替换外部标识。
+- 机制：18/18 硬切 run 的 Notes、History 查询和命中通过；12/12 Workflow run 引用了边界 Snapshot；24/24 保留完整 Session JSONL 并从边界后的 active history 排除旧工具结果。
+- 资源：总计 475966 input、11272 output、3836 reasoning、863744 cache-read tokens，140 次 Provider 调用，估算成本 `$1.259945`。B/C/D 相对 A 的平均 input 分别下降 21.4%/11.3%/7.9%，平均成本下降 15.7%/7.7%/5.4%，平均耗时增加 9.9%/17.8%/12.6%。
+- 验证：runner 专项 Vitest 5/5 通过，v2 Task Set 的 3-repeat 计划校验为 24 runs；`npm run check` 退出码 0。Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
+- 结论：ID 命名空间修正已通过当前控制集，但两个合成任务不足以决定全局或 Workflow 默认值；CW.18 前应补充多窗口编码、resume/fork/rollback、Attempt repair、overflow 和分支隔离评测，默认继续保持 `summary`。
 
 ## 16. 测试计划
 
