@@ -30,6 +30,7 @@
 
 - Fixed explanatory `review:passed` verdicts being rejected and needlessly escalating a successful Reviewer to the strong tier.
 - Fixed resumed sessions losing subsequent entries when an existing Session JSONL ended with an incomplete record or lacked a trailing newline.
+- Fixed long Workflow objectives losing trailing continuation instructions in hard-window Snapshot projections.
 
 ## [0.82.1] - 2026-07-25
 

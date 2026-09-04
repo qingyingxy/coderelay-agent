@@ -53,6 +53,32 @@ npm run eval:context-window:tail-recovery
 
 The 3/3 result and the recovered append defect found by this evaluation are documented in [cw17.6-report.md](./cw17.6-report.md).
 
+## Repeated real-repository evaluation
+
+The real-repository runner compares summary with Workflow-backed hard cuts on three versioned QuixBugs Python defects: LIS, RPN evaluation, and prime sieve. Every run crosses three controlled boundaries and recreates the AgentSession from the same Session JSONL three times. The final window must recover an exact hidden verifier failure and an immutable token first observed three windows earlier. The hard-cut group uses three Notes, three Snapshot-backed windows, and must complete two exact History searches; additional proactive History queries are allowed. The summary baseline receives equivalent compaction instructions.
+
+Validate all pinned repository digests, failing baselines, hidden-failure transitions, and reference repairs without network access:
+
+```bash
+npm run eval:context-window:real-repository -- --verify-task-set
+```
+
+Run a paid A/C smoke on one task before the full matrix:
+
+```bash
+npm run eval:context-window:real-repository -- --provider qingyingxy --model gpt-5.6-terra --thinking medium --task quixbugs-lis --repetitions 1 --max-cost 0.75 --output .artifacts/context-window-real-repository-smoke
+```
+
+Run the complete 3-task, 2-group, 3-repeat matrix strictly serially:
+
+```bash
+npm run eval:context-window:real-repository -- --provider qingyingxy --model gpt-5.6-terra --thinking medium --repetitions 3 --max-cost 3 --output .artifacts/context-window-real-repository-v1
+```
+
+The runner copies a fresh digest-checked repository for every run, permits one source file to change, protects every other file by hash and inventory, disables Provider retries, checkpoints after every run, applies official OpenAI short-context pricing, and stops after an execution error or cost-cap breach. This command makes paid API requests.
+
+The 18-run matrix, objective-projection defect, fix, and post-fix evidence are documented in [cw17.7-report.md](./cw17.7-report.md).
+
 ## Serial real-model coding evaluation
 
 The coding runner compares the summary baseline with the Workflow-backed hard-cut strategy on a real file-edit task. Each run crosses two controlled boundaries, destroys and recreates the AgentSession from the same Session JSONL twice, exposes one hidden verification failure, and requires a final repair plus an independent verifier run. The hard-cut group must use Notes for durable constraints and History for the exact pre-boundary failure.

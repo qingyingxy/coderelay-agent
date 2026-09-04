@@ -173,6 +173,22 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projectWorkflowSnapshot(second)).toEqual(projectWorkflowSnapshot(first));
 	});
 
+	it("retains the start and continuation instruction of a long objective", () => {
+		const base = createSnapshot();
+		const objective = `Controlled boundary 1. ${"archive-padding ".repeat(80)}After the context switch, reply exactly WINDOW_1_READY.`;
+		const projection = projectWorkflowSnapshot({
+			...base,
+			workflow: {
+				...base.workflow,
+				request: { ...base.workflow.request, text: objective },
+			},
+		});
+
+		expect(projection.content).toContain("Current objective: Controlled boundary 1.");
+		expect(projection.content).toContain("After the context switch, reply exactly WINDOW_1_READY.");
+		expect(projection.content).not.toContain(objective);
+	});
+
 	it("truncates optional details while retaining authority and retrieval guidance", () => {
 		const base = createSnapshot();
 		const tasks = Array.from(

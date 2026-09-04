@@ -1,0 +1,78 @@
+{
+	"schemaVersion": 1,
+	"id": "context-window-real-repository-v1",
+	"tasks": [
+		{
+			"id": "quixbugs-lis",
+			"title": "Repair longest increasing subsequence",
+			"description": "Repair the defective QuixBugs LIS implementation while preserving its public function and documentation.",
+			"durableFacts": [
+				"Only python_programs/lis.py may be edited.",
+				"Preserve the lis(arr) public function and its documentation.",
+				"The official test vectors and verifier are protected."
+			],
+			"repositoryFixture": "fixtures/quixbugs-lis",
+			"repositoryBaseline": "sha256:206f1080b39bd8083f6edffd26416cc119cf53916ae03379b621141e14e3b72d",
+			"editablePath": "python_programs/lis.py",
+			"referenceSource": "references/quixbugs-lis.py",
+			"probe": {
+				"probeId": "quixbugs-lis-continuity-ledger",
+				"memoryToken": "ledger-lis-7f31",
+				"repairMarker": "cw-lis-4b27"
+			},
+			"expectedFinal": {
+				"case_id": "quixbugs-lis",
+				"status": "passed",
+				"memory_token": "ledger-lis-7f31"
+			}
+		},
+		{
+			"id": "quixbugs-rpn-eval",
+			"title": "Repair reverse Polish notation evaluation",
+			"description": "Repair the defective QuixBugs RPN evaluator while preserving its public function and documentation.",
+			"durableFacts": [
+				"Only python_programs/rpn_eval.py may be edited.",
+				"Preserve the rpn_eval(tokens) public function and its documentation.",
+				"The official test vectors and verifier are protected."
+			],
+			"repositoryFixture": "fixtures/quixbugs-rpn-eval",
+			"repositoryBaseline": "sha256:a6d6fae2c55233bde03ed37fb5735ba3efb2eb316d755f331dfc207d7c6a2c83",
+			"editablePath": "python_programs/rpn_eval.py",
+			"referenceSource": "references/quixbugs-rpn-eval.py",
+			"probe": {
+				"probeId": "quixbugs-rpn-continuity-ledger",
+				"memoryToken": "ledger-rpn-2d84",
+				"repairMarker": "cw-rpn-8a19"
+			},
+			"expectedFinal": {
+				"case_id": "quixbugs-rpn-eval",
+				"status": "passed",
+				"memory_token": "ledger-rpn-2d84"
+			}
+		},
+		{
+			"id": "quixbugs-sieve",
+			"title": "Repair prime sieve",
+			"description": "Repair the defective QuixBugs prime sieve while preserving its public function and documentation.",
+			"durableFacts": [
+				"Only python_programs/sieve.py may be edited.",
+				"Preserve the sieve(max) public function and its documentation.",
+				"The official test vectors and verifier are protected."
+			],
+			"repositoryFixture": "fixtures/quixbugs-sieve",
+			"repositoryBaseline": "sha256:a360d05281eafe0a4f9b6ae60d5d6e8873bdbf6a4b56688a64b569cc2a402e7e",
+			"editablePath": "python_programs/sieve.py",
+			"referenceSource": "references/quixbugs-sieve.py",
+			"probe": {
+				"probeId": "quixbugs-sieve-continuity-ledger",
+				"memoryToken": "ledger-sieve-5c62",
+				"repairMarker": "cw-sieve-1e93"
+			},
+			"expectedFinal": {
+				"case_id": "quixbugs-sieve",
+				"status": "passed",
+				"memory_token": "ledger-sieve-5c62"
+			}
+		}
+	]
+}

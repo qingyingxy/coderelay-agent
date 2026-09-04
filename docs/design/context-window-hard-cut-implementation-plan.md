@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.6 已完成
+> 状态：CW.0-CW.17.7 已完成，CW.18 待决策
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -728,7 +728,8 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17.4 | `DONE` | 真实多窗口编码与磁盘级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
 | CW.17.5 | `DONE` | 硬切事务边界的 OS 子进程异常退出恢复评测 | `evals/`、测试、报告 | CW.17.4 |
 | CW.17.6 | `DONE` | JSONL 残缺尾行恢复与续写评测 | `session-manager.ts`、`evals/`、测试、报告 | CW.17.5 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.6 |
+| CW.17.7 | `DONE` | 多真实仓库、三窗口、三次重复编码评测 | `evals/`、测试、报告 | CW.17.6 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.7 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -943,6 +944,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 结果：低层回归 2/2，高层场景 3/3。Snapshot 残行恢复旧窗口且 Snapshot 数为 0；ContextWindowEntry 残行保留完整 Snapshot 但恢复旧窗口；新窗口首条 Assistant 残行保留完整边界并恢复 index 1 新窗口。三者 History 均命中，续答经第二次 reopen 仍存在，且不会补造或重复 commit。
 - 验证：两个专项 Vitest、独立 runner 和 `npm run check`；Faux Provider、严格串行、无网络和付费 token。
 - 范围：只处理文件末尾残缺记录或完整记录缺少最终换行，不宣称恢复文件中部损坏、已完整记录被覆盖、存储重排或并发 writer。默认继续保持 `summary`；下一步扩大真实仓库与重复编码样本，再进入 CW.18。
+
+### CW.17.7 实施记录
+
+- 实际文件：`evals/context-window/evaluate-real-repository.ts`、三个固定 QuixBugs 仓库、离线参考修复、版本化 Task Set、专项测试、`cw17.7-report.md`、Workflow Snapshot 投影回归和本计划；根目录增加 `eval:context-window:real-repository` 命令。
+- 协议：A=`summary`，C=`windowed + Workflow Snapshot + Notes + History`；三个任务、三次重复、18 个 run；每个 run 包含三次上下文边界、三次同一 Session JSONL 的磁盘级 AgentSession 重建、真实缺陷修复、精确隐藏 repair 和独立 verifier。
+- 原始结果：A 严格 9/9，C 严格 3/9，但两组功能修复和长期信息恢复均为 9/9。C 的六个严格失败都只多调用了一次只读 probe；没有代码、验证、记忆、lineage、resume 或旧消息排除失败。
+- 缺陷与修正：Workflow Snapshot 的长 `Current objective` 原为头部 256-byte 截断，丢失提示尾部的切窗后继续动作。投影改为保留首尾、中间显式截断；专项回归固定验证任务身份和尾部继续指令同时存在。
+- 资源：原始矩阵 `$2.716856`；两次修正后 LIS/C 复测分别为因漏调第二次 `new_context` 中止和严格通过，成本 `$0.088958`/`$0.159868`；全部付费运行合计 `$2.965683`，低于 `$3.00` 上限。
+- 验证：Task Set 离线校验 3/3、两个专项 Vitest 11/11、修正后 LIS/C 严格复测 1/1 和 `npm run check` 退出码 0；Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
+- 结论：硬切组 18-run 的功能完成率与摘要组一致，但 input 增加 28.0%、成本增加 5.1%，严格边界稳定性未达门槛。CW.18 应保持 `summary` 默认，`windowed/hybrid` 继续 opt-in，直到修正后的重复矩阵通过。
 
 ## 16. 测试计划
 

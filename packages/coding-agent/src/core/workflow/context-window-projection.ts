@@ -41,6 +41,26 @@ function truncateField(value: string, maxBytes = 256): string {
 	return result + suffix;
 }
 
+function truncateObjective(value: string, maxBytes = 256): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (Buffer.byteLength(normalized, "utf8") <= maxBytes) return normalized;
+	const separator = " ... ";
+	const availableBytes = maxBytes - Buffer.byteLength(separator, "utf8");
+	const headBytes = Math.floor(availableBytes / 3);
+	const tailBytes = availableBytes - headBytes;
+	let head = "";
+	for (const character of normalized) {
+		if (Buffer.byteLength(head + character, "utf8") > headBytes) break;
+		head += character;
+	}
+	let tail = "";
+	for (const character of [...normalized].reverse()) {
+		if (Buffer.byteLength(character + tail, "utf8") > tailBytes) break;
+		tail = character + tail;
+	}
+	return head + separator + tail;
+}
+
 function formatBudget(budget: BudgetLimit): string {
 	const fields: string[] = [];
 	for (const [name, value] of [
@@ -184,7 +204,7 @@ export function projectWorkflowSnapshot(
 			content: `Workflow: workflow_id=${workflow.id} mode=${mode} status=${workflow.status} sequence=${snapshot.lastSequence}`,
 			required: true,
 		},
-		{ content: `Current objective: ${truncateField(workflow.request.text)}`, required: true },
+		{ content: `Current objective: ${truncateObjective(workflow.request.text)}`, required: true },
 		{ content: `Stop/block reason: ${truncateField(stopReason)}`, required: true },
 		{
 			content: plan
