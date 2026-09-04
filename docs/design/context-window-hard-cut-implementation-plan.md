@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.5 已完成
+> 状态：实施中，CW.0-CW.6 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -708,7 +708,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.3 | `DONE` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
 | CW.4 | `DONE` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
 | CW.5 | `DONE` | 为 Plan 暴露 checkpoint 引用 | `workflow/plan-runtime.ts` | CW.4 |
-| CW.6 | `TODO` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
+| CW.6 | `DONE` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
 | CW.7 | `TODO` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
 | CW.8 | `TODO` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
 | CW.9 | `TODO` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
@@ -771,6 +771,14 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 统一端口：新增 `WorkflowContextProvider` 和 `WorkflowContextCheckpoint`，返回 `workflowId/snapshotEntryId/snapshot`。
 - Plan 行为：`checkpointForContextWindow()` 创建当前权威 Snapshot，先追加 Session Entry，再返回精确引用；原有 checkpoint 调用继续忽略返回值。
 - 验证：Plan checkpoint 专项 Vitest 2 项测试通过；`npm run check` 通过。
+- 偏差：无。
+
+### CW.6 实施记录
+
+- 实际文件：`workflow/agent-session-adapter.ts`、Direct checkpoint 专项测试。
+- Direct 行为：`AgentSessionAdapter` 实现统一 `WorkflowContextProvider`；每次切窗 checkpoint 从当前 Controller 创建最新 Snapshot，先写入 Session，再返回精确 Entry 引用。
+- 失败边界：Snapshot 追加失败时同步抛错，不返回不可恢复的 checkpoint，旧 active history 可由后续切窗事务保持不变。
+- 验证：Direct checkpoint 专项 Vitest 2 项测试通过；`npm run check` 通过。
 - 偏差：无。
 
 ## 16. 测试计划

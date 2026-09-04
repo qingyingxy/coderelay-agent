@@ -6,10 +6,11 @@ import type { AgentSessionEvent, AgentSessionEventListener } from "../agent-sess
 import type { SessionManager } from "../session-manager.ts";
 import type { DelegationBindingHandle } from "../subagents/subagent-tools.ts";
 import type { AgentRunResult } from "../subagents/types.ts";
+import type { WorkflowContextCheckpoint, WorkflowContextProvider } from "./context-window-projection.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
 import type { UpgradeDirectToPlanDecision } from "./direct-plan-upgrade.ts";
-import { SessionWorkflowEventLog } from "./event-log.ts";
+import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
 import {
 	buildBasicVerificationReport,
 	buildWorkflowFinalReport,
@@ -159,11 +160,12 @@ function failureFrom(message: AssistantMessage | undefined): { code: string; mes
 	}
 }
 
-export class AgentSessionAdapter {
+export class AgentSessionAdapter implements WorkflowContextProvider {
 	readonly #session: WorkflowAgentSession;
 	readonly #controller: WorkflowController;
 	readonly #workflowId: WorkflowId;
 	readonly #taskId: TaskId;
+	readonly #snapshotStore: SessionWorkflowSnapshotStore;
 	readonly #createId: (kind: "command" | "attempt" | "verification" | "plan") => string;
 	readonly #now: () => number;
 	readonly #writerLeaseRegistry: WriterLeaseRegistry;
@@ -203,6 +205,7 @@ export class AgentSessionAdapter {
 		this.#controller = controller;
 		this.#workflowId = workflowId;
 		this.#taskId = taskId;
+		this.#snapshotStore = new SessionWorkflowSnapshotStore(session.sessionManager);
 		this.#createId = options.createId ?? ((kind) => `${kind}-${randomUUID()}`);
 		this.#now = options.now ?? Date.now;
 		this.#writerLeaseRegistry = options.writerLeaseRegistry ?? DEFAULT_WRITER_LEASE_REGISTRY;
@@ -229,6 +232,12 @@ export class AgentSessionAdapter {
 
 	get hasDeferredCompletion(): boolean {
 		return this.#deferredCompletion !== undefined;
+	}
+
+	checkpointForContextWindow(): WorkflowContextCheckpoint {
+		const snapshot = this.#controller.createSnapshot(this.#workflowId);
+		const snapshotEntryId = this.#snapshotStore.append(snapshot);
+		return { workflowId: this.#workflowId, snapshotEntryId, snapshot };
 	}
 
 	get finalReport(): WorkflowFinalReport | undefined {
