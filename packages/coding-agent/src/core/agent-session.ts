@@ -96,6 +96,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { getHistoryResultCount } from "./history.ts";
 import { formatJob, formatJobLogs, formatJobs, type Job, JobRuntime, LocalJobProcessFactory } from "./jobs/index.ts";
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -140,6 +141,7 @@ import {
 } from "./subagents/index.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
+import { createHistoryToolDefinition } from "./tools/history.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createNewContextToolDefinition } from "./tools/new-context.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
@@ -4970,9 +4972,12 @@ export class AgentSession {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
-		const contextManagementMode = this.settingsManager.getContextManagementSettings().mode;
+		const contextManagementSettings = this.settingsManager.getContextManagementSettings();
+		const contextManagementMode = contextManagementSettings.mode;
 		const contextWindowToolEnabled = contextManagementMode !== "summary";
-		const contextWindowToolWasRegistered = this._toolRegistry.has("new_context");
+		const contextWindowToolsPreviouslyRegistered = new Set(
+			["new_context", "history"].filter((name) => this._toolRegistry.has(name)),
+		);
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
@@ -4996,6 +5001,18 @@ export class AgentSession {
 					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
 				}
 				await this.requestContextWindow("model", { continueAfterCut: true });
+			}) as ToolDefinition;
+			baseToolDefinitions.history = createHistoryToolDefinition((request) => {
+				const result = this.sessionManager.queryHistory(request, contextManagementSettings.historyResultMaxBytes);
+				const resultBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+				this._emit({
+					type: "history_query",
+					action: request.action,
+					resultCount: getHistoryResultCount(result),
+					resultBytes,
+					truncated: result.truncated,
+				});
+				return result;
 			}) as ToolDefinition;
 		}
 
@@ -5027,12 +5044,12 @@ export class AgentSession {
 			? Object.keys(this._baseToolsOverride)
 			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
-		const canDefaultActivateContextWindowTool =
-			contextWindowToolEnabled &&
-			!contextWindowToolWasRegistered &&
-			(options.activeToolNames === undefined || options.activeToolNames.length > 0);
-		if (canDefaultActivateContextWindowTool) {
-			baseActiveToolNames.push("new_context");
+		if (contextWindowToolEnabled && (options.activeToolNames === undefined || options.activeToolNames.length > 0)) {
+			for (const toolName of ["new_context", "history"]) {
+				if (!contextWindowToolsPreviouslyRegistered.has(toolName)) {
+					baseActiveToolNames.push(toolName);
+				}
+			}
 		}
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,

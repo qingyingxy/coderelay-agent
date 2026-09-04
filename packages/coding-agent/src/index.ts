@@ -188,6 +188,23 @@ export {
 } from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+export {
+	getHistoryResultCount,
+	HISTORY_ROLES,
+	type HistoryListRequest,
+	type HistoryListResult,
+	type HistoryQueryRequest,
+	type HistoryQueryResult,
+	type HistoryReadEntry,
+	type HistoryReadRequest,
+	type HistoryReadResult,
+	type HistoryRole,
+	type HistorySearchMatch,
+	type HistorySearchRequest,
+	type HistorySearchResult,
+	type HistoryWindowView,
+	querySessionHistory,
+} from "./core/history.ts";
 export * from "./core/jobs/index.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
@@ -310,6 +327,7 @@ export {
 	createEditToolDefinition,
 	createFindToolDefinition,
 	createGrepToolDefinition,
+	createHistoryToolDefinition,
 	createLocalBashOperations,
 	createLsToolDefinition,
 	createReadToolDefinition,
@@ -329,6 +347,7 @@ export {
 	type GrepToolDetails,
 	type GrepToolInput,
 	type GrepToolOptions,
+	type HistoryToolDetails,
 	type LsOperations,
 	type LsToolDetails,
 	type LsToolInput,

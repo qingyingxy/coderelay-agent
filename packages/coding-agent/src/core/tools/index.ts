@@ -34,6 +34,7 @@ export {
 	type GrepToolInput,
 	type GrepToolOptions,
 } from "./grep.ts";
+export { createHistoryToolDefinition, type HistoryToolDetails } from "./history.ts";
 export {
 	createLsTool,
 	createLsToolDefinition,

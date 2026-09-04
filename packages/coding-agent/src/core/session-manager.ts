@@ -30,6 +30,7 @@ import {
 	createNextContextWindowLineage,
 	getContextWindowLineage,
 } from "./context-management.ts";
+import { type HistoryQueryRequest, type HistoryQueryResult, querySessionHistory } from "./history.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -234,6 +235,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntry"
 	| "getLabel"
 	| "getBranch"
+	| "queryHistory"
 	| "buildContextEntries"
 	| "getHeader"
 	| "getEntries"
@@ -1416,6 +1418,11 @@ export class SessionManager {
 		}
 		path.reverse();
 		return path;
+	}
+
+	/** Query bounded, readable history from the selected branch only. */
+	queryHistory(request: HistoryQueryRequest, maxBytes: number): HistoryQueryResult {
+		return querySessionHistory(this.getBranch(), request, maxBytes);
 	}
 
 	/** Derive the persisted hard-window lineage for the selected branch. */
