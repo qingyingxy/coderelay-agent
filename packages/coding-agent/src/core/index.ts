@@ -29,15 +29,21 @@ export { type BashExecutorOptions, type BashResult, executeBashWithOperations } 
 export type { CompactionResult } from "./compaction/index.ts";
 export {
 	assertValidContextWindowEntry,
+	assertValidContextWindowLineage,
 	CONTEXT_MANAGEMENT_EVENT_TYPES,
 	CONTEXT_MANAGEMENT_MODES,
 	CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
 	CONTEXT_WINDOW_REASONS,
 	type ContextManagementEvent,
 	type ContextManagementMode,
+	type ContextWindowLineage,
+	ContextWindowLineageError,
 	type ContextWindowReason,
 	ContextWindowValidationError,
+	createNextContextWindowLineage,
+	getContextWindowLineage,
 	validateContextWindowEntry,
+	validateContextWindowLineage,
 } from "./context-management.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 export { areExperimentalFeaturesEnabled } from "./experimental.ts";

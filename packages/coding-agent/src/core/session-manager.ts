@@ -23,8 +23,12 @@ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts"
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
 	assertValidContextWindowEntry,
+	assertValidContextWindowLineage,
 	CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
+	type ContextWindowLineage,
 	type ContextWindowReason,
+	createNextContextWindowLineage,
+	getContextWindowLineage,
 } from "./context-management.ts";
 import {
 	type BashExecutionMessage,
@@ -478,6 +482,7 @@ export function buildContextEntries(
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
+	assertValidContextWindowLineage(path);
 	let boundaryIndex = -1;
 	for (let index = 0; index < path.length; index++) {
 		const entry = path[index];
@@ -1411,6 +1416,16 @@ export class SessionManager {
 		}
 		path.reverse();
 		return path;
+	}
+
+	/** Derive the persisted hard-window lineage for the selected branch. */
+	getContextWindowLineage(fromId?: string): ContextWindowLineage | null {
+		return getContextWindowLineage(this.getBranch(fromId));
+	}
+
+	/** Create lineage fields for the next hard-window boundary without mutating the session. */
+	createNextContextWindowLineage(): ContextWindowLineage {
+		return createNextContextWindowLineage(this.getBranch());
 	}
 
 	/**

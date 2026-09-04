@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.2 已完成
+> 状态：实施中，CW.0-CW.3 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -705,7 +705,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.0 | `DONE` | 固定配置、事件和基线 Fixture | `settings-manager.ts`、测试 | 无 |
 | CW.1 | `DONE` | 升级 Session v4，定义 ContextWindowEntry 和校验 | `session-manager.ts`、新 context-window 模块 | CW.0 |
 | CW.2 | `DONE` | 实现统一上下文边界算法 | `session-manager.ts` | CW.1 |
-| CW.3 | `TODO` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
+| CW.3 | `DONE` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
 | CW.4 | `TODO` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
 | CW.5 | `TODO` | 为 Plan 暴露 checkpoint 引用 | `workflow/plan-runtime.ts` | CW.4 |
 | CW.6 | `TODO` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
@@ -746,6 +746,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 消息表示：seed 投影为 `customType = "context-window"` 且 `display = false` 的隐藏消息，转换到 LLM 时仍使用现有 custom message 路径。
 - 验证：两个专项 Vitest 文件共 29 项测试通过；`npm run check` 通过。
 - 偏差：跨 Entry lineage 和 Snapshot 引用校验按依赖拆分到 CW.3/CW.7，本任务只校验最后硬切边界自身的结构。
+
+### CW.3 实施记录
+
+- 实际文件：`core/context-management.ts`、`core/session-manager.ts`、包导出入口、lineage 专项测试。
+- lineage：第一次切窗生成隐式初始窗口和当前窗口两个唯一 ID；后续固定 first ID、引用 preceding window，并将 index 加一。
+- 恢复规则：`getContextWindowLineage()` 始终从所选分支路径推导；SessionManager 不维护第二份可漂移的 current-window 状态。
+- 校验：拒绝首边界 index 非 1、跳号、first ID 漂移、previous 断裂和分支内 window ID 重复。
+- 验证：lineage/context 两个专项 Vitest 文件共 30 项测试通过；`npm run check` 通过。
+- 偏差：lineage 能力继续集中在既有 `core/context-management.ts`，未拆分新文件。
 
 ## 16. 测试计划
 

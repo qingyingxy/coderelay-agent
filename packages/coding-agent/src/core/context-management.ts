@@ -1,4 +1,5 @@
-import type { ContextWindowEntry } from "./session-manager.ts";
+import { randomUUID } from "crypto";
+import type { ContextWindowEntry, SessionEntry } from "./session-manager.ts";
 
 export const CONTEXT_MANAGEMENT_MODES = ["summary", "windowed", "hybrid"] as const;
 
@@ -9,6 +10,23 @@ export const CONTEXT_WINDOW_REASONS = ["manual", "model", "threshold", "overflow
 export type ContextWindowReason = (typeof CONTEXT_WINDOW_REASONS)[number];
 
 export const CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE = "context-window";
+
+export interface ContextWindowLineage {
+	windowId: string;
+	firstWindowId: string;
+	previousWindowId: string;
+	windowIndex: number;
+}
+
+export class ContextWindowLineageError extends Error {
+	readonly issues: readonly string[];
+
+	constructor(issues: readonly string[]) {
+		super(`Invalid context window lineage: ${issues.join("; ")}`);
+		this.name = "ContextWindowLineageError";
+		this.issues = issues;
+	}
+}
 
 export class ContextWindowValidationError extends Error {
 	readonly issues: readonly string[];
@@ -113,6 +131,101 @@ export function assertValidContextWindowEntry(value: unknown): asserts value is 
 	if (issues.length > 0) {
 		throw new ContextWindowValidationError(issues);
 	}
+}
+
+export function validateContextWindowLineage(entries: readonly SessionEntry[]): string[] {
+	const windows = entries.filter((entry): entry is ContextWindowEntry => entry.type === "context_window");
+	if (windows.length === 0) return [];
+
+	const issues: string[] = [];
+	const seenWindowIds = new Set<string>();
+	for (let index = 0; index < windows.length; index++) {
+		const window = windows[index];
+		const entryIssues = validateContextWindowEntry(window);
+		issues.push(...entryIssues.map((issue) => `${window.id}: ${issue}`));
+
+		if (index === 0) {
+			if (window.windowIndex !== 1) issues.push(`${window.id}: first boundary windowIndex must be 1`);
+			seenWindowIds.add(window.firstWindowId);
+		} else {
+			const previous = windows[index - 1];
+			if (window.windowIndex !== previous.windowIndex + 1) {
+				issues.push(`${window.id}: windowIndex must increment by one`);
+			}
+			if (window.firstWindowId !== previous.firstWindowId) {
+				issues.push(`${window.id}: firstWindowId must remain stable`);
+			}
+			if (window.previousWindowId !== previous.windowId) {
+				issues.push(`${window.id}: previousWindowId must reference the preceding boundary`);
+			}
+		}
+
+		if (seenWindowIds.has(window.windowId)) {
+			issues.push(`${window.id}: windowId must be unique on the branch`);
+		}
+		seenWindowIds.add(window.windowId);
+	}
+	return issues;
+}
+
+export function assertValidContextWindowLineage(entries: readonly SessionEntry[]): void {
+	const issues = validateContextWindowLineage(entries);
+	if (issues.length > 0) {
+		throw new ContextWindowLineageError(issues);
+	}
+}
+
+export function getContextWindowLineage(entries: readonly SessionEntry[]): ContextWindowLineage | null {
+	assertValidContextWindowLineage(entries);
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type === "context_window") {
+			return {
+				windowId: entry.windowId,
+				firstWindowId: entry.firstWindowId,
+				previousWindowId: entry.previousWindowId,
+				windowIndex: entry.windowIndex,
+			};
+		}
+	}
+	return null;
+}
+
+export function createNextContextWindowLineage(
+	entries: readonly SessionEntry[],
+	createWindowId: () => string = randomUUID,
+): ContextWindowLineage {
+	const current = getContextWindowLineage(entries);
+	const usedIds = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type === "context_window") {
+			usedIds.add(entry.firstWindowId);
+			usedIds.add(entry.windowId);
+		}
+	}
+
+	const generatedIds: string[] = [];
+	const requiredIds = current ? 1 : 2;
+	for (let attempt = 0; attempt < 100 && generatedIds.length < requiredIds; attempt++) {
+		const candidate = createWindowId();
+		if (isNonEmptyString(candidate) && !usedIds.has(candidate) && !generatedIds.includes(candidate)) {
+			generatedIds.push(candidate);
+		}
+	}
+	if (generatedIds.length !== requiredIds) {
+		throw new Error("Unable to generate a unique context window ID");
+	}
+
+	if (!current) {
+		const [firstWindowId, windowId] = generatedIds;
+		return { windowId, firstWindowId, previousWindowId: firstWindowId, windowIndex: 1 };
+	}
+	return {
+		windowId: generatedIds[0],
+		firstWindowId: current.firstWindowId,
+		previousWindowId: current.windowId,
+		windowIndex: current.windowIndex + 1,
+	};
 }
 
 export const CONTEXT_MANAGEMENT_EVENT_TYPES = [
