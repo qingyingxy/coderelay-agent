@@ -5893,6 +5893,19 @@ export class InteractiveMode {
 		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
 		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
 
+		const contextStats = stats.contextManagement;
+		const windowLabel = contextStats.currentWindow.windowId
+			? `${contextStats.currentWindow.windowIndex} (${contextStats.currentWindow.windowId})`
+			: "initial";
+		info += `\n${theme.bold("Context Management")}\n`;
+		info += `${theme.fg("dim", "Mode:")} ${contextStats.mode}\n`;
+		info += `${theme.fg("dim", "Current Window:")} ${windowLabel}\n`;
+		info += `${theme.fg("dim", "Active Context:")} ${formatTokens(contextStats.currentWindow.estimatedTokens)} tokens across ${contextStats.currentWindow.activeMessageCount} messages\n`;
+		info += `${theme.fg("dim", "Hard Cuts:")} ${contextStats.hardCuts.count} (${formatTokens(contextStats.hardCuts.estimatedSeedTokens)} seed tokens, 0 model-call tokens)\n`;
+		info += `${theme.fg("dim", "History:")} ${contextStats.history.queryCount} queries, ~${formatTokens(contextStats.history.estimatedResultTokens)} result tokens\n`;
+		info += `${theme.fg("dim", "Notes:")} ${contextStats.notes.activeCount} active, ${contextStats.notes.operationCount} changes, ~${formatTokens(contextStats.notes.estimatedResultTokens)} result tokens\n`;
+		info += `${theme.fg("dim", "Summaries:")} ${contextStats.summaries.count}, ${formatTokens(contextStats.summaries.tokens.total)} tokens\n`;
+
 		if (stats.cost > 0 || cacheWaste.missedTokens > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
 			info += `${theme.fg("dim", "Total:")} $${stats.cost.toFixed(3)}`;

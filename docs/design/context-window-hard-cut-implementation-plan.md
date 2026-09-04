@@ -717,7 +717,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.12 | `DONE` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
 | CW.13 | `DONE` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
 | CW.14 | `DONE` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
-| CW.15 | `TODO` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
+| CW.15 | `DONE` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
 | CW.16 | `TODO` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
 | CW.17 | `TODO` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17 |
@@ -851,6 +851,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - RPC 状态：`get_state` 增加 context-management mode、窗口运行态和当前分支 lineage；RPC `compact` 返回带策略判别的命令结果。
 - 验证：compact 路由、Interactive 和 Print/JSON 专项 Vitest 通过；相关 `/new-context`、RPC JSONL 回归通过；`npm run check` 通过。
 - 偏差：Print 文本模式不额外输出自动窗口事件，以保持 stdout 是最终结果；结构化 JSON 模式提供完整事件。RPC 命令使用结构化 strategy 字段，不用人类文本推断是否生成摘要。
+
+### CW.15 实施记录
+
+- 实际文件：`core/context-management-stats.ts`、`core/agent-session.ts`、公共导出、Interactive `/session` 展示和专项测试。
+- 统计边界：既有 Session token/cost 继续覆盖完整 Session 树；context-management 聚合只看当前分支，并单列当前 active window 的消息数和估算 token、硬切次数/seed、History 结果、Notes 操作/结果以及摘要调用 usage。
+- 精度：compaction summary token/cost 读取持久化 provider usage；hard cut 不调用模型，`modelCallTokens` 固定为 0；History/Notes 暂无独立 tokenizer usage，因此以实际 UTF-8 result bytes 除以 4 明确标记为估算值。
+- trace：`getContextManagementTrace()` 返回逐窗口 boundary、History action/request/result 和 Note operation，并携带当前分支 lineage；可与 Session JSONL 和 Workflow View 一起保存用于失败样本审查。
+- 验证：context-management stats/trace 专项 Vitest 和既有 AgentSession stats 回归通过；`npm run check` 通过。
+- 偏差：未修改正在并行开发的 `core/evaluation/*`；评测层可直接调用公共 trace API，具体持久化接入留在 CW.16 的独立评测脚本中。
 
 ## 16. 测试计划
 

@@ -72,6 +72,11 @@ import {
 	type ContextWindowTokenBudget,
 	calculateContextWindowTokenBudget,
 } from "./context-management.ts";
+import {
+	buildContextManagementTrace,
+	type ContextManagementStats,
+	type ContextManagementTrace,
+} from "./context-management-stats.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { DeliveryRuntime, DiffCollector, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -458,6 +463,7 @@ export interface SessionStats {
 	};
 	cost: number;
 	contextUsage?: ContextUsage;
+	contextManagement: ContextManagementStats;
 }
 
 interface ToolDefinitionEntry {
@@ -5842,7 +5848,18 @@ export class AgentSession {
 			},
 			cost: usageTotals.cost,
 			contextUsage: this.getContextUsage(),
+			contextManagement: this.getContextManagementTrace().stats,
 		};
+	}
+
+	getContextManagementTrace(): ContextManagementTrace {
+		const branch = this.sessionManager.getBranch();
+		return buildContextManagementTrace(
+			branch,
+			this.messages,
+			this.settingsManager.getContextManagementSettings().mode,
+			this.sessionManager.getContextWindowLineage(),
+		);
 	}
 
 	getContextUsage(): ContextUsage | undefined {

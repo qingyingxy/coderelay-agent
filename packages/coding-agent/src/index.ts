@@ -74,6 +74,15 @@ export {
 	validateContextWindowEntry,
 	validateContextWindowLineage,
 } from "./core/context-management.ts";
+export {
+	buildContextManagementTrace,
+	type ContextManagementStats,
+	type ContextManagementTokenTotals,
+	type ContextManagementTrace,
+	type ContextWindowTraceEntry,
+	type HistoryQueryTraceEntry,
+	type NoteOperationTraceEntry,
+} from "./core/context-management-stats.ts";
 export * from "./core/delivery/index.ts";
 export * from "./core/evaluation/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
