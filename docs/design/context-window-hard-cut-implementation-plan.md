@@ -715,7 +715,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.10 | `DONE` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
 | CW.11 | `DONE` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
 | CW.12 | `DONE` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
-| CW.13 | `TODO` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
+| CW.13 | `DONE` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
 | CW.14 | `TODO` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
 | CW.15 | `TODO` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
 | CW.16 | `TODO` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
@@ -834,6 +834,14 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 重试上限：overflow 切窗期间保留 recovery-attempt 标志；重试成功、下一条用户消息或非 overflow 切窗后重置，连续第二次 overflow 不再切窗或重试。
 - 验证：overflow 专项 4 项、compaction/token budget/context window/retry 相关回归 48 项通过；`npm run check` 通过。
 - 偏差：没有把“第二次 overflow”伪装成 `context_window_failed`，因为边界事务本身并未失败；原始 Assistant error 仍是可观测和持久化的失败记录。
+
+### CW.13 实施记录
+
+- 实际文件：`core/agent-session.ts`、Session lifecycle 专项测试。
+- resume/fork：恢复继续复用 `SessionManager.buildSessionContext()` 和完整分支推导的 lineage；持久化重开不调用 provider、不重新生成 seed，也不改写 Notes。fork 到边界前不继承窗口，边界上和边界后继承对应 seed，sibling 分支保持隔离。
+- rollback：`navigateTree()` 成功重建目标分支后统一清空旧分支的 pending cut、soft warning、overflow retry、失败原因和最近 Assistant 缓存，active messages 与 lineage 均以目标分支为准。
+- 验证：Session lifecycle 专项 Vitest 通过；`npm run check` 通过。
+- 偏差：resume/fork 创建新 `AgentSession` 时窗口运行态已由字段初始化为 idle，因此无需修改 `agent-session-runtime.ts`；新增代码只处理同一 Runtime 内的 tree navigation/rollback。
 
 ## 16. 测试计划
 

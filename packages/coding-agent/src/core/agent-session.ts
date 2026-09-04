@@ -1180,6 +1180,15 @@ export class AgentSession {
 		};
 	}
 
+	private _resetContextWindowRuntimeStateAfterBranchChange(): void {
+		this._contextWindowPhase = "idle";
+		this._pendingContextWindowCut = undefined;
+		this._contextWindowSoftWarningIssued = false;
+		this._overflowRecoveryAttempted = false;
+		this._contextWindowError = undefined;
+		this._lastAssistantMessage = undefined;
+	}
+
 	/** Request a hard context cut. Active runs apply it after the current turn fully settles. */
 	async requestContextWindow(
 		reason: ContextWindowReason,
@@ -5676,6 +5685,7 @@ export class AgentSession {
 			// Update agent state
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.state.messages = sessionContext.messages;
+			this._resetContextWindowRuntimeStateAfterBranchChange();
 
 			// Emit session_tree event
 			await this._extensionRunner.emit({
