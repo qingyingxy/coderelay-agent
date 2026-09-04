@@ -144,6 +144,7 @@ import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts"
 import { createHistoryToolDefinition } from "./tools/history.ts";
 import { createAllToolDefinitions } from "./tools/index.ts";
 import { createNewContextToolDefinition } from "./tools/new-context.ts";
+import { createNotesToolDefinition } from "./tools/notes.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 import { addUsageToTotals, createUsageTotals } from "./usage-totals.ts";
 import { BUILTIN_AGENT_PROFILES } from "./workflow/agent-profile.ts";
@@ -1241,11 +1242,9 @@ export class AgentSession {
 			"No active Workflow Snapshot is available; treat this as conversational context, not authoritative task state.",
 			"Current objective: ",
 		].join("\n");
-		const suffix = [
-			"",
-			"Notes: no persisted Notes were available when this window was created.",
-			"History: use the history tool when an exact prior message or tool result is needed.",
-		].join("\n");
+		const suffix = ["", "History: use the history tool when an exact prior message or tool result is needed."].join(
+			"\n",
+		);
 		const objectiveLimit = Math.max(1, FALLBACK_CONTEXT_SEED_MAX_BYTES - Buffer.byteLength(prefix + suffix, "utf8"));
 		const selected = truncateUtf8(objective || "(not recorded)", objectiveLimit);
 		return {
@@ -1257,16 +1256,28 @@ export class AgentSession {
 	}
 
 	private _createContextWindowSeed(checkpoint: WorkflowContextCheckpoint | undefined): ContextWindowSeed {
-		if (!checkpoint) {
-			return this._fallbackContextWindowSeed();
+		let baseSeed: ContextWindowSeed;
+		if (checkpoint) {
+			const projection = projectWorkflowSnapshot(checkpoint.snapshot);
+			baseSeed = {
+				schemaVersion: 1,
+				content: projection.content,
+				workflowSnapshotSequence: projection.snapshotSequence,
+				noteEntryIds: [],
+				truncated: projection.truncated,
+			};
+		} else {
+			baseSeed = this._fallbackContextWindowSeed();
 		}
-		const projection = projectWorkflowSnapshot(checkpoint.snapshot);
+		const notesHint = this.sessionManager.buildMemoryNotesHint(
+			this.settingsManager.getContextManagementSettings().notesHintMaxBytes,
+			checkpoint?.workflowId,
+		);
 		return {
-			schemaVersion: 1,
-			content: projection.content,
-			workflowSnapshotSequence: projection.snapshotSequence,
-			noteEntryIds: [],
-			truncated: projection.truncated,
+			...baseSeed,
+			content: `${baseSeed.content}\n\n${notesHint.content}`,
+			noteEntryIds: [...notesHint.noteEntryIds],
+			truncated: baseSeed.truncated || notesHint.truncated,
 		};
 	}
 
@@ -4976,7 +4987,7 @@ export class AgentSession {
 		const contextManagementMode = contextManagementSettings.mode;
 		const contextWindowToolEnabled = contextManagementMode !== "summary";
 		const contextWindowToolsPreviouslyRegistered = new Set(
-			["new_context", "history"].filter((name) => this._toolRegistry.has(name)),
+			["new_context", "history", "notes"].filter((name) => this._toolRegistry.has(name)),
 		);
 		const autoResizeImages = this.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
@@ -5014,6 +5025,19 @@ export class AgentSession {
 				});
 				return result;
 			}) as ToolDefinition;
+			baseToolDefinitions.notes = createNotesToolDefinition({
+				list: () => this.sessionManager.listMemoryNotes(contextManagementSettings.historyResultMaxBytes),
+				upsert: (input) => {
+					const result = this.sessionManager.upsertMemoryNote(input, contextManagementSettings.notesHintMaxBytes);
+					this._emit({ type: "notes_changed", action: "upsert", noteId: result.note.noteId });
+					return result;
+				},
+				archive: (noteId) => {
+					const result = this.sessionManager.archiveMemoryNote(noteId);
+					this._emit({ type: "notes_changed", action: "archive", noteId: result.note.noteId });
+					return result;
+				},
+			}) as ToolDefinition;
 		}
 
 		this._baseToolDefinitions = new Map(
@@ -5045,7 +5069,7 @@ export class AgentSession {
 			: ["read", "bash", "edit", "write"];
 		const baseActiveToolNames = [...(options.activeToolNames ?? defaultActiveToolNames)];
 		if (contextWindowToolEnabled && (options.activeToolNames === undefined || options.activeToolNames.length > 0)) {
-			for (const toolName of ["new_context", "history"]) {
+			for (const toolName of ["new_context", "history", "notes"]) {
 				if (!contextWindowToolsPreviouslyRegistered.has(toolName)) {
 					baseActiveToolNames.push(toolName);
 				}

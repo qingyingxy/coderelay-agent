@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.9 已完成
+> 状态：实施中，CW.0-CW.10 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -712,7 +712,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.7 | `DONE` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
 | CW.8 | `DONE` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
 | CW.9 | `DONE` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
-| CW.10 | `TODO` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
+| CW.10 | `DONE` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
 | CW.11 | `TODO` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
 | CW.12 | `TODO` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
 | CW.13 | `TODO` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
@@ -805,6 +805,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 隔离与边界：只遍历当前 leaf 的祖先路径；排除 sibling branch、内部状态 Entry、`excludeFromContext`/敏感标记、History 自身的 tool call/tool result；紧凑 JSON 同时受 50 条、UTF-8 bytes 和估算 token 限制。
 - 验证：SessionManager/AgentSession 专项 Vitest 7 项及 CW.8/CW.7 相关回归通过；`npm run check` 通过。
 - 偏差：为保证任意返回页至少能容纳元数据和 continuation cursor，单次 History 结果预算低于 2048 bytes 时明确拒绝查询；第一版 cursor 是版本化 opaque offset，不承诺跨分支切换复用。
+
+### CW.10 实施记录
+
+- 实际文件：`core/notes.ts`、`core/tools/notes.ts`、`core/session-manager.ts`、`core/agent-session.ts`、公共导出入口和两层专项测试。
+- 存储语义：`memory-note` Custom Entry 使用版本化 `upsert/archive` 追加操作；当前分支重放得到 active Notes，保留稳定 `createdAt`，并验证 Note ID、category、来源 Entry 和操作顺序。
+- 工具与 hint：`notes list/upsert/archive` 仅在 `windowed/hybrid` 注册；hint 按约束/偏好、当前 Workflow 决策、未决问题、发现和其他近期 Notes 排序，受 UTF-8 byte 上限约束并写入显式 `[notes truncated]`。
+- 硬切集成：切窗事务在 Snapshot 后读取 Notes，把实际注入的 Note Entry IDs、content 和 truncated 状态固化进 `ContextWindowSeed`；同一 assistant batch 中 Notes 先落盘、`new_context` 后请求时能够进入新 seed。
+- 验证：SessionManager/AgentSession 专项 Vitest 8 项及 Context Window 相关回归通过；`npm run check` 通过。
+- 偏差：单条 Note 内容上限复用 `notesHintMaxBytes`，避免保存一个永远无法完整进入配置 hint 的 Note；Notes list 使用 `historyResultMaxBytes` 作为工具结果上限。
 
 ## 16. 测试计划
 

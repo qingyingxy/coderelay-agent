@@ -38,6 +38,20 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import {
+	buildMemoryNotesHint,
+	getLatestMemoryNote,
+	getMemoryNotes,
+	listMemoryNotes,
+	MEMORY_NOTE_CUSTOM_TYPE,
+	type MemoryNote,
+	type MemoryNoteChangeResult,
+	type MemoryNotesHint,
+	type MemoryNotesListResult,
+	type MemoryNoteUpsertInput,
+	prepareMemoryNoteArchive,
+	prepareMemoryNoteUpsert,
+} from "./notes.ts";
 
 export const CURRENT_SESSION_VERSION = 4;
 
@@ -236,6 +250,9 @@ export type ReadonlySessionManager = Pick<
 	| "getLabel"
 	| "getBranch"
 	| "queryHistory"
+	| "getMemoryNotes"
+	| "listMemoryNotes"
+	| "buildMemoryNotesHint"
 	| "buildContextEntries"
 	| "getHeader"
 	| "getEntries"
@@ -1423,6 +1440,39 @@ export class SessionManager {
 	/** Query bounded, readable history from the selected branch only. */
 	queryHistory(request: HistoryQueryRequest, maxBytes: number): HistoryQueryResult {
 		return querySessionHistory(this.getBranch(), request, maxBytes);
+	}
+
+	/** Return active durable Notes reconstructed from the current branch. */
+	getMemoryNotes(): MemoryNote[] {
+		return getMemoryNotes(this.getBranch());
+	}
+
+	/** Return a bounded list of active durable Notes. */
+	listMemoryNotes(maxBytes: number): MemoryNotesListResult {
+		return listMemoryNotes(this.getBranch(), maxBytes);
+	}
+
+	/** Append a Note upsert operation and return its reconstructed state. */
+	upsertMemoryNote(input: MemoryNoteUpsertInput, maxContentBytes: number): MemoryNoteChangeResult {
+		const data = prepareMemoryNoteUpsert(this.getBranch(), input, maxContentBytes, randomUUID);
+		this.appendCustomEntry(MEMORY_NOTE_CUSTOM_TYPE, data);
+		const note = getLatestMemoryNote(this.getBranch(), data.noteId);
+		if (!note) throw new Error(`Memory note ${data.noteId} was not persisted`);
+		return { schemaVersion: 1, action: "upsert", note };
+	}
+
+	/** Append a Note archive operation without modifying its earlier entries. */
+	archiveMemoryNote(noteId: string): MemoryNoteChangeResult {
+		const data = prepareMemoryNoteArchive(this.getBranch(), noteId);
+		this.appendCustomEntry(MEMORY_NOTE_CUSTOM_TYPE, data);
+		const note = getLatestMemoryNote(this.getBranch(), noteId);
+		if (!note) throw new Error(`Memory note ${noteId} archive was not persisted`);
+		return { schemaVersion: 1, action: "archive", note };
+	}
+
+	/** Build the exact bounded Notes hint persisted into a new context window. */
+	buildMemoryNotesHint(maxBytes: number, workflowId?: string): MemoryNotesHint {
+		return buildMemoryNotesHint(this.getBranch(), maxBytes, workflowId);
 	}
 
 	/** Derive the persisted hard-window lineage for the selected branch. */

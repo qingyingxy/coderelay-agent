@@ -45,6 +45,12 @@ export {
 } from "./ls.ts";
 export { createNewContextToolDefinition } from "./new-context.ts";
 export {
+	createNotesToolDefinition,
+	type NotesToolController,
+	type NotesToolDetails,
+	type NotesToolResult,
+} from "./notes.ts";
+export {
 	createReadTool,
 	createReadToolDefinition,
 	type ReadOperations,
