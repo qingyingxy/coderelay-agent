@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17 已完成
+> 状态：实施中，CW.0-CW.17.1 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -720,7 +720,9 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.15 | `DONE` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
 | CW.16 | `DONE` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
 | CW.17 | `DONE` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17 |
+| CW.17.1 | `DONE` | 强化内部/外部 ID 命名空间 | Snapshot 投影、真实评测协议 | CW.17 |
+| CW.17.2 | `TODO` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.2 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -880,6 +882,14 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 评测修正：History 的 OpenAI-compatible strict Schema 允许无关可选字段使用 `null` 并在执行前归一化；强制切窗工具在首个成功 benchmark boundary 后从续跑窗口移除，防止 checkpoint 指令随 seed 重放形成重复切窗。
 - 验证：Task Set 校验通过；History 与真实 runner 专项 Vitest 7/7 通过；`npm run check` 退出码 0。Biome 仍对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，但未修改该文件，后续依赖、类型和 browser smoke 检查均通过。
 - 结论：当前样本证明硬切、Notes、History 和 Workflow Snapshot 的机制链路可用，但没有证明 Workflow 组端到端质量优于摘要组。默认模式继续保持 `summary`；CW.18 必须先消除外部/内部 ID 歧义并增加重复样本，不能直接切换默认值。
+
+### CW.17.1 实施记录
+
+- Snapshot 投影中的 Workflow、Plan、Task、Attempt 和 Verification 标识统一改为显式 `workflow_*_id` 命名，并声明这些值是内部控制面 ID，不得替代用户请求的领域标识。
+- 真实 Task Set 升级为 `context-window-real-smoke-v2`，外部评测主键从含混的 `task_id` 改为 `case_id`；`repair-ledger` 另外保留 `domain_task_id=domain-repair-42`，专门测试它不会被 Workflow 内部 Task ID 覆盖。
+- 评测 Prompt 明确区分 `case_id`、`domain_task_id`、`record_id` 和 Workflow 内部 ID；解析器拒绝缺失或不匹配的 `case_id`。
+- 验证：投影与真实 runner 专项 Vitest 9/9 通过；v2 Task Set 校验通过；`npm run check` 退出码 0。Biome 仍对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
+- 默认模式继续保持 `summary`；下一步 CW.17.2 使用相同模型与 effort 做三次重复的 24-run 串行矩阵，旧 CW.17 结果不改写。
 
 ## 16. 测试计划
 

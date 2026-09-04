@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 1,
-	"id": "context-window-real-smoke-v1",
+	"id": "context-window-real-smoke-v2",
 	"tasks": [
 		{
 			"id": "routing-ledger",
@@ -17,7 +17,7 @@
 				}
 			},
 			"expected": {
-				"task_id": "routing-ledger",
+				"case_id": "routing-ledger",
 				"decision": "canary-17",
 				"artifact_digest": "sha256:7f31c9a2",
 				"owner": "team-ember"
@@ -30,6 +30,7 @@
 			"description": "Preserve the next repair action and recover attempt metadata after the context boundary.",
 			"durableFacts": [
 				"The next action is verify-module-kappa.",
+				"The domain_task_id is domain-repair-42. It is a user-domain identifier, not a Workflow internal task identifier.",
 				"Attempt 2 is obsolete and must not appear in the final response."
 			],
 			"lookup": {
@@ -41,7 +42,8 @@
 				}
 			},
 			"expected": {
-				"task_id": "repair-ledger",
+				"case_id": "repair-ledger",
+				"domain_task_id": "domain-repair-42",
 				"next_action": "verify-module-kappa",
 				"repair_target": "module-kappa",
 				"attempt": 3,

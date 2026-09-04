@@ -99,15 +99,15 @@ function deriveNextAction(
 			return "Wait for or process the user's plan decision.";
 		case "executing": {
 			const active = tasks.find(({ status }) => status === "running" || status === "verifying");
-			if (active) return `Continue Task ${active.id}: ${truncateField(active.title)}`;
+			if (active) return `Continue workflow_task_id=${active.id}: ${truncateField(active.title)}`;
 			const ready = tasks.find(({ status }) => status === "ready");
-			if (ready) return `Dispatch Task ${ready.id}: ${truncateField(ready.title)}`;
+			if (ready) return `Dispatch workflow_task_id=${ready.id}: ${truncateField(ready.title)}`;
 			return "Reconcile task states and determine the next executable task.";
 		}
 		case "verifying": {
 			const pending = verifications.find(({ status }) => status === "not_started" || status === "running");
 			return pending
-				? `Continue Verification ${pending.id}: ${truncateField(pending.summary)}`
+				? `Continue workflow_verification_id=${pending.id}: ${truncateField(pending.summary)}`
 				: "Reconcile verification results and finalize the workflow.";
 		}
 		case "blocked":
@@ -125,14 +125,14 @@ function taskLine(task: Task): string {
 	const dependencies = [...task.dependencyIds].sort().join(",") || "none";
 	const blocked = task.blockedReason ? ` blocked=${truncateField(task.blockedReason.message)}` : "";
 	const result = task.result ? ` result=${truncateField(task.result.summary)}` : "";
-	return `Task ${task.id}: title=${truncateField(task.title)} kind=${task.kind} status=${task.status} dependencies=${dependencies} currentAttempt=${task.currentAttemptId ?? "none"}${blocked}${result}`;
+	return `Workflow Task: workflow_task_id=${task.id} title=${truncateField(task.title)} kind=${task.kind} status=${task.status} workflow_task_dependency_ids=${dependencies} current_workflow_attempt_id=${task.currentAttemptId ?? "none"}${blocked}${result}`;
 }
 
 function attemptLine(attempt: Attempt): string {
 	const failure = attempt.failure
 		? ` failure=${attempt.failure.code}:${truncateField(attempt.failure.message)} retryable=${attempt.failure.retryable}`
 		: "";
-	return `Attempt ${attempt.id}: task=${attempt.taskId} number=${attempt.number} status=${attempt.status} executor=${attempt.executorKind} usage=input:${attempt.usage.inputTokens},output:${attempt.usage.outputTokens},turns:${attempt.usage.turns},cost:${attempt.usage.cost}${failure}`;
+	return `Workflow Attempt: workflow_attempt_id=${attempt.id} workflow_task_id=${attempt.taskId} number=${attempt.number} status=${attempt.status} executor=${attempt.executorKind} usage=input:${attempt.usage.inputTokens},output:${attempt.usage.outputTokens},turns:${attempt.usage.turns},cost:${attempt.usage.cost}${failure}`;
 }
 
 function verificationLine(verification: VerificationResult): string {
@@ -141,7 +141,7 @@ function verificationLine(verification: VerificationResult): string {
 			.sort()
 			.map((value) => truncateField(value))
 			.join(",") || "none";
-	return `Verification ${verification.id}: task=${verification.taskId ?? "workflow"} requirement=${verification.requirementId} status=${verification.status} summary=${truncateField(verification.summary)} evidence=${evidence}`;
+	return `Workflow Verification: workflow_verification_id=${verification.id} workflow_task_id=${verification.taskId ?? "none"} requirement=${verification.requirementId} status=${verification.status} summary=${truncateField(verification.summary)} evidence=${evidence}`;
 }
 
 export function projectWorkflowSnapshot(
@@ -176,14 +176,19 @@ export function projectWorkflowSnapshot(
 	const lines: ProjectionLine[] = [
 		{ content: "Context window continuity seed (Workflow Snapshot is authoritative):", required: true },
 		{
-			content: `Workflow: id=${workflow.id} mode=${mode} status=${workflow.status} sequence=${snapshot.lastSequence}`,
+			content:
+				"Workflow identifiers are internal control-plane IDs. Do not substitute them for user-requested domain identifiers.",
+			required: true,
+		},
+		{
+			content: `Workflow: workflow_id=${workflow.id} mode=${mode} status=${workflow.status} sequence=${snapshot.lastSequence}`,
 			required: true,
 		},
 		{ content: `Current objective: ${truncateField(workflow.request.text)}`, required: true },
 		{ content: `Stop/block reason: ${truncateField(stopReason)}`, required: true },
 		{
 			content: plan
-				? `Current plan: id=${plan.id} version=${plan.version} status=${plan.status} goal=${truncateField(plan.goal)}`
+				? `Current plan: workflow_plan_id=${plan.id} version=${plan.version} status=${plan.status} goal=${truncateField(plan.goal)}`
 				: "Current plan: none",
 			required: true,
 		},
@@ -203,6 +208,7 @@ export function projectWorkflowSnapshot(
 
 	const requiredLines = lines.filter(({ required }) => required);
 	const optionalLines = lines.filter(({ required }) => !required);
+	const optionalInsertionIndex = 6;
 	const marker = (omitted: number): ProjectionLine => ({
 		content: `[projection truncated: omitted ${omitted} detail line(s)]`,
 		required: true,
@@ -211,21 +217,21 @@ export function projectWorkflowSnapshot(
 	for (const line of optionalLines) {
 		const omitted = optionalLines.length - selectedOptional.length - 1;
 		const candidate = [
-			...requiredLines.slice(0, 5),
+			...requiredLines.slice(0, optionalInsertionIndex),
 			...selectedOptional,
 			line,
 			...(omitted > 0 ? [marker(omitted)] : []),
-			...requiredLines.slice(5),
+			...requiredLines.slice(optionalInsertionIndex),
 		];
 		if (Buffer.byteLength(candidate.map(({ content }) => content).join("\n"), "utf8") > maxBytes) break;
 		selectedOptional.push(line);
 	}
 	const omitted = optionalLines.length - selectedOptional.length;
 	const selected = [
-		...requiredLines.slice(0, 5),
+		...requiredLines.slice(0, optionalInsertionIndex),
 		...selectedOptional,
 		...(omitted > 0 ? [marker(omitted)] : []),
-		...requiredLines.slice(5),
+		...requiredLines.slice(optionalInsertionIndex),
 	];
 	const content = selected.map((line) => line.content).join("\n");
 	const byteLength = Buffer.byteLength(content, "utf8");

@@ -134,15 +134,31 @@ describe("projectWorkflowSnapshot", () => {
 			snapshotSequence: 4,
 			truncated: false,
 		});
-		expect(projection.content).toContain("Workflow: id=workflow-1 mode=plan status=executing sequence=4");
-		expect(projection.content).toContain("Current plan: id=plan-2 version=2 status=approved");
-		expect(projection.content).toContain("Task task-a:");
-		expect(projection.content).toContain("Attempt attempt-1:");
-		expect(projection.content).toContain("Verification verification-1:");
-		expect(projection.content).toContain("Next action: Continue Task task-a: First task");
+		expect(projection.content).toContain(
+			"Workflow identifiers are internal control-plane IDs. Do not substitute them for user-requested domain identifiers.",
+		);
+		expect(projection.content).toContain("Workflow: workflow_id=workflow-1 mode=plan status=executing sequence=4");
+		expect(projection.content).toContain("Current plan: workflow_plan_id=plan-2 version=2 status=approved");
+		expect(projection.content).toContain("Workflow Task: workflow_task_id=task-a");
+		expect(projection.content).toContain("Workflow Attempt: workflow_attempt_id=attempt-1 workflow_task_id=task-a");
+		expect(projection.content).toContain(
+			"Workflow Verification: workflow_verification_id=verification-1 workflow_task_id=task-a",
+		);
+		expect(projection.content).toContain("Next action: Continue workflow_task_id=task-a: First task");
 		expect(projection.content).toContain("History: use the history tool");
 		expect(projection.content).not.toContain("event-1");
 		expect(projection.byteLength).toBe(Buffer.byteLength(projection.content, "utf8"));
+	});
+
+	it("namespaces internal identifiers so they cannot be mistaken for user-domain identifiers", () => {
+		const projection = projectWorkflowSnapshot(createSnapshot());
+
+		expect(projection.content).toContain("workflow_id=workflow-1");
+		expect(projection.content).toContain("workflow_plan_id=plan-2");
+		expect(projection.content).toContain("workflow_task_id=task-a");
+		expect(projection.content).toContain("workflow_attempt_id=attempt-1");
+		expect(projection.content).toContain("workflow_verification_id=verification-1");
+		expect(projection.content).not.toMatch(/(?:^|\s)(?:id|task_id|attempt_id|verification_id)=/m);
 	});
 
 	it("is deterministic when unordered entity arrays change order", () => {
@@ -178,7 +194,7 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.truncated).toBe(true);
 		expect(projection.byteLength).toBeLessThanOrEqual(MIN_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES);
 		expect(projection.content).toContain("[projection truncated: omitted");
-		expect(projection.content).toContain("Next action: Continue Task task-00");
+		expect(projection.content).toContain("Next action: Continue workflow_task_id=task-00");
 		expect(projection.content).toContain("History: use the history tool");
 	});
 

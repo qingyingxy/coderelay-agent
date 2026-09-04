@@ -12,7 +12,7 @@ const TASK: RealContextWindowTask = {
 	description: "test",
 	durableFacts: ["Keep alpha."],
 	lookup: { recordId: "record-1", value: { digest: "abc" } },
-	expected: { task_id: "task-1", digest: "abc" },
+	expected: { case_id: "task-1", digest: "abc" },
 	forbiddenTerms: ["obsolete"],
 	distractorRecords: 0,
 };
@@ -35,16 +35,16 @@ describe("real context-window evaluation", () => {
 	});
 
 	it("accepts strict JSON and a single JSON fence", () => {
-		expect(extractJsonObject('{"task_id":"task-1"}')).toEqual({ task_id: "task-1" });
-		expect(extractJsonObject('```json\n{"task_id":"task-1"}\n```')).toEqual({ task_id: "task-1" });
-		expect(extractJsonObject('result: {"task_id":"task-1"}')).toBeNull();
+		expect(extractJsonObject('{"case_id":"task-1"}')).toEqual({ case_id: "task-1" });
+		expect(extractJsonObject('```json\n{"case_id":"task-1"}\n```')).toEqual({ case_id: "task-1" });
+		expect(extractJsonObject('result: {"case_id":"task-1"}')).toBeNull();
 	});
 
 	it("grades exact keys, exact values, and forbidden terms deterministically", () => {
-		const passing = evaluateExpectedOutput('{"task_id":"task-1","digest":"abc"}', TASK);
+		const passing = evaluateExpectedOutput('{"case_id":"task-1","digest":"abc"}', TASK);
 		expect(passing.checks.every(({ passed }) => passed)).toBe(true);
 
-		const failing = evaluateExpectedOutput('{"task_id":"task-1","digest":"wrong","note":"obsolete"}', TASK);
+		const failing = evaluateExpectedOutput('{"case_id":"task-1","digest":"wrong","note":"obsolete"}', TASK);
 		expect(failing.checks.filter(({ passed }) => !passed).map(({ id }) => id)).toEqual([
 			"exact-keys",
 			"value:digest",
@@ -63,5 +63,19 @@ describe("real context-window evaluation", () => {
 		expect(() => parseRealTaskSet({ schemaVersion: 2, id: "fixture", tasks: [TASK] })).toThrow(
 			"schemaVersion must be 1",
 		);
+		expect(() =>
+			parseRealTaskSet({
+				schemaVersion: 1,
+				id: "fixture",
+				tasks: [{ ...TASK, expected: { digest: "abc" } }],
+			}),
+		).toThrow("expected.case_id must equal task-1");
+		expect(() =>
+			parseRealTaskSet({
+				schemaVersion: 1,
+				id: "fixture",
+				tasks: [{ ...TASK, expected: { case_id: "record-1", digest: "abc" } }],
+			}),
+		).toThrow("expected.case_id must equal task-1");
 	});
 });

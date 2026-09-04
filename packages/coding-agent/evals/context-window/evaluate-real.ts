@@ -214,7 +214,7 @@ export function parseRealTaskSet(value: unknown): RealContextWindowTaskSet {
 		taskIds.add(taskId);
 		if (!isRecord(candidate.lookup)) throw new Error(`${path}.lookup must be an object`);
 		const expected = parsePrimitiveRecord(candidate.expected, `${path}.expected`);
-		if (expected.task_id !== taskId) throw new Error(`${path}.expected.task_id must equal ${taskId}`);
+		if (expected.case_id !== taskId) throw new Error(`${path}.expected.case_id must equal ${taskId}`);
 		const distractorRecords = candidate.distractorRecords;
 		if (!Number.isSafeInteger(distractorRecords) || Number(distractorRecords) < 0) {
 			throw new Error(`${path}.distractorRecords must be a non-negative safe integer`);
@@ -407,7 +407,7 @@ function setupPrompt(task: RealContextWindowTask): string {
 	};
 	return [
 		"This is phase 1 of a controlled long-context memory evaluation.",
-		`Task ID: ${task.id}`,
+		`External case_id: ${task.id}`,
 		`Purpose: ${task.description}`,
 		"Durable facts:",
 		...task.durableFacts.map((fact) => `- ${fact}`),
@@ -452,11 +452,12 @@ function finalPrompt(task: RealContextWindowTask): string {
 	};
 	return [
 		"This is the final validation phase after the context boundary.",
-		`Recover the durable facts for task ${task.id}.`,
+		`Recover the durable facts for external case_id ${task.id}.`,
 		"If History is available, call it once with exactly these arguments:",
 		JSON.stringify(historyArguments),
 		"Use the matching excerpt directly; do not make a list request and do not guess.",
 		`Return exactly one JSON object with these keys in this order: ${keys}.`,
+		"Use the external case_id exactly as provided. Do not substitute record_id or a Workflow-internal ID for case_id or domain_task_id.",
 		"Use the exact stored values. Do not add keys, Markdown, or explanation.",
 	].join("\n");
 }
