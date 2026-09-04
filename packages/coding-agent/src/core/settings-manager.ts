@@ -6,7 +6,19 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { CONTEXT_MANAGEMENT_MODES, type ContextManagementMode } from "./context-management.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+
+export const DEFAULT_CONTEXT_MANAGEMENT_RESERVE_TOKENS = 16_384;
+export const DEFAULT_NOTES_HINT_MAX_BYTES = 4_000;
+export const DEFAULT_HISTORY_RESULT_MAX_BYTES = 16_000;
+
+export interface ContextManagementSettings {
+	mode?: ContextManagementMode; // default: "summary"
+	reserveTokens?: number; // default: 16384
+	notesHintMaxBytes?: number; // default: 4000
+	historyResultMaxBytes?: number; // default: 16000
+}
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -90,6 +102,7 @@ export interface Settings {
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
 	compaction?: CompactionSettings;
+	contextManagement?: ContextManagementSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
 	hideThinkingBlock?: boolean;
@@ -168,6 +181,16 @@ function parseTimeoutSetting(value: unknown, settingName: string): number | unde
 		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
 	}
 	return undefined;
+}
+
+function parsePositiveIntegerSetting(value: unknown, settingName: string, defaultValue: number): number {
+	if (value === undefined) {
+		return defaultValue;
+	}
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
+	}
+	return value;
 }
 
 export type SettingsScope = "global" | "project";
@@ -783,6 +806,32 @@ export class SettingsManager {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+		};
+	}
+
+	getContextManagementSettings(): Required<ContextManagementSettings> {
+		const settings = this.settings.contextManagement;
+		const mode = settings?.mode ?? "summary";
+		if (!CONTEXT_MANAGEMENT_MODES.includes(mode)) {
+			throw new Error(`Invalid contextManagement.mode setting: ${String(mode)}`);
+		}
+		return {
+			mode,
+			reserveTokens: parsePositiveIntegerSetting(
+				settings?.reserveTokens,
+				"contextManagement.reserveTokens",
+				DEFAULT_CONTEXT_MANAGEMENT_RESERVE_TOKENS,
+			),
+			notesHintMaxBytes: parsePositiveIntegerSetting(
+				settings?.notesHintMaxBytes,
+				"contextManagement.notesHintMaxBytes",
+				DEFAULT_NOTES_HINT_MAX_BYTES,
+			),
+			historyResultMaxBytes: parsePositiveIntegerSetting(
+				settings?.historyResultMaxBytes,
+				"contextManagement.historyResultMaxBytes",
+				DEFAULT_HISTORY_RESULT_MAX_BYTES,
+			),
 		};
 	}
 

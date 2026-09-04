@@ -48,6 +48,14 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.ts";
+export {
+	CONTEXT_MANAGEMENT_EVENT_TYPES,
+	CONTEXT_MANAGEMENT_MODES,
+	CONTEXT_WINDOW_REASONS,
+	type ContextManagementEvent,
+	type ContextManagementMode,
+	type ContextWindowReason,
+} from "./core/context-management.ts";
 export * from "./core/delivery/index.ts";
 export * from "./core/evaluation/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
@@ -250,6 +258,10 @@ export {
 } from "./core/session-manager.ts";
 export {
 	type CompactionSettings,
+	type ContextManagementSettings,
+	DEFAULT_CONTEXT_MANAGEMENT_RESERVE_TOKENS,
+	DEFAULT_HISTORY_RESULT_MAX_BYTES,
+	DEFAULT_NOTES_HINT_MAX_BYTES,
 	type DefaultProjectTrust,
 	type ImageSettings,
 	type PackageSource,

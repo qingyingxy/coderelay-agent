@@ -27,6 +27,14 @@ export {
 } from "./agent-session-services.ts";
 export { type BashExecutorOptions, type BashResult, executeBashWithOperations } from "./bash-executor.ts";
 export type { CompactionResult } from "./compaction/index.ts";
+export {
+	CONTEXT_MANAGEMENT_EVENT_TYPES,
+	CONTEXT_MANAGEMENT_MODES,
+	CONTEXT_WINDOW_REASONS,
+	type ContextManagementEvent,
+	type ContextManagementMode,
+	type ContextWindowReason,
+} from "./context-management.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./event-bus.ts";
 export { areExperimentalFeaturesEnabled } from "./experimental.ts";
 // Extensions system

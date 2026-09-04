@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：计划中，尚未实现
+> 状态：实施中，CW.0 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -515,6 +515,17 @@ interface ContextManagementSettings {
 }
 ```
 
+CW.0 固定的初始实验默认值：
+
+| 配置 | 默认值 | 说明 |
+|---|---:|---|
+| `mode` | `summary` | 保持现有摘要压缩行为 |
+| `reserveTokens` | `16384` | 为收束步骤和下一次输出保留预算 |
+| `notesHintMaxBytes` | `4000` | 新窗口 Notes hint 的初始上限 |
+| `historyResultMaxBytes` | `16000` | 单次 History 结果的初始上限 |
+
+三个数值配置必须是正安全整数。以上值属于评测基线，后续只能依据 CW.16/CW.17 的结果调整。
+
 兼容规则：
 
 - 未设置 `mode` 时等价于 `summary`。
@@ -691,7 +702,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 
 | ID | 状态 | 任务 | 主要文件 | 依赖 |
 |---|---|---|---|---|
-| CW.0 | `TODO` | 固定配置、事件和基线 Fixture | `settings-manager.ts`、测试 | 无 |
+| CW.0 | `DONE` | 固定配置、事件和基线 Fixture | `settings-manager.ts`、测试 | 无 |
 | CW.1 | `TODO` | 升级 Session v4，定义 ContextWindowEntry 和校验 | `session-manager.ts`、新 context-window 模块 | CW.0 |
 | CW.2 | `TODO` | 实现统一上下文边界算法 | `session-manager.ts` | CW.1 |
 | CW.3 | `TODO` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
@@ -712,6 +723,13 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
+
+### CW.0 实施记录
+
+- 实际文件：`core/context-management.ts`、`core/settings-manager.ts`、包导出入口、`test/context-management-settings.test.ts`。
+- 固定协议：`summary/windowed/hybrid`、四种切窗原因、七种 context-management 事件及 payload。
+- 验证：专项 Vitest 通过；`npm run check` 通过。
+- 偏差：基线使用代码内测试向量而不是单独 JSON Fixture，避免尚无窗口 Schema 时制造伪 Session 数据；运行时仍未发出新增事件，按 CW.7、CW.9、CW.10 分别接入。
 
 ## 16. 测试计划
 
