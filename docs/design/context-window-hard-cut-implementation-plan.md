@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.2 已完成
+> 状态：实施中，CW.0-CW.17.3 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -722,7 +722,9 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17 | `DONE` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
 | CW.17.1 | `DONE` | 强化内部/外部 ID 命名空间 | Snapshot 投影、真实评测协议 | CW.17 |
 | CW.17.2 | `DONE` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.2 |
+| CW.17.3 | `DONE` | 生命周期恢复与隔离确定性评测 | `evals/`、测试、报告 | CW.17.2 |
+| CW.17.4 | `TODO` | 真实多窗口编码与进程级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.4 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -900,6 +902,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 资源：总计 475966 input、11272 output、3836 reasoning、863744 cache-read tokens，140 次 Provider 调用，估算成本 `$1.259945`。B/C/D 相对 A 的平均 input 分别下降 21.4%/11.3%/7.9%，平均成本下降 15.7%/7.7%/5.4%，平均耗时增加 9.9%/17.8%/12.6%。
 - 验证：runner 专项 Vitest 5/5 通过，v2 Task Set 的 3-repeat 计划校验为 24 runs；`npm run check` 退出码 0。Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查全部通过。
 - 结论：ID 命名空间修正已通过当前控制集，但两个合成任务不足以决定全局或 Workflow 默认值；CW.18 前应补充多窗口编码、resume/fork/rollback、Attempt repair、overflow 和分支隔离评测，默认继续保持 `summary`。
+
+### CW.17.3 实施记录
+
+- 实际文件：`evals/context-window/evaluate-lifecycle.ts`、专项测试、评测 README、`cw17.3-report.md` 和本计划；根目录增加 `eval:context-window:lifecycle` 命令。
+- 场景：两次连续硬切与 lineage、Session JSONL 进程级重开、fork/rollback/sibling branch 隔离、失败 Verification 到 Repair Task 及中断 Attempt 恢复、provider overflow 后单次硬切重试。
+- 结果：5/5 场景通过；旧窗口始终留在完整分支，active history 仅从最新边界构建，History 在原 Session 和 fork 中都不能读取 sibling branch，resume 不重新生成 seed。
+- Workflow 恢复：Snapshot 保留失败 Verification 和运行中的 Repair Attempt；恢复后不确定 Attempt 被标记为 `interrupted`，新的 Attempt 通过 `recoveryOfAttemptId` 显式关联并遵守 Writer Lease 前置条件。
+- 验证：专项 Vitest 1/1 通过，`npm run eval:context-window:lifecycle` 返回 5/5；Faux Provider、严格串行、无网络和付费 token。
+- 结论：生命周期机制和隔离不变量已有组合验证，但脚本响应不能证明真实模型的跨窗编码质量；CW.17.4 继续做少量、严格串行的真实多窗口编码与进程级恢复评测，默认仍保持 `summary`。
 
 ## 16. 测试计划
 

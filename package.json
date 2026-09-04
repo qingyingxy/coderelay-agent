@@ -38,6 +38,7 @@
 		"eval:cli-agent": "tsx packages/coding-agent/examples/sdk/21-cli-agent-evaluation.ts",
 		"eval:cli-agent:model": "tsx packages/coding-agent/examples/sdk/24-real-model-evaluation.ts",
 		"eval:context-window": "tsx packages/coding-agent/evals/context-window/evaluate.ts",
+		"eval:context-window:lifecycle": "tsx packages/coding-agent/evals/context-window/evaluate-lifecycle.ts",
 		"eval:context-window:real": "tsx packages/coding-agent/evals/context-window/evaluate-real.ts",
 		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
 		"demo:autonomous-workflow": "tsx packages/coding-agent/examples/sdk/23-autonomous-workflow-showcase.ts",

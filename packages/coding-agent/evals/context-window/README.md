@@ -19,6 +19,18 @@ The command prints a JSON report and exits non-zero if any case fails.
 
 Failed cases include the current branch, active messages, and context-management trace in the JSON report. This suite validates mechanics and routing only; it does not establish real-model task quality or justify changing the default mode.
 
+## Lifecycle evaluation
+
+The lifecycle runner composes the persistence mechanisms into five deterministic scenarios: two consecutive hard cuts, JSONL resume, fork/rollback with sibling-branch isolation, failed Verification to Repair Task and recovered Attempt, and one-shot overflow recovery. It uses the Faux Provider, runs serially, and consumes no paid tokens.
+
+```bash
+npm run eval:context-window:lifecycle
+```
+
+The command prints a uniform JSON report with checks and evidence for every scenario and exits non-zero on any failure.
+
+The 5/5 deterministic lifecycle result is documented in [cw17.3-report.md](./cw17.3-report.md).
+
 ## Serial real-model smoke evaluation
 
 The real-model runner compares the same four groups on two versioned tasks. It forces the boundary at the same phase in every run, grades exact JSON without a model judge, and persists each Session JSONL, context-management trace, response, result, checkpoint, and aggregate report. Hard-cut groups request `new_context` inside the active model turn so Workflow groups can checkpoint the authoritative Snapshot before replacing active history. The runner removes `new_context` after the first accepted benchmark boundary, enforcing exactly one cut per case while leaving Notes and History available. Repeated runs are stored under separate `repeat-NN` directories and remain strictly serial.
