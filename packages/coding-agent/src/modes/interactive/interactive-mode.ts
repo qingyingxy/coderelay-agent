@@ -3146,6 +3146,35 @@ export class InteractiveMode {
 				break;
 			}
 
+			case "context_window_warning": {
+				this.showWarning(
+					`Context window is nearing its limit (${formatTokens(event.contextTokens)} / ${formatTokens(event.hardLimit)} tokens). Save durable Notes before the hard cut.`,
+				);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "context_window_end": {
+				this.rebuildChatFromMessages();
+				this.showStatus(
+					`Started fresh context window ${event.windowId} (${formatTokens(event.tokensBefore)} -> ${formatTokens(event.estimatedTokensAfter)} tokens); no summary was generated.`,
+				);
+				this.ui.requestRender();
+				break;
+			}
+
+			case "context_window_failed":
+				this.showError(`Context window failed: ${event.error}`);
+				this.ui.requestRender();
+				break;
+
+			case "context_window_requested":
+			case "context_window_start":
+			case "history_query":
+			case "notes_changed":
+				this.ui.requestRender();
+				break;
+
 			case "auto_retry_start": {
 				// Set up escape to abort retry
 				this.retryEscapeHandler = this.defaultEditor.onEscape;
@@ -6204,7 +6233,12 @@ export class InteractiveMode {
 		this.clearStatusIndicator();
 
 		try {
-			await this.session.compact(customInstructions);
+			const result = await this.session.compactForCommand(customInstructions);
+			if (result.strategy === "hard_cut" && result.customInstructionsIgnored) {
+				this.showWarning(
+					"Custom compaction instructions were ignored because hard-cut mode does not generate a summary.",
+				);
+			}
 		} catch {
 			// Ignore, will be emitted as an event
 		}

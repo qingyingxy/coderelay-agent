@@ -335,6 +335,20 @@ export interface ContextWindowRuntimeState {
 	readonly error?: string;
 }
 
+export type CompactCommandResult =
+	| {
+			readonly strategy: "summary";
+			readonly summaryGenerated: true;
+			readonly compaction: CompactionResult;
+	  }
+	| {
+			readonly strategy: "hard_cut";
+			readonly summaryGenerated: false;
+			readonly boundary: ContextWindowEntry | null;
+			readonly pending: boolean;
+			readonly customInstructionsIgnored: boolean;
+	  };
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -2928,7 +2942,7 @@ export class AgentSession {
 		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
-			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteContextWindowCommand(text))) {
+			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteContextManagementCommand(text))) {
 				preflightResult?.(true);
 				return;
 			}
@@ -3164,33 +3178,62 @@ export class AgentSession {
 	}
 
 	/** Execute the built-in hard-cut command without adding its output to model context. */
-	private async _tryExecuteContextWindowCommand(text: string): Promise<boolean> {
+	private async _tryExecuteContextManagementCommand(text: string): Promise<boolean> {
 		const [commandName, ...args] = text.trim().split(/\s+/);
-		if (commandName !== "/new-context") {
+		if (commandName !== "/new-context" && commandName !== "/compact") {
 			return false;
 		}
-		if (!this.isIdle || (this._contextWindowPhase !== "idle" && this._contextWindowPhase !== "notes_collection")) {
+		if (
+			commandName === "/new-context" &&
+			(!this.isIdle || (this._contextWindowPhase !== "idle" && this._contextWindowPhase !== "notes_collection"))
+		) {
 			throw new Error("/new-context can only be used while context-window management is idle");
 		}
 
 		let content: string;
-		let windowId: string | undefined;
-		if (args.length > 0) {
+		let details: Record<string, unknown>;
+		if (commandName === "/new-context" && args.length > 0) {
 			content = "Usage: /new-context";
-		} else {
+			details = { command: commandName };
+		} else if (commandName === "/new-context") {
 			const boundary = await this.requestContextWindow("manual");
-			windowId = boundary?.windowId;
+			const windowId = boundary?.windowId;
 			content = windowId ? `Started a fresh context window (${windowId}).` : "Started a fresh context window.";
+			details = { command: commandName, windowId };
+		} else {
+			const result = await this.compactForCommand(args.length > 0 ? args.join(" ") : undefined);
+			if (result.strategy === "summary") {
+				content = "Compacted the active context using a generated summary.";
+				details = { command: commandName, strategy: result.strategy, summaryGenerated: true };
+			} else if (result.pending) {
+				content = "Scheduled a fresh context window after the current step; no summary will be generated.";
+				details = {
+					command: commandName,
+					strategy: result.strategy,
+					summaryGenerated: false,
+					pending: true,
+					customInstructionsIgnored: result.customInstructionsIgnored,
+				};
+			} else {
+				content = `Started a fresh context window (${result.boundary?.windowId}); no summary was generated.`;
+				details = {
+					command: commandName,
+					strategy: result.strategy,
+					summaryGenerated: false,
+					windowId: result.boundary?.windowId,
+					customInstructionsIgnored: result.customInstructionsIgnored,
+				};
+			}
 		}
 
 		const message = {
 			role: "custom" as const,
-			customType: "context-window-command",
+			customType: commandName === "/new-context" ? "context-window-command" : "context-management-command",
 			content,
 			display: true,
-			details: { command: commandName, windowId },
+			details,
 			timestamp: Date.now(),
-		} satisfies CustomMessage<{ readonly command: string; readonly windowId?: string }>;
+		} satisfies CustomMessage<Record<string, unknown>>;
 		this._emit({ type: "message_start", message });
 		this._emit({ type: "message_end", message });
 		return true;
@@ -4379,6 +4422,27 @@ export class AgentSession {
 			this._compactionAbortController = undefined;
 			this._reconnectToAgent();
 		}
+	}
+
+	/** Route the user-facing compact command through the configured context strategy. */
+	async compactForCommand(customInstructions?: string): Promise<CompactCommandResult> {
+		const mode = this.settingsManager.getContextManagementSettings().mode;
+		if (!this._usesHardContextWindows(mode)) {
+			return {
+				strategy: "summary",
+				summaryGenerated: true,
+				compaction: await this.compact(customInstructions),
+			};
+		}
+
+		const boundary = await this.requestContextWindow("manual");
+		return {
+			strategy: "hard_cut",
+			summaryGenerated: false,
+			boundary: boundary ?? null,
+			pending: boundary === undefined,
+			customInstructionsIgnored: customInstructions !== undefined && customInstructions.length > 0,
+		};
 	}
 
 	/**

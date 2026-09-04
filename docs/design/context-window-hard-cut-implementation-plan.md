@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.12 已完成
+> 状态：实施中，CW.0-CW.14 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -716,7 +716,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.11 | `DONE` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
 | CW.12 | `DONE` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
 | CW.13 | `DONE` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
-| CW.14 | `TODO` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
+| CW.14 | `DONE` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
 | CW.15 | `TODO` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
 | CW.16 | `TODO` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
 | CW.17 | `TODO` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
@@ -842,6 +842,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - rollback：`navigateTree()` 成功重建目标分支后统一清空旧分支的 pending cut、soft warning、overflow retry、失败原因和最近 Assistant 缓存，active messages 与 lineage 均以目标分支为准。
 - 验证：Session lifecycle 专项 Vitest 通过；`npm run check` 通过。
 - 偏差：resume/fork 创建新 `AgentSession` 时窗口运行态已由字段初始化为 idle，因此无需修改 `agent-session-runtime.ts`；新增代码只处理同一 Runtime 内的 tree navigation/rollback。
+
+### CW.14 实施记录
+
+- 实际文件：`core/agent-session.ts`、slash 命令描述、Interactive/Print/RPC mode、RPC client/types 及专项测试。
+- `/compact` 路由：新增显式 `CompactCommandResult`；`summary` 和无 Workflow provider 的 `hybrid` 返回生成摘要的结果，`windowed` 和有 provider 的 `hybrid` 返回 hard-cut boundary/pending 状态，并明确 `summaryGenerated = false`。底层 `AgentSession.compact()` 保持纯摘要 API，扩展调用不被静默改义。
+- 界面：Interactive 对 warning/end/failed 提供状态并在切窗后从 active entries 重建聊天；Print 记录最后完成的可输出消息，因此自动硬切替换 active history 后仍输出真正的 Assistant；JSON 和 RPC 继续原样流出全部窗口事件。
+- RPC 状态：`get_state` 增加 context-management mode、窗口运行态和当前分支 lineage；RPC `compact` 返回带策略判别的命令结果。
+- 验证：compact 路由、Interactive 和 Print/JSON 专项 Vitest 通过；相关 `/new-context`、RPC JSONL 回归通过；`npm run check` 通过。
+- 偏差：Print 文本模式不额外输出自动窗口事件，以保持 stdout 是最终结果；结构化 JSON 模式提供完整事件。RPC 命令使用结构化 strategy 字段，不用人类文本推断是否生成摘要。
 
 ## 16. 测试计划
 

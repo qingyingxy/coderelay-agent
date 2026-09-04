@@ -87,7 +87,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "logout", description: "Remove provider authentication" },
 	{ name: "new", description: "Start a new session" },
 	{ name: "new-context", description: "Start a fresh context window without summarizing prior messages" },
-	{ name: "compact", description: "Manually compact the session context" },
+	{ name: "compact", description: "Reduce context using the configured summary or hard-cut strategy" },
 	{ name: "resume", description: "Resume a different session" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
 	{ name: "quit", description: `Quit ${APP_NAME}` },

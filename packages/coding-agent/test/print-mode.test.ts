@@ -1,11 +1,14 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { WorkflowView } from "../src/core/workflow/view.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
 import { ZERO_USAGE } from "./workflow/fixtures.ts";
 
 type EmitEvent = SessionShutdownEvent;
+type SessionListener = (event: AgentSessionEvent) => void;
 
 type FakeExtensionRunner = {
 	hasHandlers: (eventType: string) => boolean;
@@ -15,10 +18,10 @@ type FakeExtensionRunner = {
 type FakeSession = {
 	sessionManager: { getHeader: () => object | undefined };
 	agent: { waitForIdle: () => Promise<void> };
-	state: { messages: AssistantMessage[] };
+	state: { messages: AgentMessage[] };
 	extensionRunner: FakeExtensionRunner;
 	bindExtensions: ReturnType<typeof vi.fn>;
-	subscribe: ReturnType<typeof vi.fn>;
+	subscribe: ReturnType<typeof vi.fn<(listener: SessionListener) => () => void>>;
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
 	getWorkflowView: ReturnType<typeof vi.fn>;
@@ -243,5 +246,75 @@ describe("runPrintMode", () => {
 
 		expect(chunks.join("")).toContain('"type":"workflow_result"');
 		expect(chunks.join("")).toContain('"id":"workflow-print"');
+	});
+
+	it("prints the completed assistant response after a hard cut replaces active history", async () => {
+		const assistant = createAssistantMessage({ text: "completed before hard cut" });
+		const runtimeHost = createRuntimeHost(assistant);
+		const { session } = runtimeHost;
+		let listener: SessionListener | undefined;
+		session.subscribe.mockImplementation((nextListener) => {
+			listener = nextListener;
+			return () => {};
+		});
+		session.prompt.mockImplementation(async () => {
+			listener?.({ type: "message_end", message: assistant });
+			session.state.messages = [
+				{
+					role: "custom",
+					customType: "context-window",
+					content: "new seed",
+					display: false,
+					timestamp: Date.now(),
+				},
+			];
+		});
+		const chunks: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk, encodingOrCallback, callback) => {
+			chunks.push(String(chunk));
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			done?.();
+			return true;
+		}) as typeof process.stdout.write);
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "large request",
+		});
+
+		expect(exitCode).toBe(0);
+		expect(chunks.join("")).toContain("completed before hard cut");
+		expect(chunks.join("")).not.toContain("new seed");
+	});
+
+	it("streams context-window events unchanged in JSON mode", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		session.subscribe.mockImplementation((listener) => {
+			listener({
+				type: "context_window_end",
+				reason: "threshold",
+				windowId: "window-2",
+				previousWindowId: "window-1",
+				tokensBefore: 80_000,
+				estimatedTokensAfter: 2_000,
+				seedBytes: 800,
+				noteCount: 2,
+				continueAfterCut: false,
+			});
+			return () => {};
+		});
+		const chunks: string[] = [];
+		vi.spyOn(process.stdout, "write").mockImplementation(((chunk, encodingOrCallback, callback) => {
+			chunks.push(String(chunk));
+			const done = typeof encodingOrCallback === "function" ? encodingOrCallback : callback;
+			done?.();
+			return true;
+		}) as typeof process.stdout.write);
+
+		await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], { mode: "json" });
+
+		expect(chunks.join("")).toContain('"type":"context_window_end"');
+		expect(chunks.join("")).toContain('"windowId":"window-2"');
 	});
 });

@@ -8,6 +8,7 @@ export {
 	type AgentSessionEvent,
 	type AgentSessionEventListener,
 	CONTEXT_WINDOW_RUNTIME_PHASES,
+	type CompactCommandResult,
 	type ContextWindowRuntimePhase,
 	type ContextWindowRuntimeState,
 	type ModelCycleResult,

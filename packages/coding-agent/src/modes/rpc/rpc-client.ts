@@ -7,9 +7,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
+import type { AgentSessionEvent, CompactCommandResult, SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
-import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { WorkflowAutomationResult } from "../../core/workflow/autonomous-workflow-types.ts";
 import type { ExecutionMode } from "../../core/workflow/types.ts";
@@ -355,7 +354,7 @@ export class RpcClient {
 	/**
 	 * Compact session context.
 	 */
-	async compact(customInstructions?: string): Promise<CompactionResult> {
+	async compact(customInstructions?: string): Promise<CompactCommandResult> {
 		const response = await this.send({ type: "compact", customInstructions });
 		return this.getData(response);
 	}

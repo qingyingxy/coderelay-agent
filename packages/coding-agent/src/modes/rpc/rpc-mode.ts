@@ -460,6 +460,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					workflowAutomationEnabled: session.workflowAutomationEnabled,
 					workflowClarificationPending: session.workflowClarificationPending,
 					workflow: session.getWorkflowView(),
+					contextManagementMode: session.settingsManager.getContextManagementSettings().mode,
+					contextWindow: session.contextWindowRuntimeState,
+					contextWindowLineage: session.sessionManager.getContextWindowLineage(),
 				};
 				return success(id, "get_state", state);
 			}
@@ -567,7 +570,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "compact": {
-				const result = await session.compact(command.customInstructions);
+				const result = await session.compactForCommand(command.customInstructions);
 				return success(id, "compact", result);
 			}
 

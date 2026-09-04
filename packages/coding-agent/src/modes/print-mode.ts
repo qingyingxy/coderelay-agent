@@ -6,7 +6,8 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { type AssistantMessage, contentText, type ImageContent } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -38,6 +39,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let unsubscribe: (() => void) | undefined;
 	let disposed = false;
 	let workflowResultEmitted = false;
+	let lastOutputMessage: AgentMessage | undefined;
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeRuntime = async (): Promise<void> => {
@@ -105,6 +107,12 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {
+			if (
+				event.type === "message_end" &&
+				(event.message.role === "assistant" || (event.message.role === "custom" && event.message.display !== false))
+			) {
+				lastOutputMessage = event.message;
+			}
 			if (mode === "json") {
 				if (event.type === "workflow_result") {
 					workflowResultEmitted = true;
@@ -140,7 +148,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		if (mode === "text") {
 			const state = session.state;
-			const lastMessage = state.messages[state.messages.length - 1];
+			const lastMessage = lastOutputMessage ?? state.messages[state.messages.length - 1];
 
 			if (lastMessage?.role === "assistant") {
 				const assistantMsg = lastMessage as AssistantMessage;
@@ -154,6 +162,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 						}
 					}
 				}
+			} else if (lastMessage?.role === "custom" && lastMessage.display !== false) {
+				const text = contentText(lastMessage.content, "");
+				if (text) writeRawStdout(`${text}\n`);
 			}
 			if (includeWorkflowReport && workflow) {
 				writeRawStdout(`[workflow]\n${workflow.reportLines.join("\n")}\n`);

@@ -57,6 +57,48 @@ describe("InteractiveMode compaction events", () => {
 		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 	});
 
+	test("rebuilds chat and reports that a hard cut generated no summary", async () => {
+		const fakeThis = {
+			isInitialized: true,
+			footer: { invalidate: vi.fn() },
+			rebuildChatFromMessages: vi.fn(),
+			showStatus: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+
+		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+			this: typeof fakeThis,
+			event: {
+				type: "context_window_end";
+				reason: "manual";
+				windowId: string;
+				previousWindowId: string;
+				tokensBefore: number;
+				estimatedTokensAfter: number;
+				seedBytes: number;
+				noteCount: number;
+				continueAfterCut: boolean;
+			},
+		) => Promise<void>;
+
+		await handleEvent.call(fakeThis, {
+			type: "context_window_end",
+			reason: "manual",
+			windowId: "window-2",
+			previousWindowId: "window-1",
+			tokensBefore: 80_000,
+			estimatedTokensAfter: 2_000,
+			seedBytes: 800,
+			noteCount: 2,
+			continueAfterCut: false,
+		});
+
+		expect(fakeThis.rebuildChatFromMessages).toHaveBeenCalledTimes(1);
+		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("no summary was generated"));
+		expect(fakeThis.showStatus).toHaveBeenCalledWith(expect.stringContaining("window-2"));
+		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	});
+
 	test("preserves steering behavior when flushing into an active agent run", async () => {
 		const fakeThis = {
 			compactionQueuedMessages: [{ text: "change direction", mode: "steer" as const }],

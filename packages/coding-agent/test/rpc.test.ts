@@ -94,8 +94,10 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 
 		// Compact
 		const result = await client.compact();
-		expect(result.summary).toBeDefined();
-		expect(result.tokensBefore).toBeGreaterThan(0);
+		expect(result.strategy).toBe("summary");
+		if (result.strategy !== "summary") throw new Error("Expected summary compaction");
+		expect(result.compaction.summary).toBeDefined();
+		expect(result.compaction.tokensBefore).toBeGreaterThan(0);
 
 		// Wait for file writes
 		await new Promise((resolve) => setTimeout(resolve, 200));
