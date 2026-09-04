@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.16 已完成
+> 状态：实施中，CW.0-CW.17 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -719,7 +719,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.14 | `DONE` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
 | CW.15 | `DONE` | 完成统计和 trace | AgentSession stats、evaluation | CW.9、CW.10、CW.11 |
 | CW.16 | `DONE` | 确定性和 Faux Provider 评测 | `test/`、`evals/` | CW.15 |
-| CW.17 | `TODO` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
+| CW.17 | `DONE` | 真实模型 A/B/C 矩阵 | `evals/`、文档 | CW.16 |
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
@@ -869,6 +869,17 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 失败样本：评测结果在失败时附带当前分支、active messages 和 context-management trace；成功结果只保留聚合指标，避免报告无界膨胀。
 - 验证：`npm run eval:context-window` 和专项 Vitest 均为 4/4 通过；评测固定使用 Faux Provider，不需要网络、凭据或付费 token。
 - 偏差：CW.16 只证明确定性机制和策略路由满足协议，不能衡量真实模型的 Notes 质量、History 使用决策或长任务完成率；默认模式继续保持 `summary`，等待 CW.17。
+
+### CW.17 实施记录
+
+- 实际文件：`evals/context-window/evaluate-real.ts`、版本化 Task Set、评测 README、`cw17-report.md`、真实评测专项测试，以及 History strict-schema 兼容回归。
+- 固定配置：`qingyingxy/gpt-5.6-terra`、`medium` effort、272000 token 评测窗口、每次最多 3000 output tokens；8 个 run 和所有模型交互严格串行，禁用 Provider 自动重试。
+- 计费：按 OpenAI 官方 GPT-5.6 Terra 短上下文价格估算；reasoning 作为 output 子集不重复计费。最终矩阵估算 `$0.472444`，包括调试和中止批次的开发评测总估算约 `$1.183453`。
+- 机制结果：8/8 使用预期 summary/hard-cut 路由并保留完整 Session JSONL；6/6 硬切组 Notes 和 History 查询成功；4/4 Workflow 组的窗口边界引用 Snapshot。
+- 任务结果：严格端到端输出 5/8 通过；所有 8 个 run 都找回了除外部 `task_id` 以外的全部耐久事实和精确工具值。三个失败分别把 `record_id` 或 Workflow 内部 `task-<uuid>` 写入通用 `task_id`，暴露了 Snapshot、History 和任务协议之间的 ID 命名空间歧义。
+- 评测修正：History 的 OpenAI-compatible strict Schema 允许无关可选字段使用 `null` 并在执行前归一化；强制切窗工具在首个成功 benchmark boundary 后从续跑窗口移除，防止 checkpoint 指令随 seed 重放形成重复切窗。
+- 验证：Task Set 校验通过；History 与真实 runner 专项 Vitest 7/7 通过；`npm run check` 退出码 0。Biome 仍对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，但未修改该文件，后续依赖、类型和 browser smoke 检查均通过。
+- 结论：当前样本证明硬切、Notes、History 和 Workflow Snapshot 的机制链路可用，但没有证明 Workflow 组端到端质量优于摘要组。默认模式继续保持 `summary`；CW.18 必须先消除外部/内部 ID 歧义并增加重复样本，不能直接切换默认值。
 
 ## 16. 测试计划
 

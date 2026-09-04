@@ -5,15 +5,42 @@ import { HISTORY_ROLES, type HistoryQueryRequest, type HistoryQueryResult, type 
 const historySchema = Type.Object(
 	{
 		action: Type.Union([Type.Literal("list"), Type.Literal("search"), Type.Literal("read")]),
-		query: Type.Optional(Type.String({ minLength: 1, description: "Text to find for search" })),
-		role: Type.Optional(Type.Union(HISTORY_ROLES.map((role) => Type.Literal(role)))),
-		tool: Type.Optional(Type.String({ minLength: 1, description: "Exact tool name filter for search" })),
-		window_id: Type.Optional(Type.String({ minLength: 1, description: "Window ID from history list" })),
-		entry_ids: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 50 }),
+		query: Type.Optional(
+			Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+				description: "Text to find for search; use null for list/read",
+			}),
 		),
-		cursor: Type.Optional(Type.String({ minLength: 1, description: "Opaque cursor returned by a previous call" })),
-		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+		role: Type.Optional(
+			Type.Union([...HISTORY_ROLES.map((role) => Type.Literal(role)), Type.Null()], {
+				description: "Role filter for search; use null for no filter or other actions",
+			}),
+		),
+		tool: Type.Optional(
+			Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+				description: "Exact tool name filter for search; use null for no filter or other actions",
+			}),
+		),
+		window_id: Type.Optional(
+			Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+				description: "Intentional window filter or read target; otherwise use null",
+			}),
+		),
+		entry_ids: Type.Optional(
+			Type.Union(
+				[Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 50 }), Type.Null()],
+				{ description: "Entry IDs for read; otherwise use null" },
+			),
+		),
+		cursor: Type.Optional(
+			Type.Union([Type.String({ minLength: 1 }), Type.Null()], {
+				description: "Opaque continuation cursor from a prior call; use null on the first call",
+			}),
+		),
+		limit: Type.Optional(
+			Type.Union([Type.Integer({ minimum: 1, maximum: 50 }), Type.Null()], {
+				description: "Maximum result count; use null for the default",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -25,35 +52,35 @@ export interface HistoryToolDetails {
 
 function toRequest(params: {
 	readonly action: "list" | "search" | "read";
-	readonly query?: string;
-	readonly role?: HistoryRole;
-	readonly tool?: string;
-	readonly window_id?: string;
-	readonly entry_ids?: readonly string[];
-	readonly cursor?: string;
-	readonly limit?: number;
+	readonly query?: string | null;
+	readonly role?: HistoryRole | null;
+	readonly tool?: string | null;
+	readonly window_id?: string | null;
+	readonly entry_ids?: readonly string[] | null;
+	readonly cursor?: string | null;
+	readonly limit?: number | null;
 }): HistoryQueryRequest {
 	if (params.action === "list") {
-		return { action: "list", cursor: params.cursor, limit: params.limit };
+		return { action: "list", cursor: params.cursor ?? undefined, limit: params.limit ?? undefined };
 	}
 	if (params.action === "search") {
 		if (!params.query) throw new Error("history search requires query");
 		return {
 			action: "search",
 			query: params.query,
-			role: params.role,
-			tool: params.tool,
-			windowId: params.window_id,
-			cursor: params.cursor,
-			limit: params.limit,
+			role: params.role ?? undefined,
+			tool: params.tool ?? undefined,
+			windowId: params.window_id ?? undefined,
+			cursor: params.cursor ?? undefined,
+			limit: params.limit ?? undefined,
 		};
 	}
 	return {
 		action: "read",
-		entryIds: params.entry_ids,
-		windowId: params.window_id,
-		cursor: params.cursor,
-		limit: params.limit,
+		entryIds: params.entry_ids ?? undefined,
+		windowId: params.window_id ?? undefined,
+		cursor: params.cursor ?? undefined,
+		limit: params.limit ?? undefined,
 	};
 }
 

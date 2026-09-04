@@ -57,4 +57,38 @@ describe("AgentSession history tool", () => {
 			}),
 		]);
 	});
+
+	it("treats nullable unused arguments from strict tool schemas as absent", async () => {
+		const harness = await createHarness({ settings: { contextManagement: { mode: "windowed" } } });
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("nullable-history-needle")]);
+		await harness.session.prompt("first objective");
+		await harness.session.requestContextWindow("manual");
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("history", {
+					action: "search",
+					query: "nullable-history-needle",
+					role: null,
+					tool: null,
+					window_id: null,
+					entry_ids: null,
+					cursor: null,
+					limit: 10,
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("retrieved"),
+		]);
+
+		await harness.session.prompt("recover the earlier answer");
+
+		const resultMessage = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "history",
+		);
+		expect(resultMessage ? getMessageText(resultMessage) : "").toContain("nullable-history-needle");
+		expect(harness.eventsOfType("history_query")).toEqual([
+			expect.objectContaining({ action: "search", resultCount: 1, truncated: false }),
+		]);
+	});
 });

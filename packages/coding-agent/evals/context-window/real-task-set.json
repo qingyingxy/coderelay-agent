@@ -1,0 +1,54 @@
+{
+	"schemaVersion": 1,
+	"id": "context-window-real-smoke-v1",
+	"tasks": [
+		{
+			"id": "routing-ledger",
+			"description": "Preserve a routing decision and recover an exact tool result after the context boundary.",
+			"durableFacts": [
+				"The final decision is canary-17.",
+				"The responsible owner is team-ember.",
+				"The obsolete decision all-at-once must not appear in the final response."
+			],
+			"lookup": {
+				"recordId": "routing-ledger-record",
+				"value": {
+					"artifact_digest": "sha256:7f31c9a2"
+				}
+			},
+			"expected": {
+				"task_id": "routing-ledger",
+				"decision": "canary-17",
+				"artifact_digest": "sha256:7f31c9a2",
+				"owner": "team-ember"
+			},
+			"forbiddenTerms": ["all-at-once"],
+			"distractorRecords": 256
+		},
+		{
+			"id": "repair-ledger",
+			"description": "Preserve the next repair action and recover attempt metadata after the context boundary.",
+			"durableFacts": [
+				"The next action is verify-module-kappa.",
+				"Attempt 2 is obsolete and must not appear in the final response."
+			],
+			"lookup": {
+				"recordId": "repair-ledger-record",
+				"value": {
+					"repair_target": "module-kappa",
+					"attempt": 3,
+					"verification": "rerun-C17"
+				}
+			},
+			"expected": {
+				"task_id": "repair-ledger",
+				"next_action": "verify-module-kappa",
+				"repair_target": "module-kappa",
+				"attempt": 3,
+				"verification": "rerun-C17"
+			},
+			"forbiddenTerms": ["attempt 2"],
+			"distractorRecords": 256
+		}
+	]
+}
