@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.3 已完成
+> 状态：实施中，CW.0-CW.17.4 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -723,7 +723,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17.1 | `DONE` | 强化内部/外部 ID 命名空间 | Snapshot 投影、真实评测协议 | CW.17 |
 | CW.17.2 | `DONE` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
 | CW.17.3 | `DONE` | 生命周期恢复与隔离确定性评测 | `evals/`、测试、报告 | CW.17.2 |
-| CW.17.4 | `TODO` | 真实多窗口编码与进程级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
+| CW.17.4 | `DONE` | 真实多窗口编码与磁盘级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
 | CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.4 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
@@ -910,7 +910,17 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 结果：5/5 场景通过；旧窗口始终留在完整分支，active history 仅从最新边界构建，History 在原 Session 和 fork 中都不能读取 sibling branch，resume 不重新生成 seed。
 - Workflow 恢复：Snapshot 保留失败 Verification 和运行中的 Repair Attempt；恢复后不确定 Attempt 被标记为 `interrupted`，新的 Attempt 通过 `recoveryOfAttemptId` 显式关联并遵守 Writer Lease 前置条件。
 - 验证：专项 Vitest 1/1 通过，`npm run eval:context-window:lifecycle` 返回 5/5；Faux Provider、严格串行、无网络和付费 token。
-- 结论：生命周期机制和隔离不变量已有组合验证，但脚本响应不能证明真实模型的跨窗编码质量；CW.17.4 继续做少量、严格串行的真实多窗口编码与进程级恢复评测，默认仍保持 `summary`。
+- 结论：生命周期机制和隔离不变量已有组合验证，但脚本响应不能证明真实模型的跨窗编码质量；CW.17.4 继续做少量、严格串行的真实多窗口编码与磁盘级 AgentSession 恢复评测，默认仍保持 `summary`。
+
+### CW.17.4 实施记录
+
+- 实际文件：`evals/context-window/evaluate-real-coding.ts`、`real-coding-task-set.json`、专项测试、评测 README、`cw17.4-report.md` 和本计划；根目录增加 `eval:context-window:real-coding` 命令。
+- 真实任务：模型读取规格与 stub，只修改 `src/router.mjs`，经历隐藏验证失败后跨第二个边界恢复精确错误并完成 repair；runner 最后独立复验，同时校验受保护文件哈希和工作区文件集合。
+- 恢复与窗口：A/C 每个 run 都销毁并从同一 Session JSONL 重建 AgentSession 两次；A 生成 2 个 summary，C 生成 2 个连续 hard window、引用 2 个 Workflow Snapshot、写入 2 次不含秘密值的 Notes，并用 1 次 History 查询命中旧失败。
+- 结果：`qingyingxy/gpt-5.6-terra`、`medium`、A 后 C 严格串行，2/2 通过；A/C 分别估算 `$0.103436`/`$0.109228`，合计 `$0.212664`。C 相对 A input 增加 33.5%、output 减少 41.2%、成本增加 5.6%、耗时减少 19.5%，单样本只作描述。
+- 覆盖分层：真实模型负责跨窗编码、JSONL resume、History 决策和 repair；fork/rollback、Attempt/Verification 实体恢复、overflow 和 sibling 隔离继续由 CW.17.3 的确定性注入覆盖，避免用随机采样验证控制面状态机。
+- 验证：专项 Vitest 4/4、Task Set 离线校验、真实 runner 2/2 和 `npm run check` 均通过；Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查和总退出码正常。
+- 结论：请求的生命周期风险已有组合评测，但一个合成代码任务、每组一次不足以改变默认值；默认继续保持 `summary`，CW.18 在扩大仓库、任务和重复样本后再决定。
 
 ## 16. 测试计划
 

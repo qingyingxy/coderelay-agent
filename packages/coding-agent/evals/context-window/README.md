@@ -31,6 +31,26 @@ The command prints a uniform JSON report with checks and evidence for every scen
 
 The 5/5 deterministic lifecycle result is documented in [cw17.3-report.md](./cw17.3-report.md).
 
+## Serial real-model coding evaluation
+
+The coding runner compares the summary baseline with the Workflow-backed hard-cut strategy on a real file-edit task. Each run crosses two controlled boundaries, destroys and recreates the AgentSession from the same Session JSONL twice, exposes one hidden verification failure, and requires a final repair plus an independent verifier run. The hard-cut group must use Notes for durable constraints and History for the exact pre-boundary failure.
+
+Validate the task and hidden verifier without network access:
+
+```bash
+npm run eval:context-window:real-coding -- --verify-task-set
+```
+
+Run the two paid groups strictly serially with an explicit cost cap:
+
+```bash
+npm run eval:context-window:real-coding -- --provider qingyingxy --model gpt-5.6-terra --thinking medium --max-cost 3 --output .artifacts/context-window-real-coding-v1
+```
+
+The runner protects the fixture specification, allows edits only to `src/router.mjs`, records both resume checks and all verification executions, and aborts remaining paid runs after an execution error.
+
+The first 2/2 real-model coding result is documented in [cw17.4-report.md](./cw17.4-report.md).
+
 ## Serial real-model smoke evaluation
 
 The real-model runner compares the same four groups on two versioned tasks. It forces the boundary at the same phase in every run, grades exact JSON without a model judge, and persists each Session JSONL, context-management trace, response, result, checkpoint, and aggregate report. Hard-cut groups request `new_context` inside the active model turn so Workflow groups can checkpoint the authoritative Snapshot before replacing active history. The runner removes `new_context` after the first accepted benchmark boundary, enforcing exactly one cut per case while leaving Notes and History available. Repeated runs are stored under separate `repeat-NN` directories and remain strictly serial.
