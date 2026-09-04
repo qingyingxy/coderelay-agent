@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.4 已完成
+> 状态：实施中，CW.0-CW.17.5 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -724,7 +724,8 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17.2 | `DONE` | 三次重复真实模型矩阵 | `evals/`、报告 | CW.17.1 |
 | CW.17.3 | `DONE` | 生命周期恢复与隔离确定性评测 | `evals/`、测试、报告 | CW.17.2 |
 | CW.17.4 | `DONE` | 真实多窗口编码与磁盘级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.4 |
+| CW.17.5 | `DONE` | 硬切事务边界的 OS 子进程异常退出恢复评测 | `evals/`、测试、报告 | CW.17.4 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.5 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -921,6 +922,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 覆盖分层：真实模型负责跨窗编码、JSONL resume、History 决策和 repair；fork/rollback、Attempt/Verification 实体恢复、overflow 和 sibling 隔离继续由 CW.17.3 的确定性注入覆盖，避免用随机采样验证控制面状态机。
 - 验证：专项 Vitest 4/4、Task Set 离线校验、真实 runner 2/2 和 `npm run check` 均通过；Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows 访问拒绝，后续检查和总退出码正常。
 - 结论：请求的生命周期风险已有组合评测，但一个合成代码任务、每组一次不足以改变默认值；默认继续保持 `summary`，CW.18 在扩大仓库、任务和重复样本后再决定。
+
+### CW.17.5 实施记录
+
+- 实际文件：`evals/context-window/evaluate-process-recovery.ts`、专项测试、评测 README、`cw17.5-report.md` 和本计划；根目录增加 `eval:context-window:process-recovery` 命令。
+- 故障注入：两个独立 Node.js 子进程分别在 Workflow Snapshot 同步写盘后、ContextWindowEntry 写入前以状态码 86 退出，以及在 ContextWindowEntry 写盘并替换 active history 后、续答开始前以状态码 87 退出；父进程严格串行地重新打开原 Session JSONL 并创建新 AgentSession。
+- 结果：2/2 场景通过。只有 Snapshot 时恢复旧窗口且不自动重放丢失的 `new_context` 请求；边界已提交时恢复唯一 seed 和 index 1 lineage，旧 probe 不进入 active history但可由当前分支 History 精确命中，恢复续答不会重复写边界。
+- 事务语义：ContextWindowEntry 是窗口提交标记，Snapshot 自身不推进 active window；pending cut 是进程内状态，恢复采用 at-most-once 语义。两种崩溃点都可继续 provider turn，且完整旧 Entry 仍保留。
+- 验证：专项 Vitest 1/1 和独立 runner 2/2 通过；Faux Provider、无网络、无付费 token。
+- 范围：验证完整同步 JSONL append 后的 OS 进程退出，不覆盖 append 中途断电、半行 JSONL、磁盘损坏或并发 writer。默认继续保持 `summary`，扩大真实仓库和重复编码样本后再进入 CW.18。
 
 ## 16. 测试计划
 

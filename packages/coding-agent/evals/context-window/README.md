@@ -31,6 +31,18 @@ The command prints a uniform JSON report with checks and evidence for every scen
 
 The 5/5 deterministic lifecycle result is documented in [cw17.3-report.md](./cw17.3-report.md).
 
+## OS-process crash recovery evaluation
+
+The process-recovery runner force-exits two independent Node.js child processes at the hard-cut transaction boundaries: after the Workflow Snapshot is durable but before the ContextWindowEntry, and after the ContextWindowEntry is durable but before the new-window continuation. A fresh parent-side AgentSession then reopens the same Session JSONL and verifies which window is active, whether History remains available, and whether the interrupted cut is duplicated.
+
+```bash
+npm run eval:context-window:process-recovery
+```
+
+This evaluation uses the Faux Provider, runs both crash scenarios serially, and consumes no paid tokens. It covers abrupt process exit after complete synchronous writes, not partial filesystem writes or disk corruption.
+
+The 2/2 process-recovery result is documented in [cw17.5-report.md](./cw17.5-report.md).
+
 ## Serial real-model coding evaluation
 
 The coding runner compares the summary baseline with the Workflow-backed hard-cut strategy on a real file-edit task. Each run crosses two controlled boundaries, destroys and recreates the AgentSession from the same Session JSONL twice, exposes one hidden verification failure, and requires a final repair plus an independent verifier run. The hard-cut group must use Notes for durable constraints and History for the exact pre-boundary failure.
