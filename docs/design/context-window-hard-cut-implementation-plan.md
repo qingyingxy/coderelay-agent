@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.17.5 已完成
+> 状态：实施中，CW.0-CW.17.6 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -290,6 +290,8 @@ History retrieval instruction
 - 当前分支出现循环或无法解析的 parent 链。
 
 不得静默回退为“把全部旧历史重新发给模型”，因为这可能再次溢出；也不得静默使用空种子，因为这会造成状态丢失。
+
+物理文件末尾未写完的单条 JSON 记录属于未提交 tail，不等同于一条已解析但 Schema 损坏的 Entry。恢复时忽略该残行，以最后一条完整记录为准；首次续写必须先补物理换行，确保新 Entry 不与残行粘连。文件中部损坏仍不在这一恢复规则内。
 
 ## 7. Workflow Snapshot 集成
 
@@ -725,7 +727,8 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.17.3 | `DONE` | 生命周期恢复与隔离确定性评测 | `evals/`、测试、报告 | CW.17.2 |
 | CW.17.4 | `DONE` | 真实多窗口编码与磁盘级恢复评测 | `evals/`、任务集、报告 | CW.17.3 |
 | CW.17.5 | `DONE` | 硬切事务边界的 OS 子进程异常退出恢复评测 | `evals/`、测试、报告 | CW.17.4 |
-| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.5 |
+| CW.17.6 | `DONE` | JSONL 残缺尾行恢复与续写评测 | `session-manager.ts`、`evals/`、测试、报告 | CW.17.5 |
+| CW.18 | `TODO` | 默认模式决策 | 设置、CHANGELOG、用户文档 | CW.17.6 |
 
 每完成一个任务，应把状态改为 `DONE`，并在任务下补充实际文件、测试命令和与原计划的偏差。不能在未完成依赖时批量标记后续任务完成。
 
@@ -932,6 +935,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 验证：专项 Vitest 1/1 和独立 runner 2/2 通过；Faux Provider、无网络、无付费 token。
 - 范围：验证完整同步 JSONL append 后的 OS 进程退出，不覆盖 append 中途断电、半行 JSONL、磁盘损坏或并发 writer。默认继续保持 `summary`，扩大真实仓库和重复编码样本后再进入 CW.18。
 
+### CW.17.6 实施记录
+
+- 实际文件：`core/session-manager.ts`、SessionManager 尾行专项测试、`evals/context-window/evaluate-tail-recovery.ts`、评测专项测试、README、`cw17.6-report.md`、CHANGELOG 和本计划；根目录增加 `eval:context-window:tail-recovery` 命令。
+- 缺陷：加载器原本会忽略不完整尾行，但 resume 后第一次 append 会直接粘在没有换行的残片后；第二次重开会把残片和新 Entry 作为同一坏行忽略，造成恢复后的进展丢失。
+- 修正：打开现有 Session 时只读取最后一个物理 byte；若不是 `LF`，首次 append 前增加一个分隔换行。残片不改写、不伪装成有效 Entry，后续完整 Entry 可独立解析；正常以换行结尾的 append 路径不增加额外 I/O。
+- 结果：低层回归 2/2，高层场景 3/3。Snapshot 残行恢复旧窗口且 Snapshot 数为 0；ContextWindowEntry 残行保留完整 Snapshot 但恢复旧窗口；新窗口首条 Assistant 残行保留完整边界并恢复 index 1 新窗口。三者 History 均命中，续答经第二次 reopen 仍存在，且不会补造或重复 commit。
+- 验证：两个专项 Vitest、独立 runner 和 `npm run check`；Faux Provider、严格串行、无网络和付费 token。
+- 范围：只处理文件末尾残缺记录或完整记录缺少最终换行，不宣称恢复文件中部损坏、已完整记录被覆盖、存储重排或并发 writer。默认继续保持 `summary`；下一步扩大真实仓库与重复编码样本，再进入 CW.18。
+
 ## 16. 测试计划
 
 ### 16.1 SessionManager 单元测试
@@ -968,6 +980,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - Snapshot Entry ID 与 seed 中 sequence 一致。
 - 进程在 Snapshot 后、窗口 Entry 前退出时恢复旧窗口。
 - 进程在窗口 Entry 后退出时恢复新窗口。
+- Snapshot、窗口 Entry 或新窗口首条消息形成残缺 JSONL 尾行时，以最后完整提交点恢复且续写可再次重开。
 - rollback 后恢复目标分支对应 Snapshot 和窗口。
 
 ### 16.4 History/Notes 测试

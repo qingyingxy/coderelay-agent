@@ -43,6 +43,16 @@ This evaluation uses the Faux Provider, runs both crash scenarios serially, and 
 
 The 2/2 process-recovery result is documented in [cw17.5-report.md](./cw17.5-report.md).
 
+## JSONL tail-damage recovery evaluation
+
+The tail-recovery runner generates a genuine Workflow-backed hard-cut Session JSONL, then truncates copies inside the Workflow Snapshot, ContextWindowEntry, or first new-window Assistant response. Each copy must select the last complete commit state, continue with the Faux Provider, keep the new append physically separate from the malformed tail, and preserve that continuation through a second reopen.
+
+```bash
+npm run eval:context-window:tail-recovery
+```
+
+The 3/3 result and the recovered append defect found by this evaluation are documented in [cw17.6-report.md](./cw17.6-report.md).
+
 ## Serial real-model coding evaluation
 
 The coding runner compares the summary baseline with the Workflow-backed hard-cut strategy on a real file-edit task. Each run crosses two controlled boundaries, destroys and recreates the AgentSession from the same Session JSONL twice, exposes one hidden verification failure, and requires a final repair plus an independent verifier run. The hard-cut group must use Notes for durable constraints and History for the exact pre-boundary failure.

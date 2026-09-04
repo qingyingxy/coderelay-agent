@@ -951,6 +951,7 @@ export class SessionManager {
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
+	private appendNeedsLeadingNewline: boolean = false;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private labelsById: Map<string, string> = new Map();
@@ -986,7 +987,19 @@ export class SessionManager {
 
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
 		this.sessionFile = resolvePath(sessionFile);
+		this.appendNeedsLeadingNewline = false;
 		if (existsSync(this.sessionFile)) {
+			const fileSize = statSync(this.sessionFile).size;
+			if (fileSize > 0) {
+				const fd = openSync(this.sessionFile, "r");
+				try {
+					const finalByte = Buffer.allocUnsafe(1);
+					readSync(fd, finalByte, 0, finalByte.length, fileSize - 1);
+					this.appendNeedsLeadingNewline = finalByte[0] !== 0x0a;
+				} finally {
+					closeSync(fd);
+				}
+			}
 			this.fileEntries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
 
 			// If file was empty, initialize it with a valid session header. If it was
@@ -1039,6 +1052,7 @@ export class SessionManager {
 		this.labelTimestampsById.clear();
 		this.leafId = null;
 		this.flushed = false;
+		this.appendNeedsLeadingNewline = false;
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -1078,6 +1092,7 @@ export class SessionManager {
 		} finally {
 			closeSync(fd);
 		}
+		this.appendNeedsLeadingNewline = false;
 	}
 
 	private _rewriteFileAtomically(): void {
@@ -1092,6 +1107,7 @@ export class SessionManager {
 			rmSync(temporaryPath, { force: true });
 			throw error;
 		}
+		this.appendNeedsLeadingNewline = false;
 	}
 
 	isPersisted(): boolean {
@@ -1118,13 +1134,20 @@ export class SessionManager {
 		return this.sessionFile;
 	}
 
+	private _appendPersistedEntry(entry: SessionEntry): void {
+		if (!this.sessionFile) return;
+		const prefix = this.appendNeedsLeadingNewline ? "\n" : "";
+		appendFileSync(this.sessionFile, `${prefix}${JSON.stringify(entry)}\n`);
+		this.appendNeedsLeadingNewline = false;
+	}
+
 	_persist(entry: SessionEntry): void {
 		if (!this.persist || !this.sessionFile) return;
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				this._appendPersistedEntry(entry);
 			} else {
 				// Mark as not flushed so when assistant arrives, all entries get written
 				this.flushed = false;
@@ -1143,7 +1166,7 @@ export class SessionManager {
 			}
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			this._appendPersistedEntry(entry);
 		}
 	}
 

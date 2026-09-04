@@ -40,6 +40,7 @@
 		"eval:context-window": "tsx packages/coding-agent/evals/context-window/evaluate.ts",
 		"eval:context-window:lifecycle": "tsx packages/coding-agent/evals/context-window/evaluate-lifecycle.ts",
 		"eval:context-window:process-recovery": "tsx packages/coding-agent/evals/context-window/evaluate-process-recovery.ts",
+		"eval:context-window:tail-recovery": "tsx packages/coding-agent/evals/context-window/evaluate-tail-recovery.ts",
 		"eval:context-window:real": "tsx packages/coding-agent/evals/context-window/evaluate-real.ts",
 		"eval:context-window:real-coding": "tsx packages/coding-agent/evals/context-window/evaluate-real-coding.ts",
 		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
