@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.6 已完成
+> 状态：实施中，CW.0-CW.7 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -709,7 +709,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.4 | `DONE` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
 | CW.5 | `DONE` | 为 Plan 暴露 checkpoint 引用 | `workflow/plan-runtime.ts` | CW.4 |
 | CW.6 | `DONE` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
-| CW.7 | `TODO` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
+| CW.7 | `DONE` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
 | CW.8 | `TODO` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
 | CW.9 | `TODO` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
 | CW.10 | `TODO` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
@@ -780,6 +780,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 失败边界：Snapshot 追加失败时同步抛错，不返回不可恢复的 checkpoint，旧 active history 可由后续切窗事务保持不变。
 - 验证：Direct checkpoint 专项 Vitest 2 项测试通过；`npm run check` 通过。
 - 偏差：无。
+
+### CW.7 实施记录
+
+- 实际文件：`core/agent-session.ts`、公共导出入口、Faux Provider 硬切事务专项测试。
+- 状态机：加入 `idle/soft_warning_pending/notes_collection/cut_pending/cutting/failed`；记录 reason、请求 Entry/turn、续跑策略、warning、overflow retry 和失败原因。
+- 安全事务：空闲请求立即切窗；运行中请求延迟到 `turn_end` 之后的 `prepareNextTurnWithContext`，确认工具调用清空并落盘后，依次写 Snapshot、生成投影、创建 lineage、追加边界并重建 active history。
+- 故障边界：Snapshot 或边界写入失败不会替换 active messages；边界写入后重建失败进入 `failed`，后续采样被拒绝。
+- 验证：Faux Provider 专项 Vitest 3 项、既有 prompt/compaction 回归 29 项通过；`npm run check` 通过。
+- 偏差：Notes 尚未实现，seed 的 `noteEntryIds` 暂为空；无 Workflow 时使用有界的最近用户目标作为最小连续性种子，CW.10 再合并 Notes hint。
 
 ## 16. 测试计划
 

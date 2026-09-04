@@ -64,6 +64,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
+import type { ContextManagementEvent, ContextWindowReason } from "./context-management.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { DeliveryRuntime, DiffCollector, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -101,7 +102,14 @@ import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
-import type { BranchSummaryEntry, CompactionEntry, SessionEntry, SessionManager } from "./session-manager.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ContextWindowEntry,
+	ContextWindowSeed,
+	SessionEntry,
+	SessionManager,
+} from "./session-manager.ts";
 import { CURRENT_SESSION_VERSION, getLatestCompactionEntry, type SessionHeader } from "./session-manager.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
@@ -141,8 +149,14 @@ import { createWorkflowAutomationPolicy, requiresPlanMode } from "./workflow/aut
 import { AutonomousWorkflowRunner } from "./workflow/autonomous-workflow-runner.ts";
 import type { AutonomousWorkflowEvent, WorkflowAutomationResult } from "./workflow/autonomous-workflow-types.ts";
 import type { RequiredClarification } from "./workflow/clarification-gate.ts";
+import {
+	projectWorkflowSnapshot,
+	type WorkflowContextCheckpoint,
+	type WorkflowContextProvider,
+} from "./workflow/context-window-projection.ts";
 import type { DecisionExplanation } from "./workflow/decision-reasons.ts";
 import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
+import { WORKFLOW_SNAPSHOT_CUSTOM_TYPE } from "./workflow/event-log.ts";
 import {
 	applyExecutionProtocolToPlan,
 	createAdaptiveExecutionProtocol,
@@ -212,6 +226,7 @@ export function parseSkillBlock(text: string): ParsedSkillBlock | null {
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
 	| AutonomousWorkflowEvent
+	| ContextManagementEvent
 	| {
 			type: "agent_end";
 			messages: AgentMessage[];
@@ -286,6 +301,28 @@ export type AgentSessionEvent =
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
+
+export const CONTEXT_WINDOW_RUNTIME_PHASES = [
+	"idle",
+	"soft_warning_pending",
+	"notes_collection",
+	"cut_pending",
+	"cutting",
+	"failed",
+] as const;
+
+export type ContextWindowRuntimePhase = (typeof CONTEXT_WINDOW_RUNTIME_PHASES)[number];
+
+export interface ContextWindowRuntimeState {
+	readonly phase: ContextWindowRuntimePhase;
+	readonly reason?: ContextWindowReason;
+	readonly requestedAtEntryId?: string;
+	readonly requestedAtTurn?: number;
+	readonly continueAfterCut: boolean;
+	readonly softWarningIssued: boolean;
+	readonly overflowRecoveryAttempted: boolean;
+	readonly error?: string;
+}
 
 // ============================================================================
 // Types
@@ -423,6 +460,13 @@ interface DirectVerificationRecord {
 	readonly evidenceRef: string;
 }
 
+interface PendingContextWindowCut {
+	readonly reason: ContextWindowReason;
+	readonly requestedAtEntryId?: string;
+	readonly requestedAtTurn: number;
+	readonly continueAfterCut: boolean;
+}
+
 function estimateMessagesTokens(messages: AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
@@ -437,6 +481,21 @@ function estimateMessagesTokens(messages: AgentMessage[]): number {
 
 /** Standard thinking levels */
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
+const FALLBACK_CONTEXT_SEED_MAX_BYTES = 4_000;
+
+function truncateUtf8(value: string, maxBytes: number): { readonly content: string; readonly truncated: boolean } {
+	if (Buffer.byteLength(value, "utf8") <= maxBytes) {
+		return { content: value, truncated: false };
+	}
+	const suffix = "...";
+	const suffixBytes = Buffer.byteLength(suffix, "utf8");
+	let content = "";
+	for (const character of value) {
+		if (Buffer.byteLength(content + character, "utf8") + suffixBytes > maxBytes) break;
+		content += character;
+	}
+	return { content: content + suffix, truncated: true };
+}
 
 // ============================================================================
 // AgentSession Class
@@ -496,6 +555,11 @@ export class AgentSession {
 	private _compactionAbortController: AbortController | undefined = undefined;
 	private _autoCompactionAbortController: AbortController | undefined = undefined;
 	private _overflowRecoveryAttempted = false;
+	private _contextWindowPhase: ContextWindowRuntimePhase = "idle";
+	private _pendingContextWindowCut: PendingContextWindowCut | undefined;
+	private _contextWindowCutPromise: Promise<ContextWindowEntry> | undefined;
+	private _contextWindowSoftWarningIssued = false;
+	private _contextWindowError: string | undefined;
 
 	// Branch summarization state
 	private _branchSummaryAbortController: AbortController | undefined = undefined;
@@ -709,7 +773,14 @@ export class AgentSession {
 				: undefined);
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
-			const previousContext = previousSnapshot?.context ?? turn.context;
+			let previousContext = previousSnapshot?.context ?? turn.context;
+			if (this._contextWindowPhase === "cut_pending") {
+				await this._runPendingContextWindowCut();
+				previousContext = {
+					...previousContext,
+					messages: this.agent.state.messages.slice(),
+				};
+			}
 
 			return {
 				...previousSnapshot,
@@ -1083,6 +1154,205 @@ export class AgentSession {
 	/** Current retry attempt (0 if not retrying) */
 	get retryAttempt(): number {
 		return this._retryAttempt;
+	}
+
+	get contextWindowRuntimeState(): ContextWindowRuntimeState {
+		return {
+			phase: this._contextWindowPhase,
+			reason: this._pendingContextWindowCut?.reason,
+			requestedAtEntryId: this._pendingContextWindowCut?.requestedAtEntryId,
+			requestedAtTurn: this._pendingContextWindowCut?.requestedAtTurn,
+			continueAfterCut: this._pendingContextWindowCut?.continueAfterCut ?? false,
+			softWarningIssued: this._contextWindowSoftWarningIssued,
+			overflowRecoveryAttempted: this._overflowRecoveryAttempted,
+			error: this._contextWindowError,
+		};
+	}
+
+	/** Request a hard context cut. Active runs apply it after the current turn fully settles. */
+	async requestContextWindow(
+		reason: ContextWindowReason,
+		options: { readonly continueAfterCut?: boolean } = {},
+	): Promise<ContextWindowEntry | undefined> {
+		if (this._contextWindowPhase === "failed") {
+			throw new Error(`Context window management is failed: ${this._contextWindowError ?? "unknown error"}`);
+		}
+		if (this._contextWindowPhase === "cutting") {
+			return await this._contextWindowCutPromise;
+		}
+		if (this._contextWindowPhase === "cut_pending") {
+			return undefined;
+		}
+
+		this._pendingContextWindowCut = {
+			reason,
+			requestedAtEntryId: this.sessionManager.getLeafId() ?? undefined,
+			requestedAtTurn: this._turnIndex,
+			continueAfterCut: options.continueAfterCut ?? false,
+		};
+		this._contextWindowPhase = "cut_pending";
+		this._contextWindowError = undefined;
+		this._emit({
+			type: "context_window_requested",
+			reason,
+			continueAfterCut: this._pendingContextWindowCut.continueAfterCut,
+		});
+
+		if (this._isAgentRunActive) {
+			return undefined;
+		}
+		return await this._runPendingContextWindowCut();
+	}
+
+	private _validateWorkflowContextCheckpoint(checkpoint: WorkflowContextCheckpoint): void {
+		const entry = this.sessionManager.getEntry(checkpoint.snapshotEntryId);
+		if (entry?.type !== "custom" || entry.customType !== WORKFLOW_SNAPSHOT_CUSTOM_TYPE) {
+			throw new Error(`Workflow Snapshot Entry ${checkpoint.snapshotEntryId} is missing or has the wrong type`);
+		}
+		if (this.sessionManager.getLeafId() !== checkpoint.snapshotEntryId) {
+			throw new Error(`Workflow Snapshot Entry ${checkpoint.snapshotEntryId} is not the current branch leaf`);
+		}
+		const persistedWorkflowId =
+			typeof entry.data === "object" && entry.data !== null && "workflowId" in entry.data
+				? entry.data.workflowId
+				: undefined;
+		if (
+			persistedWorkflowId !== checkpoint.workflowId ||
+			checkpoint.snapshot.workflowId !== checkpoint.workflowId ||
+			checkpoint.snapshot.workflow.id !== checkpoint.workflowId
+		) {
+			throw new Error(`Workflow Snapshot Entry ${checkpoint.snapshotEntryId} does not match its Workflow`);
+		}
+	}
+
+	private _fallbackContextWindowSeed(): ContextWindowSeed {
+		const latestUserText = [...this.sessionManager.getBranch()]
+			.reverse()
+			.find((entry) => entry.type === "message" && entry.message.role === "user");
+		const objective =
+			latestUserText?.type === "message" && latestUserText.message.role === "user"
+				? contentText(latestUserText.message.content, "").trim()
+				: "";
+		const prefix = [
+			"Context window continuity seed:",
+			"No active Workflow Snapshot is available; treat this as conversational context, not authoritative task state.",
+			"Current objective: ",
+		].join("\n");
+		const suffix = [
+			"",
+			"Notes: no persisted Notes were available when this window was created.",
+			"History: use the history tool when an exact prior message or tool result is needed.",
+		].join("\n");
+		const objectiveLimit = Math.max(1, FALLBACK_CONTEXT_SEED_MAX_BYTES - Buffer.byteLength(prefix + suffix, "utf8"));
+		const selected = truncateUtf8(objective || "(not recorded)", objectiveLimit);
+		return {
+			schemaVersion: 1,
+			content: `${prefix}${selected.content}${suffix}`,
+			noteEntryIds: [],
+			truncated: selected.truncated,
+		};
+	}
+
+	private _createContextWindowSeed(checkpoint: WorkflowContextCheckpoint | undefined): ContextWindowSeed {
+		if (!checkpoint) {
+			return this._fallbackContextWindowSeed();
+		}
+		const projection = projectWorkflowSnapshot(checkpoint.snapshot);
+		return {
+			schemaVersion: 1,
+			content: projection.content,
+			workflowSnapshotSequence: projection.snapshotSequence,
+			noteEntryIds: [],
+			truncated: projection.truncated,
+		};
+	}
+
+	private _contextTokensBeforeCut(): number {
+		const estimate = Math.ceil(estimateContextTokens(this.agent.state.messages).tokens);
+		if (!Number.isFinite(estimate)) return 0;
+		return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, estimate));
+	}
+
+	private async _runPendingContextWindowCut(): Promise<ContextWindowEntry> {
+		if (this._contextWindowCutPromise) {
+			return await this._contextWindowCutPromise;
+		}
+		const promise = this._performContextWindowCut();
+		this._contextWindowCutPromise = promise;
+		try {
+			return await promise;
+		} finally {
+			if (this._contextWindowCutPromise === promise) {
+				this._contextWindowCutPromise = undefined;
+			}
+		}
+	}
+
+	private async _performContextWindowCut(): Promise<ContextWindowEntry> {
+		const pending = this._pendingContextWindowCut;
+		if (!pending || this._contextWindowPhase !== "cut_pending") {
+			throw new Error("No context window cut is pending");
+		}
+		this._contextWindowPhase = "cutting";
+		this._emit({ type: "context_window_start", reason: pending.reason });
+
+		try {
+			if (this.agent.state.pendingToolCalls.size > 0) {
+				throw new Error("Cannot cut context while tool calls are still pending");
+			}
+			this._flushPendingBashMessages();
+			const tokensBefore = this._contextTokensBeforeCut();
+			const workflowContextProvider: WorkflowContextProvider | undefined =
+				this._activeWorkflowAdapter ?? this._planWorkflowRuntime;
+			const checkpoint = workflowContextProvider?.checkpointForContextWindow();
+			if (checkpoint) {
+				this._validateWorkflowContextCheckpoint(checkpoint);
+			}
+			const contextSeed = this._createContextWindowSeed(checkpoint);
+			const lineage = this.sessionManager.createNextContextWindowLineage();
+			const entryId = this.sessionManager.appendContextWindow({
+				schemaVersion: 1,
+				...lineage,
+				reason: pending.reason,
+				...(checkpoint ? { snapshotEntryId: checkpoint.snapshotEntryId, workflowId: checkpoint.workflowId } : {}),
+				contextSeed,
+				tokensBefore,
+			});
+			const entry = this.sessionManager.getEntry(entryId);
+			if (entry?.type !== "context_window") {
+				throw new Error(`Context Window Entry ${entryId} was not persisted`);
+			}
+
+			const sessionContext = this.sessionManager.buildSessionContext();
+			this.agent.state.messages = sessionContext.messages;
+			const estimatedTokensAfter = estimateMessagesTokens(sessionContext.messages);
+			this._lastAssistantMessage = undefined;
+			this._contextWindowPhase = "idle";
+			this._pendingContextWindowCut = undefined;
+			this._contextWindowSoftWarningIssued = false;
+			this._overflowRecoveryAttempted = false;
+			this._contextWindowError = undefined;
+			this._emit({ type: "entry_appended", entry });
+			this._emit({
+				type: "context_window_end",
+				reason: pending.reason,
+				windowId: entry.windowId,
+				previousWindowId: entry.previousWindowId,
+				tokensBefore,
+				estimatedTokensAfter,
+				snapshotEntryId: checkpoint?.snapshotEntryId,
+				seedBytes: Buffer.byteLength(contextSeed.content, "utf8"),
+				noteCount: contextSeed.noteEntryIds.length,
+				continueAfterCut: pending.continueAfterCut,
+			});
+			return entry;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this._contextWindowPhase = "failed";
+			this._contextWindowError = message;
+			this._emit({ type: "context_window_failed", reason: pending.reason, error: message });
+			throw error;
+		}
 	}
 
 	/**
@@ -2551,6 +2821,9 @@ export class AgentSession {
 	}
 
 	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[], emitSettled = true): Promise<void> {
+		if (this._contextWindowPhase === "failed") {
+			throw new Error(`Context window management is failed: ${this._contextWindowError ?? "unknown error"}`);
+		}
 		this._isAgentRunActive = true;
 		try {
 			await this.agent.prompt(messages);
