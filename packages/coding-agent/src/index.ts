@@ -49,12 +49,15 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.ts";
 export {
+	assertValidContextWindowEntry,
 	CONTEXT_MANAGEMENT_EVENT_TYPES,
 	CONTEXT_MANAGEMENT_MODES,
 	CONTEXT_WINDOW_REASONS,
 	type ContextManagementEvent,
 	type ContextManagementMode,
 	type ContextWindowReason,
+	ContextWindowValidationError,
+	validateContextWindowEntry,
 } from "./core/context-management.ts";
 export * from "./core/delivery/index.ts";
 export * from "./core/evaluation/index.ts";
@@ -235,6 +238,9 @@ export {
 	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
+	type ContextWindowAppendData,
+	type ContextWindowEntry,
+	type ContextWindowSeed,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,

@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0 已完成
+> 状态：实施中，CW.0-CW.1 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -703,7 +703,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | ID | 状态 | 任务 | 主要文件 | 依赖 |
 |---|---|---|---|---|
 | CW.0 | `DONE` | 固定配置、事件和基线 Fixture | `settings-manager.ts`、测试 | 无 |
-| CW.1 | `TODO` | 升级 Session v4，定义 ContextWindowEntry 和校验 | `session-manager.ts`、新 context-window 模块 | CW.0 |
+| CW.1 | `DONE` | 升级 Session v4，定义 ContextWindowEntry 和校验 | `session-manager.ts`、新 context-window 模块 | CW.0 |
 | CW.2 | `TODO` | 实现统一上下文边界算法 | `session-manager.ts` | CW.1 |
 | CW.3 | `TODO` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
 | CW.4 | `TODO` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
@@ -730,6 +730,14 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 固定协议：`summary/windowed/hybrid`、四种切窗原因、七种 context-management 事件及 payload。
 - 验证：专项 Vitest 通过；`npm run check` 通过。
 - 偏差：基线使用代码内测试向量而不是单独 JSON Fixture，避免尚无窗口 Schema 时制造伪 Session 数据；运行时仍未发出新增事件，按 CW.7、CW.9、CW.10 分别接入。
+
+### CW.1 实施记录
+
+- 实际文件：`core/session-manager.ts`、`core/context-management.ts`、包导出入口、Session migration/context-window 专项测试。
+- 数据语义：Session header 升为 v4；v1-v3 迁移只增加既有迁移字段并更新 header，旧会话视为隐式初始窗口。
+- 校验：追加前验证基础字段、Schema、reason、seed、note 引用、token 数和单条 lineage 约束；跨 Entry 校验留给 CW.2/CW.3。
+- 验证：两个专项 Vitest 文件共 10 项测试通过；`npm run check` 通过。
+- 偏差：复用 `core/context-management.ts` 承载校验，而未新建第二个 context-window 模块，避免循环定义协议类型。
 
 ## 16. 测试计划
 

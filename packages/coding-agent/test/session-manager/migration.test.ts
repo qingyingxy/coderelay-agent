@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { type FileEntry, migrateSessionEntries } from "../../src/core/session-manager.ts";
+import {
+	CURRENT_SESSION_VERSION,
+	type FileEntry,
+	migrateSessionEntries,
+	type SessionHeader,
+} from "../../src/core/session-manager.ts";
 
 describe("migrateSessionEntries", () => {
 	it("should add id/parentId to v1 entries", () => {
@@ -24,8 +29,8 @@ describe("migrateSessionEntries", () => {
 
 		migrateSessionEntries(entries);
 
-		// Header should have version set (v3 is current after hookMessage->custom migration)
-		expect((entries[0] as any).version).toBe(3);
+		// Header should have the current version after all migrations.
+		expect((entries[0] as SessionHeader).version).toBe(CURRENT_SESSION_VERSION);
 
 		// Entries should have id/parentId
 		const msg1 = entries[1] as any;
@@ -38,6 +43,25 @@ describe("migrateSessionEntries", () => {
 		expect(msg2.id).toBeDefined();
 		expect(msg2.id.length).toBe(8);
 		expect(msg2.parentId).toBe(msg1.id);
+	});
+
+	it("should migrate a v3 header to v4 without rewriting existing entries", () => {
+		const message = {
+			type: "message",
+			id: "abc12345",
+			parentId: null,
+			timestamp: "2025-01-01T00:00:01Z",
+			message: { role: "user", content: "hi", timestamp: 1 },
+		} as const;
+		const entries = [
+			{ type: "session", id: "sess-1", version: 3, timestamp: "2025-01-01T00:00:00Z", cwd: "/tmp" },
+			message,
+		] as FileEntry[];
+
+		migrateSessionEntries(entries);
+
+		expect((entries[0] as SessionHeader).version).toBe(4);
+		expect(entries[1]).toEqual(message);
 	});
 
 	it("should be idempotent (skip already migrated)", () => {
