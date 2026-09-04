@@ -8,6 +8,8 @@ export const CONTEXT_WINDOW_REASONS = ["manual", "model", "threshold", "overflow
 
 export type ContextWindowReason = (typeof CONTEXT_WINDOW_REASONS)[number];
 
+export const CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE = "context-window";
+
 export class ContextWindowValidationError extends Error {
 	readonly issues: readonly string[];
 

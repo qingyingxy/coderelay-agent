@@ -52,6 +52,7 @@ export {
 	assertValidContextWindowEntry,
 	CONTEXT_MANAGEMENT_EVENT_TYPES,
 	CONTEXT_MANAGEMENT_MODES,
+	CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
 	CONTEXT_WINDOW_REASONS,
 	type ContextManagementEvent,
 	type ContextManagementMode,

@@ -4,6 +4,7 @@ import {
 	buildContextEntries,
 	buildSessionContext,
 	type CompactionEntry,
+	type ContextWindowEntry,
 	type CustomEntry,
 	type ModelChangeEntry,
 	type SessionEntry,
@@ -46,6 +47,24 @@ function compaction(id: string, parentId: string | null, summary: string, firstK
 		timestamp: "2025-01-01T00:00:00Z",
 		summary,
 		firstKeptEntryId,
+		tokensBefore: 1000,
+	};
+}
+
+function contextWindow(id: string, parentId: string | null, windowIndex: number, content: string): ContextWindowEntry {
+	const firstWindowId = "window-0";
+	return {
+		type: "context_window",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		schemaVersion: 1,
+		windowId: `window-${windowIndex}`,
+		firstWindowId,
+		previousWindowId: windowIndex === 1 ? firstWindowId : `window-${windowIndex - 1}`,
+		windowIndex,
+		reason: "threshold",
+		contextSeed: { schemaVersion: 1, content, noteEntryIds: [], truncated: false },
 		tokensBefore: 1000,
 	};
 }
@@ -205,6 +224,96 @@ describe("buildSessionContext", () => {
 			const ctx = buildSessionContext(entries);
 			expect(ctx.thinkingLevel).toBe("high");
 			expect(ctx.messages.map((message) => message.role)).toEqual(["compactionSummary", "user"]);
+		});
+	});
+
+	describe("with hard context windows", () => {
+		it("replaces old messages with the latest seed and post-boundary messages", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "old response"),
+				contextWindow("3", "2", 1, "objective and state"),
+				msg("4", "3", "user", "new request"),
+			];
+
+			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["3", "4"]);
+			const context = buildSessionContext(entries);
+			expect(context.messages).toHaveLength(2);
+			expect(context.messages[0]).toMatchObject({
+				role: "custom",
+				customType: "context-window",
+				content: "objective and state",
+				display: false,
+			});
+			expect(context.messages[1]).toMatchObject({ role: "user", content: "new request" });
+		});
+
+		it("uses only the newest context-window seed", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old"),
+				contextWindow("2", "1", 1, "first seed"),
+				msg("3", "2", "assistant", "middle"),
+				contextWindow("4", "3", 2, "second seed"),
+				msg("5", "4", "user", "current"),
+			];
+
+			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["4", "5"]);
+			expect(buildSessionContext(entries).messages).toMatchObject([
+				{ role: "custom", content: "second seed" },
+				{ role: "user", content: "current" },
+			]);
+		});
+
+		it("lets a hard cut replace a previous compaction", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old"),
+				compaction("2", "1", "old summary", "1"),
+				msg("3", "2", "assistant", "after summary"),
+				contextWindow("4", "3", 1, "hard-cut seed"),
+			];
+
+			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["4"]);
+			expect(buildSessionContext(entries).messages).toMatchObject([{ role: "custom", content: "hard-cut seed" }]);
+		});
+
+		it("does not let a later compaction retain entries before a hard cut", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "must stay out"),
+				contextWindow("2", "1", 1, "current-window seed"),
+				msg("3", "2", "user", "current message"),
+				compaction("4", "3", "current summary", "1"),
+				msg("5", "4", "assistant", "after compaction"),
+			];
+
+			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["4", "5"]);
+			expect(buildSessionContext(entries).messages.map(({ role }) => role)).toEqual([
+				"compactionSummary",
+				"assistant",
+			]);
+		});
+
+		it("keeps model and thinking settings from the complete branch", () => {
+			const entries: SessionEntry[] = [
+				modelChange("1", null, "openai", "gpt-test"),
+				thinkingLevel("2", "1", "high"),
+				contextWindow("3", "2", 1, "seed"),
+			];
+
+			const context = buildSessionContext(entries);
+			expect(context.model).toEqual({ provider: "openai", modelId: "gpt-test" });
+			expect(context.thinkingLevel).toBe("high");
+		});
+
+		it("does not use a sibling branch window", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "root"),
+				contextWindow("2", "1", 1, "branch A seed"),
+				msg("3", "2", "user", "branch A"),
+				msg("4", "1", "user", "branch B"),
+			];
+
+			expect(buildContextEntries(entries, "3").map(({ id }) => id)).toEqual(["2", "3"]);
+			expect(buildContextEntries(entries, "4").map(({ id }) => id)).toEqual(["1", "4"]);
 		});
 	});
 

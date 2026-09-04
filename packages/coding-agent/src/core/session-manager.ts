@@ -21,7 +21,11 @@ import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
-import { assertValidContextWindowEntry, type ContextWindowReason } from "./context-management.ts";
+import {
+	assertValidContextWindowEntry,
+	CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
+	type ContextWindowReason,
+} from "./context-management.ts";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -441,16 +445,32 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 	if (entry.type === "compaction") {
 		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
 	}
+	if (entry.type === "context_window") {
+		assertValidContextWindowEntry(entry);
+		return [
+			createCustomMessage(
+				CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
+				entry.contextSeed.content,
+				false,
+				{
+					windowId: entry.windowId,
+					firstWindowId: entry.firstWindowId,
+					previousWindowId: entry.previousWindowId,
+					windowIndex: entry.windowIndex,
+				},
+				entry.timestamp,
+			),
+		];
+	}
 	return [];
 }
 
 /**
  * Build the active, compaction-aware session entry list.
  *
- * This follows the current leaf path. If the path contains compaction entries,
- * the latest compaction is represented by the compaction entry itself, followed
- * by the kept entries starting at firstKeptEntryId and all entries after the
- * compaction entry. Older summarized entries are omitted.
+ * This follows the current leaf path and uses its last context-reduction boundary.
+ * Compaction boundaries retain their summary and recent entries. Context-window
+ * boundaries retain only their seed and entries appended after the boundary.
  */
 export function buildContextEntries(
 	entries: SessionEntry[],
@@ -458,35 +478,46 @@ export function buildContextEntries(
 	byId?: Map<string, SessionEntry>,
 ): SessionEntry[] {
 	const path = buildSessionPath(entries, leafId, byId);
-	let compaction: CompactionEntry | null = null;
-
-	for (const entry of path) {
-		if (entry.type === "compaction") {
-			compaction = entry;
+	let boundaryIndex = -1;
+	for (let index = 0; index < path.length; index++) {
+		const entry = path[index];
+		if (entry.type === "compaction" || entry.type === "context_window") {
+			boundaryIndex = index;
 		}
 	}
 
-	if (!compaction) {
+	if (boundaryIndex < 0) {
 		return path;
 	}
 
-	const compactionIdx = path.findIndex((entry) => entry.id === compaction.id);
-	if (compactionIdx < 0) {
-		return path;
+	const boundary = path[boundaryIndex];
+	if (boundary.type === "context_window") {
+		assertValidContextWindowEntry(boundary);
+		return [boundary, ...path.slice(boundaryIndex + 1)];
+	}
+	if (boundary.type !== "compaction") {
+		throw new Error("Internal error: unsupported context-reduction boundary");
 	}
 
-	const contextEntries: SessionEntry[] = [compaction];
+	const contextEntries: SessionEntry[] = [boundary];
+	let hardBoundaryIndex = -1;
+	for (let index = boundaryIndex - 1; index >= 0; index--) {
+		if (path[index].type === "context_window") {
+			hardBoundaryIndex = index;
+			break;
+		}
+	}
 	let foundFirstKept = false;
-	for (let i = 0; i < compactionIdx; i++) {
+	for (let i = hardBoundaryIndex + 1; i < boundaryIndex; i++) {
 		const entry = path[i];
-		if (entry.id === compaction.firstKeptEntryId) {
+		if (entry.id === boundary.firstKeptEntryId) {
 			foundFirstKept = true;
 		}
 		if (foundFirstKept) {
 			contextEntries.push(entry);
 		}
 	}
-	contextEntries.push(...path.slice(compactionIdx + 1));
+	contextEntries.push(...path.slice(boundaryIndex + 1));
 	return contextEntries;
 }
 

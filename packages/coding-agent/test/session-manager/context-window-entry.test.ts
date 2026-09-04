@@ -27,7 +27,7 @@ function createWindowData(overrides: Partial<ContextWindowAppendData> = {}): Con
 }
 
 describe("ContextWindowEntry", () => {
-	it("uses Session v4 and appends a complete boundary without changing context yet", () => {
+	it("uses Session v4 and appends a complete boundary", () => {
 		const session = SessionManager.inMemory();
 		const messageId = session.appendMessage({ role: "user", content: "old window", timestamp: 1 });
 		const windowEntryId = session.appendContextWindow(createWindowData());
@@ -45,7 +45,9 @@ describe("ContextWindowEntry", () => {
 			tokensBefore: 12_345,
 		});
 		expect(validateContextWindowEntry(entry)).toEqual([]);
-		expect(session.buildSessionContext().messages).toHaveLength(1);
+		expect(session.buildSessionContext().messages).toMatchObject([
+			{ role: "custom", customType: "context-window", content: "Current objective: continue the task." },
+		]);
 	});
 
 	it("persists snapshot and note provenance with the copied seed", () => {
