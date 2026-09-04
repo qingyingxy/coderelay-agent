@@ -13,6 +13,16 @@ export interface WorkflowContextProjection {
 	readonly byteLength: number;
 }
 
+export interface WorkflowContextCheckpoint {
+	readonly workflowId: string;
+	readonly snapshotEntryId: string;
+	readonly snapshot: WorkflowSnapshot;
+}
+
+export interface WorkflowContextProvider {
+	checkpointForContextWindow(): WorkflowContextCheckpoint | undefined;
+}
+
 interface ProjectionLine {
 	readonly content: string;
 	readonly required: boolean;

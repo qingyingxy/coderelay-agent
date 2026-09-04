@@ -8,6 +8,7 @@ import type { SubagentService } from "../subagents/subagent-service.ts";
 import type { TeamTaskProposal } from "../subagents/team-types.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
 import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
+import type { WorkflowContextCheckpoint, WorkflowContextProvider } from "./context-window-projection.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
 import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
 import type { ModelEscalationReason } from "./model-gateway.ts";
@@ -22,7 +23,7 @@ import {
 } from "./runtime-policy.ts";
 import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY } from "./runtime-registry.ts";
 import { type TaskDispatch, TaskScheduler, type TaskSchedulingDecision } from "./scheduler.ts";
-import { WorkflowStore } from "./stores.ts";
+import { type WorkflowSnapshot, WorkflowStore } from "./stores.ts";
 import { formatTaskDetails, formatTaskTree } from "./task-report.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
 import type {
@@ -276,7 +277,7 @@ function withAgentHandoffVerifications(content: PlanContent): PlanContent {
 	return { ...structuredClone(content), steps, verificationRequirements };
 }
 
-export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
+export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContextProvider {
 	readonly #controller: WorkflowController;
 	readonly #workflowId: string;
 	readonly #createId: (kind: "command" | "plan") => string;
@@ -395,6 +396,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 
 	get isTerminal(): boolean {
 		return isWorkflowTerminalStatus(this.workflow.status);
+	}
+
+	checkpointForContextWindow(): WorkflowContextCheckpoint {
+		return this.#checkpoint();
 	}
 
 	get deliveryFingerprint(): string {
@@ -1240,8 +1245,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort {
 		return result;
 	}
 
-	#checkpoint(): void {
-		this.#snapshotStore.append(this.#controller.createSnapshot(this.#workflowId));
+	#checkpoint(): WorkflowContextCheckpoint {
+		const snapshot: WorkflowSnapshot = this.#controller.createSnapshot(this.#workflowId);
+		const snapshotEntryId = this.#snapshotStore.append(snapshot);
+		return { workflowId: this.#workflowId, snapshotEntryId, snapshot };
 	}
 
 	async #finishJobTask(taskId: string, attemptId: string, result: Job): Promise<Job> {
