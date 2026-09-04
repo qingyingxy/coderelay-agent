@@ -64,7 +64,13 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "./compaction/index.ts";
-import type { ContextManagementEvent, ContextWindowReason } from "./context-management.ts";
+import {
+	CONTEXT_WINDOW_WARNING_MESSAGE_TYPE,
+	type ContextManagementEvent,
+	type ContextWindowReason,
+	type ContextWindowTokenBudget,
+	calculateContextWindowTokenBudget,
+} from "./context-management.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import { DeliveryRuntime, DiffCollector, type ReadonlyReviewer, SubagentReadonlyReviewer } from "./delivery/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
@@ -1287,6 +1293,10 @@ export class AgentSession {
 		return Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, estimate));
 	}
 
+	private _getWorkflowContextProvider(): WorkflowContextProvider | undefined {
+		return this._activeWorkflowAdapter ?? this._planWorkflowRuntime;
+	}
+
 	private async _runPendingContextWindowCut(): Promise<ContextWindowEntry> {
 		if (this._contextWindowCutPromise) {
 			return await this._contextWindowCutPromise;
@@ -1316,8 +1326,7 @@ export class AgentSession {
 			}
 			this._flushPendingBashMessages();
 			const tokensBefore = this._contextTokensBeforeCut();
-			const workflowContextProvider: WorkflowContextProvider | undefined =
-				this._activeWorkflowAdapter ?? this._planWorkflowRuntime;
+			const workflowContextProvider = this._getWorkflowContextProvider();
 			const checkpoint = workflowContextProvider?.checkpointForContextWindow();
 			if (checkpoint) {
 				this._validateWorkflowContextCheckpoint(checkpoint);
@@ -3146,7 +3155,7 @@ export class AgentSession {
 		if (commandName !== "/new-context") {
 			return false;
 		}
-		if (!this.isIdle || this._contextWindowPhase !== "idle") {
+		if (!this.isIdle || (this._contextWindowPhase !== "idle" && this._contextWindowPhase !== "notes_collection")) {
 			throw new Error("/new-context can only be used while context-window management is idle");
 		}
 
@@ -4403,7 +4412,8 @@ export class AgentSession {
 		// Skip compaction checks if this assistant message is older than the latest
 		// compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const branch = this.sessionManager.getBranch();
+		const compactionEntry = getLatestCompactionEntry(branch);
 		const assistantIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
 		if (assistantIsFromBeforeCompaction) {
@@ -4444,6 +4454,25 @@ export class AgentSession {
 			return await this._runAutoCompaction("overflow", willRetry);
 		}
 
+		const contextManagement = this.settingsManager.getContextManagementSettings();
+		const useHardContextWindows =
+			contextManagement.mode === "windowed" ||
+			(contextManagement.mode === "hybrid" && this._getWorkflowContextProvider() !== undefined);
+		if (useHardContextWindows) {
+			const latestBoundary = [...branch]
+				.reverse()
+				.find((entry) => entry.type === "compaction" || entry.type === "context_window");
+			if (latestBoundary && assistantMessage.timestamp <= new Date(latestBoundary.timestamp).getTime()) {
+				return false;
+			}
+			return await this._checkContextWindowBudget(
+				assistantMessage,
+				contextWindow,
+				contextManagement.reserveTokens,
+				!skipAbortedCheck,
+			);
+		}
+
 		// Case 2: Threshold - context is getting large
 		// For error messages or all-zero usage messages, estimate from the last valid response.
 		// This ensures sessions that hit persistent API errors (e.g. 529) or malformed zero-usage
@@ -4473,6 +4502,84 @@ export class AgentSession {
 			return await this._runAutoCompaction("threshold", false);
 		}
 		return false;
+	}
+
+	private async _checkContextWindowBudget(
+		assistantMessage: AssistantMessage,
+		contextWindow: number,
+		reserveTokens: number,
+		beforePrompt: boolean,
+	): Promise<boolean> {
+		const budget = calculateContextWindowTokenBudget(contextWindow, reserveTokens);
+		if (!budget || this._contextWindowPhase === "cutting" || this._contextWindowPhase === "failed") {
+			return false;
+		}
+
+		const directContextTokens =
+			assistantMessage.stopReason !== "error" && assistantMessage.stopReason !== "aborted" && assistantMessage.usage
+				? calculateContextTokens(assistantMessage.usage)
+				: 0;
+		const contextTokens = Math.ceil(
+			directContextTokens > 0 ? directContextTokens : estimateContextTokens(this.agent.state.messages).tokens,
+		);
+		if (!Number.isFinite(contextTokens) || contextTokens <= 0) return false;
+
+		if (contextTokens >= budget.hardLimit) {
+			const continueAfterCut = !beforePrompt && this.agent.hasQueuedMessages();
+			await this.requestContextWindow("threshold", { continueAfterCut });
+			if (this._contextWindowPhase === "cut_pending") {
+				await this._runPendingContextWindowCut();
+			}
+			return continueAfterCut;
+		}
+
+		if (contextTokens < budget.softLimit || this._contextWindowSoftWarningIssued) {
+			return false;
+		}
+		this._scheduleContextWindowSoftWarning(contextTokens, budget, beforePrompt);
+		return !beforePrompt;
+	}
+
+	private _scheduleContextWindowSoftWarning(
+		contextTokens: number,
+		budget: ContextWindowTokenBudget,
+		beforePrompt: boolean,
+	): void {
+		this._contextWindowPhase = "soft_warning_pending";
+		this._contextWindowSoftWarningIssued = true;
+		this._emit({
+			type: "context_window_warning",
+			contextTokens,
+			softLimit: budget.softLimit,
+			hardLimit: budget.hardLimit,
+		});
+		const message = {
+			role: "custom" as const,
+			customType: CONTEXT_WINDOW_WARNING_MESSAGE_TYPE,
+			content: [
+				"The current context window is approaching its hard token limit.",
+				"Finish the current non-interruptible tool step. Save durable cross-window decisions, constraints, discoveries, and open questions with the notes tool. Then call new_context before starting more high-cost work.",
+			].join("\n"),
+			display: false,
+			details: {
+				contextTokens,
+				softLimit: budget.softLimit,
+				hardLimit: budget.hardLimit,
+				reserveTokens: budget.reserveTokens,
+			},
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{
+			readonly contextTokens: number;
+			readonly softLimit: number;
+			readonly hardLimit: number;
+			readonly reserveTokens: number;
+		}>;
+		if (beforePrompt) {
+			this._pendingNextTurnMessages.push(message);
+		} else {
+			this.agent.followUp(message);
+		}
+		this._contextWindowPhase = "notes_collection";
 	}
 
 	/**
@@ -5005,10 +5112,7 @@ export class AgentSession {
 				});
 		if (contextWindowToolEnabled) {
 			baseToolDefinitions.new_context = createNewContextToolDefinition(async () => {
-				if (
-					contextManagementMode === "hybrid" &&
-					(this._activeWorkflowAdapter ?? this._planWorkflowRuntime) === undefined
-				) {
+				if (contextManagementMode === "hybrid" && this._getWorkflowContextProvider() === undefined) {
 					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
 				}
 				await this.requestContextWindow("model", { continueAfterCut: true });

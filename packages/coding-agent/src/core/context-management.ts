@@ -10,6 +10,40 @@ export const CONTEXT_WINDOW_REASONS = ["manual", "model", "threshold", "overflow
 export type ContextWindowReason = (typeof CONTEXT_WINDOW_REASONS)[number];
 
 export const CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE = "context-window";
+export const CONTEXT_WINDOW_WARNING_MESSAGE_TYPE = "context-window-warning";
+export const MAX_CONTEXT_WINDOW_RESERVE_RATIO = 0.2;
+
+export interface ContextWindowTokenBudget {
+	readonly contextWindow: number;
+	readonly reserveTokens: number;
+	readonly softLimit: number;
+	readonly hardLimit: number;
+	readonly reserveAdjusted: boolean;
+}
+
+export function calculateContextWindowTokenBudget(
+	contextWindow: number,
+	configuredReserveTokens: number,
+): ContextWindowTokenBudget | undefined {
+	if (!Number.isFinite(contextWindow) || !Number.isFinite(configuredReserveTokens)) return undefined;
+	const normalizedContextWindow = Math.floor(contextWindow);
+	const normalizedReserve = Math.floor(configuredReserveTokens);
+	if (normalizedContextWindow < 3 || normalizedReserve < 1) return undefined;
+
+	const maximumReserve = Math.max(1, Math.floor(normalizedContextWindow * MAX_CONTEXT_WINDOW_RESERVE_RATIO));
+	const reserveTokens = Math.min(normalizedReserve, maximumReserve);
+	const softLimit = normalizedContextWindow - 2 * reserveTokens;
+	const hardLimit = normalizedContextWindow - reserveTokens;
+	if (!(0 < softLimit && softLimit < hardLimit && hardLimit < normalizedContextWindow)) return undefined;
+
+	return {
+		contextWindow: normalizedContextWindow,
+		reserveTokens,
+		softLimit,
+		hardLimit,
+		reserveAdjusted: reserveTokens !== normalizedReserve,
+	};
+}
 
 export interface ContextWindowLineage {
 	windowId: string;

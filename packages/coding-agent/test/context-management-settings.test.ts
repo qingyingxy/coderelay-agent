@@ -3,6 +3,7 @@ import {
 	CONTEXT_MANAGEMENT_EVENT_TYPES,
 	CONTEXT_MANAGEMENT_MODES,
 	CONTEXT_WINDOW_REASONS,
+	calculateContextWindowTokenBudget,
 } from "../src/core/context-management.ts";
 import {
 	type ContextManagementSettings,
@@ -81,5 +82,28 @@ describe("context management baseline", () => {
 			"history_query",
 			"notes_changed",
 		]);
+	});
+
+	it("derives valid soft and hard limits and caps reserve for small windows", () => {
+		expect(calculateContextWindowTokenBudget(100_000, 16_384)).toEqual({
+			contextWindow: 100_000,
+			reserveTokens: 16_384,
+			softLimit: 67_232,
+			hardLimit: 83_616,
+			reserveAdjusted: false,
+		});
+		expect(calculateContextWindowTokenBudget(10_000, 16_384)).toEqual({
+			contextWindow: 10_000,
+			reserveTokens: 2_000,
+			softLimit: 6_000,
+			hardLimit: 8_000,
+			reserveAdjusted: true,
+		});
+		expect(calculateContextWindowTokenBudget(3, 16_384)).toMatchObject({
+			reserveTokens: 1,
+			softLimit: 1,
+			hardLimit: 2,
+		});
+		expect(calculateContextWindowTokenBudget(2, 1)).toBeUndefined();
 	});
 });

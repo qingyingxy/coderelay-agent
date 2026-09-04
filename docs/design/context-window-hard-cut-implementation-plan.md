@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.10 已完成
+> 状态：实施中，CW.0-CW.11 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -386,7 +386,7 @@ hardLimit = contextWindow - reserveTokens
 softLimit = contextWindow - 2 * reserveTokens
 ```
 
-实现时需要校验 `0 < softLimit < hardLimit < contextWindow`。对于小窗口模型，使用经过测试的最小 reserve 和比例兜底，具体默认值在实现 PR 中固定并写入设置文档。
+实现时校验 `0 < softLimit < hardLimit < contextWindow`。有效 reserve 不超过模型窗口的 20%，最小为 1 token；因此配置 reserve 对小窗口过大时，阈值兜底为约 60% soft warning、80% hard cut。小于 3 tokens 的无效模型窗口不启用自动硬切。
 
 原则：
 
@@ -713,7 +713,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.8 | `DONE` | 增加 `/new-context` 与 `new_context` | `agent-session.ts`、工具注册 | CW.7 |
 | CW.9 | `DONE` | 实现 History list/search/read | 新 history tool、SessionManager 只读 API | CW.3、CW.7 |
 | CW.10 | `DONE` | 实现 Notes Store 和工具 | 新 notes 模块、工具注册 | CW.7 |
-| CW.11 | `TODO` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
+| CW.11 | `DONE` | 实现 soft/hard token 预算 | `agent-session.ts`、compaction 路由 | CW.8、CW.10 |
 | CW.12 | `TODO` | 接入 overflow recovery | `agent-session.ts` | CW.11 |
 | CW.13 | `TODO` | 完成 resume/fork/rollback | `agent-session-runtime.ts`、SessionManager | CW.2、CW.7 |
 | CW.14 | `TODO` | 接入 Interactive/Print/JSON/RPC | 各 mode 与 RPC 层 | CW.7、CW.13 |
@@ -814,6 +814,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 硬切集成：切窗事务在 Snapshot 后读取 Notes，把实际注入的 Note Entry IDs、content 和 truncated 状态固化进 `ContextWindowSeed`；同一 assistant batch 中 Notes 先落盘、`new_context` 后请求时能够进入新 seed。
 - 验证：SessionManager/AgentSession 专项 Vitest 8 项及 Context Window 相关回归通过；`npm run check` 通过。
 - 偏差：单条 Note 内容上限复用 `notesHintMaxBytes`，避免保存一个永远无法完整进入配置 hint 的 Note；Notes list 使用 `historyResultMaxBytes` 作为工具结果上限。
+
+### CW.11 实施记录
+
+- 实际文件：`core/context-management.ts`、`core/agent-session.ts`、公共导出入口、预算单元测试和 Faux Provider 集成测试。
+- 阈值：正常窗口使用配置的 `reserveTokens`；当 reserve 超过窗口 20% 时按 20% 截断，保持约 60% soft warning、80% hard cut，并验证严格阈值顺序。
+- 路由：`summary` 保持原有摘要压缩；`windowed` 自动使用硬切；`hybrid` 仅在当前存在 Direct/Plan Workflow context provider 时硬切，普通聊天继续摘要。
+- 运行语义：优先采用最新成功 Assistant usage；缺失、错误或零 usage 时估算 active messages。每个窗口只追加一次隐藏 warning，要求更新 Notes 后调用 `new_context`；hard threshold 在消息完整持久化后强制执行现有安全切窗事务。
+- 重置：成功切窗继续重置最新 Assistant、soft warning、overflow retry 和窗口 phase；`/new-context` 可在 Notes 收集阶段手动完成切窗。
+- 验证：预算与 Faux Provider 专项 12 项、Context Window/compaction/Notes 相关回归 33 项通过；`npm run check` 通过。
+- 偏差：overflow 分流按任务依赖保留给 CW.12；CW.11 只替换非 overflow threshold 路径。
 
 ## 16. 测试计划
 
