@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：实施中，CW.0-CW.3 已完成
+> 状态：实施中，CW.0-CW.4 已完成
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -706,7 +706,7 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 | CW.1 | `DONE` | 升级 Session v4，定义 ContextWindowEntry 和校验 | `session-manager.ts`、新 context-window 模块 | CW.0 |
 | CW.2 | `DONE` | 实现统一上下文边界算法 | `session-manager.ts` | CW.1 |
 | CW.3 | `DONE` | 实现窗口 lineage 和窗口索引 | 新 context-window 模块 | CW.1 |
-| CW.4 | `TODO` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
+| CW.4 | `DONE` | 实现 Snapshot 投影器 | `workflow/`、新 context-window 模块 | CW.1 |
 | CW.5 | `TODO` | 为 Plan 暴露 checkpoint 引用 | `workflow/plan-runtime.ts` | CW.4 |
 | CW.6 | `TODO` | 为 Direct 增加 Snapshot checkpoint | `workflow/agent-session-adapter.ts` | CW.4 |
 | CW.7 | `TODO` | 实现安全切窗事务和运行状态 | `agent-session.ts` | CW.2、CW.5、CW.6 |
@@ -755,6 +755,15 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 校验：拒绝首边界 index 非 1、跳号、first ID 漂移、previous 断裂和分支内 window ID 重复。
 - 验证：lineage/context 两个专项 Vitest 文件共 30 项测试通过；`npm run check` 通过。
 - 偏差：lineage 能力继续集中在既有 `core/context-management.ts`，未拆分新文件。
+
+### CW.4 实施记录
+
+- 实际文件：`workflow/context-window-projection.ts`、Workflow 导出入口、投影专项测试。
+- 投影内容：Workflow mode/status/request/stop reason、当前 Plan、排序后的 Task、每个 Task 当前或最新 Attempt、Verification、预算/假设、确定性 next action 和 History 指引。
+- 边界：默认上限 12000 bytes、硬最小值 1024 bytes；字段和整体输出均按 UTF-8 byte 计算，明细不足时写入显式 omitted marker。
+- 确定性：实体、依赖、假设和 evidence 使用稳定排序；不投影 eventIds、processedCommands 或完整 Snapshot JSON。
+- 验证：投影专项 Vitest 4 项测试通过；`npm run check` 通过。
+- 偏差：投影器位于 Workflow 模块内，context-management 仅消费其持久化结果，保持领域依赖单向。
 
 ## 16. 测试计划
 
