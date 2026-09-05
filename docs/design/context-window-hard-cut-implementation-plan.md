@@ -1,6 +1,6 @@
 # Context Window 硬切与长程记忆改造计划
 
-> 状态：CW.0-CW.17.8 已完成，CW.18 待决策
+> 状态：CW.0-CW.17.9 已完成，CW.18 待决策
 > 范围：`packages/coding-agent`
 > 默认行为：保持现有摘要压缩，不在评测完成前切换默认值
 > 核心方案：Session JSONL 完整历史 + Context Window 硬切 + Workflow Snapshot + Notes + History
@@ -965,6 +965,16 @@ rollback 后必须重新调用 `buildSessionContext(targetLeafId)`，不能只�
 - 主动触发：独立 model-trigger smoke 的 3 个机会中模型触发 2 次、漏调 1 次，runner 成功补切；无重复 `new_context` 和切窗后工具动作。最后一次 Provider 调用使成本越过 `$0.25` 到 `$0.261733`，随后预算检查停止最终评分，因此不把该 run 计作记忆失败。
 - 验证与成本：runner smoke `$0.141360`，主矩阵 `$1.163262`，model-trigger smoke `$0.261733`，CW.17.8 合计 `$1.566355`；Task Set 3/3、专项 Vitest 13/13、`npm run check` 退出码 0。
 - 结论：确定性控制器边界下的硬切记忆链路已稳定通过当前任务集，但仓库规模、任务长度和同版 A/C 成本对比仍不足；CW.18 保持全局 `summary`，`windowed/hybrid` 继续 opt-in。
+
+### CW.17.9 实施记录
+
+- 公平性修正：A/C 改为同一 `matched-v1` 阶段 Prompt，runner 边界下两组都不再采样人工 `WINDOW_n_READY` 回复；`report.json` 持久化每个任务的阶段 Prompt SHA-256，确保比较可审计。
+- 评分修正：summary 按设计允许保留最近 Assistant suffix，硬切仍必须完全排除旧窗口回复；最终仓库由独立 verifier 判定记忆/任务完成，模型 repair verifier 的调用顺序归入独立协议指标。
+- 主结果：三个 QuixBugs 任务、三次重复、A/C 共 18 个严格串行 run；A 记忆 8/9、协议 6/9，C 记忆 9/9、协议 9/9。C 的 27 次硬切、27 次 Snapshot 引用、27 次 Notes 操作和 27 次磁盘 resume 全部通过，History 为 67 queries / 205 hits。
+- 失败证据：A/LIS 一次生成摘要保留了 marker 请求却丢失精确行，模型把值写成错误缩进的局部变量并未通过独立验证；另外两个 A run 最终仓库通过，但在写 marker 前过早调用 repair verifier，只计协议失败。C 没有 `new_context`、切窗后工具动作或重复 probe。
+- 效率：C 相对 A input `+18.8%`、output `-40.8%`、cache-read `+53.1%`、Provider calls `+27.4%`、成本 `+0.7%`、总耗时 `-15.2%`。主矩阵 `$2.257872`，两个 smoke `$0.495764`，CW.17.9 付费合计 `$2.753636`。
+- 验证：Task Set 3/3、专项 Vitest 6/6、`npm run check` 退出码 0；Biome 仍只对另一并行会话占用的 `core/evaluation/protocol.ts` 报 Windows access denied，后续检查全部通过。
+- 结论：同版 runner 下，硬切组合在当前小型任务集上以近似等价成本取得更高可靠性，已具备进入 Workflow `hybrid` 默认候选的证据；CW.18 前仍需至少两个更大、更长、提示更少的真实仓库任务，普通对话继续保持 `summary`。
 
 ## 16. 测试计划
 

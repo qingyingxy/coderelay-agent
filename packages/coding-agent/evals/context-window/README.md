@@ -57,7 +57,7 @@ The 3/3 result and the recovered append defect found by this evaluation are docu
 
 The real-repository runner compares summary with Workflow-backed hard cuts on three versioned QuixBugs Python defects: LIS, RPN evaluation, and prime sieve. Every run crosses three controlled boundaries and recreates the AgentSession from the same Session JSONL three times. The final window must recover an exact hidden verifier failure and an immutable token first observed three windows earlier. The hard-cut group uses three Notes, three Snapshot-backed windows, and must complete two exact History searches; additional proactive History queries are allowed.
 
-The default `--boundary-trigger runner` mode cuts deterministically after each completed phase and reports memory correctness separately from protocol adherence. Opt-in `--boundary-trigger model` asks the model to call `new_context`, falls back to a runner cut after a miss, and separately counts misses, duplicate calls, and post-cut tool actions.
+The default `--boundary-trigger runner` mode cuts deterministically after each completed phase and reports memory correctness separately from protocol adherence. A and C receive byte-identical phase prompts, recorded with SHA-256 fingerprints in `report.json`, and neither group samples an artificial boundary acknowledgement. Opt-in `--boundary-trigger model` asks the hard-cut group to call `new_context`, falls back to a runner cut after a miss, and separately counts misses, duplicate calls, and post-cut tool actions.
 
 Validate all pinned repository digests, failing baselines, hidden-failure transitions, and reference repairs without network access:
 
@@ -85,7 +85,7 @@ npm run eval:context-window:real-repository -- --provider qingyingxy --model gpt
 
 The runner copies a fresh digest-checked repository for every run, permits one source file to change, protects every other file by hash and inventory, disables Provider retries, checkpoints after every run, applies official OpenAI short-context pricing, and stops after an execution error or cost-cap breach. This command makes paid API requests.
 
-The 18-run model-triggered matrix, objective-projection defect, fix, and post-fix evidence are documented in [cw17.7-report.md](./cw17.7-report.md). The separated controller-triggered matrix and model-trigger counters are documented in [cw17.8-report.md](./cw17.8-report.md).
+The 18-run model-triggered matrix, objective-projection defect, fix, and post-fix evidence are documented in [cw17.7-report.md](./cw17.7-report.md). The separated controller-triggered matrix and model-trigger counters are documented in [cw17.8-report.md](./cw17.8-report.md). The matched-prompt, matched-runner A/C matrix is documented in [cw17.9-report.md](./cw17.9-report.md).
 
 ## Serial real-model coding evaluation
 

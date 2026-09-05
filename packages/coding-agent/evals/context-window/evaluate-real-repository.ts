@@ -253,6 +253,8 @@ interface RealRepositoryReport {
 		readonly taskId?: string;
 		readonly group?: RepositoryGroup;
 		readonly boundaryTrigger: BoundaryTrigger;
+		readonly phasePromptProtocol: "matched-v1";
+		readonly phasePromptHashes: Readonly<Record<string, string>>;
 		readonly pricingPerMillionTokens: ModelPrice;
 		readonly pricingSource: string;
 	};
@@ -789,54 +791,48 @@ function ensureBudget(session: AgentSession, completedCostUsd: number, maxCostUs
 	}
 }
 
-function phaseOnePrompt(task: RealRepositoryTask, hardCut: boolean): string {
+function phaseOnePrompt(task: RealRepositoryTask): string {
 	return [
 		"Phase 1: inspect the repository and immutable continuity ledger without modifying files.",
 		`External case_id: ${task.id}`,
 		`Task: ${task.description}`,
 		`Read PROVENANCE.md, ${task.editablePath}, and the files under test/.`,
-		...(hardCut
-			? [
-					"Call notes exactly once with these arguments:",
-					JSON.stringify({
-						action: "upsert",
-						note_id: `${task.id}-constraints`,
-						category: "constraint",
-						content: task.durableFacts.join(" "),
-						source_entry_ids: [],
-					}),
-					"Do not put benchmark probe output into Notes.",
-				]
-			: []),
+		"If the notes tool is available, call it exactly once with these arguments:",
+		JSON.stringify({
+			action: "upsert",
+			note_id: `${task.id}-constraints`,
+			category: "constraint",
+			content: task.durableFacts.join(" "),
+			source_entry_ids: [],
+		}),
+		"If notes is unavailable, continue without a Notes call.",
+		"Do not put benchmark probe output into Notes.",
 		`Call benchmark_probe exactly once with {"probe_id":${JSON.stringify(task.probe.probeId)}}.`,
 		"Do not edit files, quote the probe result, or add a visible explanation.",
 		"Reply exactly PHASE_ONE_READY.",
 	].join("\n");
 }
 
-function phaseTwoPrompt(task: RealRepositoryTask, hardCut: boolean): string {
+function phaseTwoPrompt(task: RealRepositoryTask): string {
 	return [
 		"Phase 2: diagnose the real defect without modifying files.",
 		`External case_id: ${task.id}`,
 		`Read ${task.editablePath} and the official tests again.`,
 		"Identify the smallest behavioral repair internally, but do not edit or run verification yet.",
-		...(hardCut
-			? [
-					"Call notes exactly once with these arguments:",
-					JSON.stringify({
-						action: "upsert",
-						note_id: `${task.id}-phase-2`,
-						category: "open_question",
-						content: "Repository diagnosis is complete; implement the real defect after the next boundary.",
-						source_entry_ids: [],
-					}),
-				]
-			: []),
+		"If the notes tool is available, call it exactly once with these arguments:",
+		JSON.stringify({
+			action: "upsert",
+			note_id: `${task.id}-phase-2`,
+			category: "open_question",
+			content: "Repository diagnosis is complete; implement the real defect after the next boundary.",
+			source_entry_ids: [],
+		}),
+		"If notes is unavailable, continue without a Notes call.",
 		"Reply exactly DIAGNOSIS_READY with no explanation.",
 	].join("\n");
 }
 
-function phaseThreePrompt(task: RealRepositoryTask, hardCut: boolean): string {
+function phaseThreePrompt(task: RealRepositoryTask): string {
 	return [
 		"Phase 3: implement the diagnosed QuixBugs repair.",
 		`External case_id: ${task.id}`,
@@ -844,25 +840,21 @@ function phaseThreePrompt(task: RealRepositoryTask, hardCut: boolean): string {
 		"Do not add CW_RECOVERY_MARKER or guess any hidden repair before verification reports it.",
 		'After editing, call benchmark_verify exactly once with {"phase":"initial"}.',
 		"If verification reports HIDDEN_REPAIR_REQUIRED, do not apply it or retry in this phase.",
-		...(hardCut
-			? [
-					"After verification, call notes exactly once with these arguments:",
-					JSON.stringify({
-						action: "upsert",
-						note_id: `${task.id}-phase-3`,
-						category: "open_question",
-						content:
-							"Official tests pass but hidden verification requires exact History recovery after the next boundary.",
-						source_entry_ids: [],
-					}),
-					"Do not include the exact verifier failure in Notes.",
-				]
-			: []),
+		"If the notes tool is available, after verification call it exactly once with these arguments:",
+		JSON.stringify({
+			action: "upsert",
+			note_id: `${task.id}-phase-3`,
+			category: "open_question",
+			content: "Official tests pass but hidden verification requires exact History recovery after the next boundary.",
+			source_entry_ids: [],
+		}),
+		"If notes is unavailable, continue without a Notes call.",
+		"Do not include the exact verifier failure in Notes.",
 		"Reply exactly REPAIR_REQUIRED.",
 	].join("\n");
 }
 
-function phaseFourPrompt(task: RealRepositoryTask, hardCut: boolean): string {
+function phaseFourPrompt(task: RealRepositoryTask): string {
 	const failureHistory = {
 		action: "search",
 		query: "HIDDEN_REPAIR_REQUIRED",
@@ -886,26 +878,31 @@ function phaseFourPrompt(task: RealRepositoryTask, hardCut: boolean): string {
 	return [
 		"Phase 4: recover long-range evidence, apply the hidden repair, and finish.",
 		`External case_id: ${task.id}`,
-		...(hardCut
-			? [
-					"Call history exactly twice, once with each argument object below:",
-					JSON.stringify(failureHistory),
-					JSON.stringify(probeHistory),
-					"Use the old verifier result for the exact marker line and the old probe result for memory_token.",
-				]
-			: ["Use the compacted summary to recover both the exact hidden failure and the first-window memory_token."]),
+		"If the history tool is available, call it exactly twice, once with each argument object below:",
+		JSON.stringify(failureHistory),
+		JSON.stringify(probeHistory),
+		"If history is unavailable, recover the same values from the active context without a History call.",
+		"Use the old verifier result for the exact marker line and the old probe result for memory_token.",
 		`Read ${task.editablePath}, apply only the exact hidden repair, and edit no other file.`,
+		"Do not call verification until the exact recovered marker line is present in the editable file.",
 		'Call benchmark_verify exactly once with {"phase":"repair"}.',
 		`After it passes, return exactly ${JSON.stringify(task.expectedFinal)} with no Markdown or explanation.`,
 	].join("\n");
 }
 
-function boundaryPrompt(boundary: 1 | 2 | 3, hardCut: boolean): string {
+export function repositoryPhasePrompts(task: RealRepositoryTask): readonly [string, string, string, string] {
+	return [phaseOnePrompt(task), phaseTwoPrompt(task), phaseThreePrompt(task), phaseFourPrompt(task)];
+}
+
+export function repositoryPhasePromptHash(task: RealRepositoryTask): string {
+	return `sha256:${sha256(repositoryPhasePrompts(task).join("\0phase\0"))}`;
+}
+
+function boundaryPrompt(boundary: 1 | 2 | 3): string {
 	const lines = [
 		`Controlled boundary ${boundary}. Do not inspect or edit files in this turn.`,
 		`Non-authoritative boundary padding: ${"archive-padding ".repeat(256)}`,
 	];
-	if (!hardCut) return [...lines, `Reply exactly WINDOW_${boundary}_READY without calling a tool.`].join("\n");
 	lines.push(
 		"Call new_context exactly once with an empty object and do not call any other tool afterward.",
 		`When new_context is no longer available in the fresh window, reply exactly WINDOW_${boundary}_READY.`,
@@ -1018,8 +1015,8 @@ async function createControlledBoundary(options: {
 	}
 	let modelReply = "";
 	try {
-		if (!hardCut || options.boundaryTrigger === "model") {
-			await options.session.prompt(boundaryPrompt(options.boundary, hardCut));
+		if (hardCut && options.boundaryTrigger === "model") {
+			await options.session.prompt(boundaryPrompt(options.boundary));
 			ensureBudget(options.session, options.completedCostUsd, options.maxCostUsd, options.price);
 			modelReply = lastAssistantEntry(options.session.sessionManager.getBranch())?.text ?? "";
 		}
@@ -1131,6 +1128,7 @@ async function runRepositoryCase(options: {
 	readonly maxCostUsd: number;
 }): Promise<RealRepositoryRunResult> {
 	const { task, configuration, modelRuntime, model, thinking, price, completedCostUsd, maxCostUsd } = options;
+	const phasePrompts = repositoryPhasePrompts(task);
 	const startedAt = Date.now();
 	const runDirectory = join(
 		options.outputDirectory,
@@ -1170,7 +1168,7 @@ async function runRepositoryCase(options: {
 			customTools,
 			includeNewContext: options.boundaryTrigger === "model",
 		});
-		await session.prompt(phaseOnePrompt(task, configuration.group === "C"));
+		await session.prompt(phasePrompts[0]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
 		probeEntryId = toolResultEntries(manager.getBranch(), "benchmark_probe").at(-1)?.id;
@@ -1204,7 +1202,7 @@ async function runRepositoryCase(options: {
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phaseTwoPrompt(task, configuration.group === "C"));
+		await session.prompt(phasePrompts[1]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		const diagnosis = lastAssistantEntry(manager.getBranch());
 		phaseReplies.push(diagnosis?.text ?? "");
@@ -1240,7 +1238,7 @@ async function runRepositoryCase(options: {
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phaseThreePrompt(task, configuration.group === "C"));
+		await session.prompt(phasePrompts[2]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
 		initialVerificationEntryId = toolResultEntries(manager.getBranch(), "benchmark_verify").at(-1)?.id;
@@ -1276,7 +1274,7 @@ async function runRepositoryCase(options: {
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phaseFourPrompt(task, configuration.group === "C"));
+		await session.prompt(phasePrompts[3]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
 		finalResponse = lastAssistantEntry(manager.getBranch())?.text ?? "";
 		phaseReplies.push(finalResponse);
@@ -1317,7 +1315,13 @@ async function runRepositoryCase(options: {
 	const checks: RepositoryEvaluationCheck[] = [
 		...evaluateRepositoryFinalResponse(finalResponse, task),
 		check("probe-excluded-after-boundary", probeExcludedAfterBoundary, "first-window probe left active context"),
-		check("diagnosis-excluded-after-boundary", diagnosisExcludedAfterBoundary, "diagnosis left active context"),
+		check(
+			"diagnosis-boundary-policy",
+			diagnosisEntryId !== undefined && (hardCut ? diagnosisExcludedAfterBoundary : !diagnosisExcludedAfterBoundary),
+			hardCut
+				? "hard cut excluded the prior diagnosis reply"
+				: "summary retained the recent diagnosis reply while summarizing the older prefix",
+		),
 		check("failure-excluded-after-boundary", failureExcludedAfterBoundary, "hidden failure left active context"),
 		check("source-unchanged-before-implementation", sourceUnchangedBeforeImplementation, "phase 1 and 2 made no source edit"),
 		check(
@@ -1329,11 +1333,6 @@ async function runRepositoryCase(options: {
 			"one initial verification passed official tests and produced the controlled hidden failure",
 		),
 		check("repair-not-premature", !prematureMarker, "hidden marker was absent before the third boundary"),
-		check(
-			"repair-verification-passed",
-			modelVerifications.filter(({ phase }) => phase === "repair").length === 1 && repairVerification?.passed === true,
-			"one model-requested repair verification passed",
-		),
 		check(
 			"independent-verification-passed",
 			independentVerification?.passed === true,
@@ -1429,13 +1428,18 @@ async function runRepositoryCase(options: {
 		check("phase-three-reply", phaseReplies[2] === "REPAIR_REQUIRED", `received ${JSON.stringify(phaseReplies[2])}`),
 		check(
 			"boundary-replies",
-			hardCut && options.boundaryTrigger === "runner"
-				? boundaryReplies.length === 0
-				: boundaryReplies.length === 3 &&
-					boundaryReplies.every((reply, index) => reply === `WINDOW_${index + 1}_READY`),
+			hardCut && options.boundaryTrigger === "model"
+				? boundaryReplies.length === 3 &&
+					boundaryReplies.every((reply, index) => reply === `WINDOW_${index + 1}_READY`)
+				: boundaryReplies.length === 0,
 			`received ${JSON.stringify(boundaryReplies)}`,
 		),
 		check("probe-called-once", probeCalls === 1, `probe calls=${probeCalls}`),
+		check(
+			"repair-verification-passed",
+			modelVerifications.filter(({ phase }) => phase === "repair").length === 1 && repairVerification?.passed === true,
+			"one model-requested repair verification passed after applying the recovered marker",
+		),
 		check(
 			"boundary-trigger-adherence",
 			boundaryEvidence.length === 3 && boundaryEvidence.every(({ actualReason }) => actualReason === expectedBoundaryReason),
@@ -1500,6 +1504,10 @@ function markdownReport(report: RealRepositoryReport): string {
 		`- Model: \`${report.configuration.provider}/${report.configuration.model}\``,
 		`- Thinking: \`${report.configuration.thinking}\``,
 		`- Hard-cut boundary trigger: \`${report.configuration.boundaryTrigger}\``,
+		`- Phase Prompt protocol: \`${report.configuration.phasePromptProtocol}\``,
+		`- Phase Prompt hashes: ${Object.entries(report.configuration.phasePromptHashes)
+			.map(([taskId, hash]) => `\`${taskId}=${hash}\``)
+			.join(", ")}`,
 		"- Execution: strictly serial",
 		`- Memory result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
 		`- Protocol result: ${report.protocolPassedRuns}/${report.totalRuns} passed`,
@@ -1565,6 +1573,8 @@ async function runRealRepositoryEvaluation(
 		...(options.taskId ? { taskId: options.taskId } : {}),
 		...(options.group ? { group: options.group } : {}),
 		boundaryTrigger: options.boundaryTrigger,
+		phasePromptProtocol: "matched-v1",
+		phasePromptHashes: Object.fromEntries(tasks.map((task) => [task.id, repositoryPhasePromptHash(task)])),
 		pricingPerMillionTokens: price,
 		pricingSource: PRICING_SOURCE,
 	};

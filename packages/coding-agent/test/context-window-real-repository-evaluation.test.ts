@@ -9,6 +9,8 @@ import {
 	parseRealRepositoryCliOptions,
 	parseRealRepositoryTaskSet,
 	repositoryDigest,
+	repositoryPhasePromptHash,
+	repositoryPhasePrompts,
 	verifyRealRepositoryTaskSet,
 } from "../evals/context-window/evaluate-real-repository.ts";
 
@@ -116,5 +118,19 @@ describe("repeated real-repository context-window evaluation", () => {
 				.filter(({ passed }) => !passed)
 				.map(({ id }) => id),
 		).toEqual(["final-value:memory_token"]);
+	});
+
+	it("uses one auditable phase-prompt protocol for both strategies", () => {
+		const task = loadTaskSet().tasks[0];
+		if (!task) throw new Error("Missing first repository task");
+		const prompts = repositoryPhasePrompts(task);
+		expect(prompts).toHaveLength(4);
+		expect(prompts[0]).toContain("If the notes tool is available");
+		expect(prompts[0]).toContain("If notes is unavailable");
+		expect(prompts[3]).toContain("If the history tool is available");
+		expect(prompts[3]).toContain("If history is unavailable");
+		expect(prompts[3]).toContain("Do not call verification until the exact recovered marker line is present");
+		expect(repositoryPhasePromptHash(task)).toMatch(/^sha256:[0-9a-f]{64}$/);
+		expect(repositoryPhasePromptHash(task)).toBe(repositoryPhasePromptHash({ ...task }));
 	});
 });
