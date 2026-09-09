@@ -357,6 +357,26 @@ function applyPlanEvent(state: MutableStoreState, event: AnyWorkflowEvent): bool
 
 function applyTaskEvent(state: MutableStoreState, event: AnyWorkflowEvent): boolean {
 	switch (event.eventType) {
+		case "task.description_updated": {
+			const current = getTask(state, event);
+			const workflow = getWorkflow(state, event);
+			assertRevision(event, current.revision);
+			if (
+				workflow.modeDecision?.mode !== "direct" ||
+				workflow.status !== "executing" ||
+				current.status !== "running" ||
+				workflow.rootTaskId !== current.id
+			) {
+				fail("store.handoff_not_running", "Task handoff requires a running Direct root Task");
+			}
+			state.tasks.set(current.id, {
+				...current,
+				description: event.payload.description,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+			});
+			return true;
+		}
 		case "task.created": {
 			if (state.tasks.has(event.entityId)) {
 				fail("store.task_exists", `Task ${event.entityId} already exists`);

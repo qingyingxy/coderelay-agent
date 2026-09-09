@@ -3,11 +3,215 @@ import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession as CodingAgentSession } from "../../src/core/agent-session.ts";
-import { WORKFLOW_SNAPSHOT_CUSTOM_TYPE } from "../../src/core/workflow/event-log.ts";
+import { WorkflowController } from "../../src/core/workflow/controller.ts";
+import { SessionWorkflowEventLog, WORKFLOW_SNAPSHOT_CUSTOM_TYPE } from "../../src/core/workflow/event-log.ts";
+import { WorkflowStore } from "../../src/core/workflow/stores.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 describe("AgentSession hard context windows", () => {
 	const harnesses: Harness[] = [];
+
+	it.each([false, true])(
+		"continues through verification with no extra summary request (handoff=%s)",
+		async (withHandoff) => {
+			let checks = 0;
+			const handoff =
+				"Modified but unverified: upsert transaction. Not checked: CLI help, SQL tracing. Next action: run regression checks. Verified: insert (History test output).";
+			const harness = await createHarness({
+				settings: { contextManagement: { mode: "windowed" } },
+				initialActiveToolNames: ["new_context", "verify_fixture"],
+				tools: [
+					{
+						name: "verify_fixture",
+						label: "Verify",
+						description: "Run regression checks",
+						parameters: Type.Object({}),
+						execute: async () => {
+							checks++;
+							return { content: [{ type: "text", text: "upsert, CLI and tracing passed" }], details: {} };
+						},
+					},
+				],
+			});
+			harnesses.push(harness);
+			harness.session.enableWorkflowTracking("direct");
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("new_context", withHandoff ? { handoff } : {}), {
+					stopReason: "toolUse",
+				}),
+				(context) => {
+					const text = context.messages.map(getMessageText).join("\n");
+					if (withHandoff) expect(text).toContain(handoff);
+					expect(harness.session.getWorkflowView()?.workflow.status).toBe("executing");
+					return fauxAssistantMessage(fauxToolCall("verify_fixture", {}), { stopReason: "toolUse" });
+				},
+				() => {
+					expect(checks).toBe(1);
+					return fauxAssistantMessage("Local checks passed.");
+				},
+			]);
+			await harness.session.prompt("Implement safe import and check upsert, CLI help and SQL tracing");
+			expect(
+				harness.sessionManager
+					.getBranch()
+					.filter(
+						(entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.isError,
+					)
+					.map((entry) => (entry.type === "message" ? getMessageText(entry.message) : "")),
+			).toEqual([]);
+			expect(harness.faux.state.callCount).toBe(3);
+			expect(harness.eventsOfType("context_window_end")).toHaveLength(1);
+			const replay = new WorkflowController(
+				new SessionWorkflowEventLog(harness.sessionManager),
+				new WorkflowStore(),
+			);
+			const workflow = harness.session.getWorkflowView()?.workflow;
+			if (!workflow) throw new Error("Missing workflow");
+			expect(replay.getRootTask(workflow.id)?.description).toBe(withHandoff ? handoff : workflow.request.text);
+			expect(harness.sessionManager.getMemoryNotes()).toEqual([]);
+		},
+	);
+
+	it("replaces the prior task brief across successive cuts and preserves original requirements", async () => {
+		const harness = await createHarness({
+			settings: { contextManagement: { mode: "windowed" } },
+			initialActiveToolNames: ["new_context"],
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct");
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("new_context", { handoff: "Not checked: upsert. Next action: test upsert." }),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("new_context", { handoff: "Not checked: tracing. Next action: test tracing." }),
+				{ stopReason: "toolUse" },
+			),
+			(context) => {
+				const text = context.messages.map(getMessageText).join("\n");
+				expect(text).toContain("Not checked: tracing");
+				expect(text).not.toContain("Not checked: upsert");
+				expect(text).toContain("Current objective: Original requirements");
+				return fauxAssistantMessage("Remaining tracing check reported.");
+			},
+		]);
+		await harness.session.prompt("Original requirements");
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "message" && entry.message.role === "toolResult" && entry.message.isError)
+				.map((entry) => (entry.type === "message" ? getMessageText(entry.message) : "")),
+		).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.eventsOfType("context_window_end")).toHaveLength(2);
+	});
+
+	it.each([40000, 53000])("handles %i tokens before the next call in a continuous tool loop", async (inputTokens) => {
+		let calls = 0;
+		const tool: AgentTool = {
+			name: "inspect_fixture",
+			label: "Inspect",
+			description: "Inspect a fixture",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [
+					{ type: "text", text: `persisted tool result${++calls === 1 ? "x".repeat(inputTokens * 4) : ""}` },
+				],
+				details: {},
+			}),
+		};
+		const harness = await createHarness({
+			models: [{ id: "test", contextWindow: 64000, maxTokens: 4000 }],
+			tools: [tool],
+			initialActiveToolNames: ["inspect_fixture", "new_context"],
+			settings: { contextManagement: { mode: "windowed", reserveTokens: 16000 } },
+		});
+		harnesses.push(harness);
+		harness.session.enableWorkflowTracking("direct");
+		const highUsage = fauxAssistantMessage(fauxToolCall("inspect_fixture", {}), { stopReason: "toolUse" });
+		harness.setResponses([
+			highUsage,
+			(context) => {
+				const text = context.messages.map(getMessageText).join("\n");
+				if (inputTokens < 51200) {
+					expect(text).toContain("approaching its hard token limit");
+					expect(text).toContain("persisted tool result");
+					expect(harness.eventsOfType("context_window_warning")).toHaveLength(1);
+				} else {
+					expect(text).toContain("Workflow Snapshot is authoritative");
+					expect(text).not.toContain("persisted tool result");
+					expect(harness.eventsOfType("context_window_end")).toHaveLength(1);
+				}
+				return fauxAssistantMessage(
+					inputTokens < 51200
+						? fauxToolCall("new_context", { handoff: "Not checked: regression. Next action: check regression." })
+						: fauxToolCall("inspect_fixture", {}),
+					{ stopReason: "toolUse" },
+				);
+			},
+			(context) => {
+				if (inputTokens < 51200)
+					expect(context.messages.map(getMessageText).join("\n")).toContain("Not checked: regression");
+				return fauxAssistantMessage("Done");
+			},
+		]);
+		await harness.session.prompt("Inspect fixture twice");
+		expect(
+			harness.session.messages.filter((message) => message.role === "assistant" && message.stopReason === "error"),
+		).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.eventsOfType("context_window_warning")).toHaveLength(inputTokens < 51200 ? 1 : 0);
+		expect(
+			harness.sessionManager
+				.getBranch()
+				.filter((entry) => entry.type === "message" && entry.message.role === "toolResult"),
+		).toHaveLength(2);
+	});
+
+	it.each(["no-workflow", "oversized", "empty"])("rejects %s handoffs before cutting", async (scenario) => {
+		const harness = await createHarness({
+			settings: { contextManagement: { mode: "windowed" } },
+			initialActiveToolNames: ["new_context"],
+		});
+		harnesses.push(harness);
+		if (scenario !== "no-workflow") harness.session.enableWorkflowTracking("direct");
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("new_context", {
+					handoff:
+						scenario === "oversized"
+							? "\u4e2d".repeat(700)
+							: scenario === "empty"
+								? " "
+								: "Not checked: regression",
+				}),
+				{ stopReason: "toolUse" },
+			),
+			(context) => {
+				const result = context.messages.find((message) => message.role === "toolResult");
+				expect(result).toMatchObject({ isError: true });
+				return fauxAssistantMessage("Handoff rejected.");
+			},
+		]);
+		await harness.session.prompt("Original task");
+		expect(harness.eventsOfType("context_window_end")).toHaveLength(0);
+	});
+
+	it("does not enqueue a memory reminder after a terminal provider failure", async () => {
+		const harness = await createHarness({
+			models: [{ id: "test", contextWindow: 64000, maxTokens: 4000 }],
+			settings: { contextManagement: { mode: "windowed", reserveTokens: 16000 }, retry: { enabled: false } },
+		});
+		harnesses.push(harness);
+		const failure = fauxAssistantMessage("", { stopReason: "error" });
+		failure.errorMessage = "Request limit reached";
+		failure.usage.input = 40000;
+		harness.setResponses([failure]);
+		await harness.session.prompt(`Inspect fixture ${"x".repeat(160000)}`);
+		expect(harness.eventsOfType("context_window_warning")).toHaveLength(0);
+		expect(harness.faux.state.callCount).toBe(1);
+	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();

@@ -130,6 +130,9 @@ export interface WorkflowEventPayloadMap {
 	readonly "task.dependency_added": {
 		readonly dependencyId: TaskId;
 	};
+	readonly "task.description_updated": {
+		readonly description: string;
+	};
 	readonly "task.pending": TaskStatusChangedPayload;
 	readonly "task.ready": TaskStatusChangedPayload;
 	readonly "task.assigned": {
@@ -285,6 +288,7 @@ const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>
 	"plan.superseded": "plan",
 	"task.created": "task",
 	"task.dependency_added": "task",
+	"task.description_updated": "task",
 	"task.pending": "task",
 	"task.ready": "task",
 	"task.assigned": "task",
@@ -545,6 +549,11 @@ function validateTerminalPayload(event: AnyWorkflowEvent): readonly DomainViolat
 
 function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolation[] {
 	switch (event.eventType) {
+		case "task.description_updated":
+			return event.payload.description.trim().length > 0 &&
+				Buffer.byteLength(event.payload.description, "utf8") <= 2000
+				? []
+				: [violation("event.invalid_task_description", "Task handoff requires 1-2000 UTF-8 bytes")];
 		case "workflow.mode_decided": {
 			const { decision } = event.payload;
 			return (decision.mode === "direct" || decision.mode === "plan") &&

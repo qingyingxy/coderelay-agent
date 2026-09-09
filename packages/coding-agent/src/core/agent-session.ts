@@ -807,6 +807,21 @@ export class AgentSession {
 		this.agent.prepareNextTurnWithContext = async (turn, signal) => {
 			const previousSnapshot = await previousPrepareNextTurnWithContext?.(turn, signal);
 			let previousContext = previousSnapshot?.context ?? turn.context;
+			const contextManagement = this.settingsManager.getContextManagementSettings();
+			if (
+				turn.message.stopReason === "toolUse" &&
+				this.settingsManager.getCompactionEnabled() &&
+				this._usesHardContextWindows(contextManagement.mode) &&
+				this._contextWindowPhase !== "cut_pending"
+			) {
+				await this._checkContextWindowBudget(
+					turn.message,
+					this.model?.contextWindow ?? 0,
+					contextManagement.reserveTokens,
+					false,
+					true,
+				);
+			}
 			if (this._contextWindowPhase === "cut_pending") {
 				await this._runPendingContextWindowCut();
 				previousContext = {
@@ -4559,6 +4574,7 @@ export class AgentSession {
 		}
 
 		if (useHardContextWindows) {
+			if (assistantMessage.stopReason === "error" || assistantMessage.stopReason === "aborted") return false;
 			const latestBoundary = [...branch]
 				.reverse()
 				.find((entry) => entry.type === "compaction" || entry.type === "context_window");
@@ -4631,6 +4647,7 @@ export class AgentSession {
 		contextWindow: number,
 		reserveTokens: number,
 		beforePrompt: boolean,
+		betweenToolTurns = false,
 	): Promise<boolean> {
 		const budget = calculateContextWindowTokenBudget(contextWindow, reserveTokens);
 		if (!budget || this._contextWindowPhase === "cutting" || this._contextWindowPhase === "failed") {
@@ -4641,15 +4658,20 @@ export class AgentSession {
 			assistantMessage.stopReason !== "error" && assistantMessage.stopReason !== "aborted" && assistantMessage.usage
 				? calculateContextTokens(assistantMessage.usage)
 				: 0;
+		const estimatedTokens = estimateContextTokens(this.agent.state.messages).tokens;
 		const contextTokens = Math.ceil(
-			directContextTokens > 0 ? directContextTokens : estimateContextTokens(this.agent.state.messages).tokens,
+			betweenToolTurns
+				? Math.max(directContextTokens, estimatedTokens)
+				: directContextTokens > 0
+					? directContextTokens
+					: estimatedTokens,
 		);
 		if (!Number.isFinite(contextTokens) || contextTokens <= 0) return false;
 
 		if (contextTokens >= budget.hardLimit) {
-			const continueAfterCut = !beforePrompt && this.agent.hasQueuedMessages();
+			const continueAfterCut = betweenToolTurns || (!beforePrompt && this.agent.hasQueuedMessages());
 			await this.requestContextWindow("threshold", { continueAfterCut });
-			if (this._contextWindowPhase === "cut_pending") {
+			if (!betweenToolTurns && this._contextWindowPhase === "cut_pending") {
 				await this._runPendingContextWindowCut();
 			}
 			return continueAfterCut;
@@ -4658,7 +4680,7 @@ export class AgentSession {
 		if (contextTokens < budget.softLimit || this._contextWindowSoftWarningIssued) {
 			return false;
 		}
-		this._scheduleContextWindowSoftWarning(contextTokens, budget, beforePrompt);
+		this._scheduleContextWindowSoftWarning(contextTokens, budget, beforePrompt, betweenToolTurns);
 		return !beforePrompt;
 	}
 
@@ -4666,6 +4688,7 @@ export class AgentSession {
 		contextTokens: number,
 		budget: ContextWindowTokenBudget,
 		beforePrompt: boolean,
+		betweenToolTurns = false,
 	): void {
 		this._contextWindowPhase = "soft_warning_pending";
 		this._contextWindowSoftWarningIssued = true;
@@ -4680,7 +4703,7 @@ export class AgentSession {
 			customType: CONTEXT_WINDOW_WARNING_MESSAGE_TYPE,
 			content: [
 				"The current context window is approaching its hard token limit.",
-				"Finish the current non-interruptible tool step. Save durable cross-window decisions, constraints, discoveries, and open questions with the notes tool. Then call new_context before starting more high-cost work.",
+				"Finish the current non-interruptible tool step. Save durable cross-window decisions, constraints and discoveries in Notes; keep ordinary progress out of Notes. In an active Direct Workflow, call new_context with a short handoff: modified but unverified work, unchecked regressions, next action, then verified checks with evidence references. This updates the Snapshot task brief, not verification status. Otherwise omit handoff and rely on existing Workflow records and History. Call new_context before starting more high-cost work.",
 			].join("\n"),
 			display: false,
 			details: {
@@ -4698,6 +4721,8 @@ export class AgentSession {
 		}>;
 		if (beforePrompt) {
 			this._pendingNextTurnMessages.push(message);
+		} else if (betweenToolTurns) {
+			this.agent.steer(message);
 		} else {
 			this.agent.followUp(message);
 		}
@@ -5233,9 +5258,18 @@ export class AgentSession {
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
 		if (contextWindowToolEnabled) {
-			baseToolDefinitions.new_context = createNewContextToolDefinition(async () => {
+			baseToolDefinitions.new_context = createNewContextToolDefinition(async (handoff) => {
 				if (contextManagementMode === "hybrid" && !this._usesHardContextWindows(contextManagementMode)) {
 					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
+				}
+				if (handoff !== undefined) {
+					if (
+						!this._activeWorkflowAdapter ||
+						(this._contextWindowPhase !== "idle" && this._contextWindowPhase !== "notes_collection")
+					) {
+						throw new Error("handoff requires an active Direct Workflow and no pending context cut");
+					}
+					this._activeWorkflowAdapter.recordContextHandoff(handoff);
 				}
 				await this.requestContextWindow("model", { continueAfterCut: true });
 			}) as ToolDefinition;

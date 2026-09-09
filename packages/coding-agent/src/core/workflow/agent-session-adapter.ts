@@ -240,6 +240,15 @@ export class AgentSessionAdapter implements WorkflowContextProvider {
 		return { workflowId: this.#workflowId, snapshotEntryId, snapshot };
 	}
 
+	recordContextHandoff(description: string): void {
+		this.#controller.recordContextHandoff({
+			commandId: this.#createId("command"),
+			workflowId: this.#workflowId,
+			taskId: this.#taskId,
+			description,
+		});
+	}
+
 	get finalReport(): WorkflowFinalReport | undefined {
 		const workflow = this.#controller.getWorkflow(this.#workflowId);
 		const rootTask = this.#controller.getRootTask(this.#workflowId);

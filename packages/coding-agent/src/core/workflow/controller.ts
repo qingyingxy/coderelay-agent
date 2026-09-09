@@ -954,6 +954,38 @@ export class WorkflowController {
 		return this.#commit(command, [event]);
 	}
 
+	recordContextHandoff(
+		command: WorkflowCommandBase & { readonly taskId: TaskId; readonly description: string },
+	): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) return duplicate;
+		const workflow = this.#requireWorkflow(command.workflowId);
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		const description = command.description.trim();
+		if (
+			workflow.modeDecision?.mode !== "direct" ||
+			workflow.status !== "executing" ||
+			task.status !== "running" ||
+			workflow.rootTaskId !== task.id
+		) {
+			fail("controller.handoff_not_running", "Task handoff requires a running Direct root Task");
+		}
+		if (!description || Buffer.byteLength(description, "utf8") > 2000) {
+			fail("controller.invalid_handoff", "Task handoff requires 1-2000 UTF-8 bytes");
+		}
+		return this.#commit(command, [
+			{
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.description_updated",
+				occurredAt: this.#now(),
+				actor: { kind: "agent", id: "main-agent" },
+				payload: { description },
+			},
+		]);
+	}
+
 	prepareMainAgentAttempt(command: PrepareMainAgentAttemptCommand): WorkflowCommandResult {
 		return this.prepareTaskAttempt({
 			...command,

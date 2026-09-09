@@ -125,7 +125,7 @@ function deriveNextAction(
 			return "Reconcile task states and determine the next executable task.";
 		}
 		case "verifying": {
-			const pending = verifications.find(({ status }) => status === "not_started" || status === "running");
+			const pending = verifications.find(({ status }) => status !== "passed");
 			return pending
 				? `Continue workflow_verification_id=${pending.id}: ${truncateField(pending.summary)}`
 				: "Reconcile verification results and finalize the workflow.";
@@ -183,8 +183,30 @@ export function projectWorkflowSnapshot(
 	const attempts = selectLatestAttempts(snapshot);
 	const verifications = snapshot.verifications
 		.map(({ result }) => result)
-		.sort((left, right) => left.id.localeCompare(right.id));
+		.sort(
+			(left, right) =>
+				Number(left.status === "passed") - Number(right.status === "passed") || left.id.localeCompare(right.id),
+		);
+	const unchecked = [
+		...(plan?.verificationRequirements ?? [])
+			.filter(
+				(requirement) => !verifications.some((result) => result.requirementId === requirement.id && !result.taskId),
+			)
+			.map((requirement) => `Not checked: requirement=${requirement.id} ${truncateField(requirement.description)}`),
+		...tasks.flatMap((task) =>
+			task.verificationRequirements
+				.filter(
+					(requirement) =>
+						!verifications.some((result) => result.requirementId === requirement.id && result.taskId === task.id),
+				)
+				.map(
+					(requirement) =>
+						`Not checked: workflow_task_id=${task.id} requirement=${requirement.id} ${truncateField(requirement.description)}`,
+				),
+		),
+	];
 	const mode = workflow.modeDecision?.mode ?? "undecided";
+	const directTask = mode === "direct" ? tasks.find(({ id }) => id === workflow.rootTaskId) : undefined;
 	const stopReason = workflow.result?.reason ?? workflow.blockedReason?.message ?? "none";
 	const assumptions = plan
 		? [...plan.assumptions]
@@ -212,14 +234,33 @@ export function projectWorkflowSnapshot(
 				: "Current plan: none",
 			required: true,
 		},
-		...tasks.map((task) => ({ content: taskLine(task), required: false })),
-		...attempts.map((attempt) => ({ content: attemptLine(attempt), required: false })),
-		...verifications.map((verification) => ({ content: verificationLine(verification), required: false })),
 		{
 			content: `Active constraints: workflowBudget=${formatBudget(workflow.budget)} assumptions=${assumptions}`,
 			required: true,
 		},
 		{ content: `Next action: ${deriveNextAction(workflow, tasks, verifications)}`, required: true },
+		...(directTask && directTask.description !== workflow.request.text
+			? [
+					{
+						content: `Current task brief (agent-reported, not verification evidence): ${truncateField(directTask.description, 2000)}`,
+						required: false,
+					},
+				]
+			: []),
+		...verifications
+			.filter(({ status }) => status !== "passed")
+			.map((verification) => ({ content: verificationLine(verification), required: false })),
+		...unchecked.map((content) => ({ content, required: false })),
+		{
+			content:
+				"Verification scope: changed code and runtime success do not establish test coverage. Resolve unchecked work before final submission; consult original requirements in History. In each replacement handoff, retain unresolved items unless item-specific evidence or a user scope change resolves them. Existing-suite success alone does not resolve untested requirements.",
+			required: false,
+		},
+		...tasks.map((task) => ({ content: taskLine(task), required: false })),
+		...verifications
+			.filter(({ status }) => status === "passed")
+			.map((verification) => ({ content: verificationLine(verification), required: false })),
+		...attempts.map((attempt) => ({ content: attemptLine(attempt), required: false })),
 		{
 			content: "History: use the history tool when an exact prior message or tool result is needed.",
 			required: true,
@@ -228,7 +269,7 @@ export function projectWorkflowSnapshot(
 
 	const requiredLines = lines.filter(({ required }) => required);
 	const optionalLines = lines.filter(({ required }) => !required);
-	const optionalInsertionIndex = 6;
+	const optionalInsertionIndex = 8;
 	const marker = (omitted: number): ProjectionLine => ({
 		content: `[projection truncated: omitted ${omitted} detail line(s)]`,
 		required: true,

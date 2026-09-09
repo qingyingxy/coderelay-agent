@@ -218,4 +218,73 @@ describe("projectWorkflowSnapshot", () => {
 		expect(() => projectWorkflowSnapshot(createSnapshot(), 100)).toThrow("maxBytes");
 		expect(() => projectWorkflowSnapshot({ ...createSnapshot(), workflowId: "other" })).toThrow("does not match");
 	});
+
+	it("keeps unresolved verification ahead of completed work under a bounded seed", () => {
+		const base = createSnapshot();
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			tasks: Array.from({ length: 20 }, (_, index) => ({
+				...base.tasks[0],
+				id: `done-${index}`,
+				status: "succeeded" as const,
+			})),
+			verifications: [
+				{
+					revision: 1,
+					result: { ...base.verifications[0].result, id: "a-passed", status: "passed", summary: "Insert passed" },
+				},
+				{
+					revision: 1,
+					result: {
+						...base.verifications[0].result,
+						id: "z-upsert",
+						status: "failed",
+						summary: "Upsert savepoint lost",
+					},
+				},
+			],
+		};
+		const projection = projectWorkflowSnapshot(snapshot, 1800);
+		expect(projection.truncated).toBe(true);
+		expect(projection.content).toContain("Upsert savepoint lost");
+		expect(projection.content).not.toContain("a-passed");
+		expect(projection.content).toContain("Current objective:");
+		expect(projection.content).toContain("Active constraints:");
+		expect(projection.content.indexOf("Next action:")).toBeLessThan(projection.content.indexOf("z-upsert"));
+		expect(projection.byteLength).toBeLessThanOrEqual(1800);
+	});
+
+	it("shows declared checks with no results without treating runtime success as coverage", () => {
+		const base = createSnapshot();
+		const projection = projectWorkflowSnapshot({
+			...base,
+			tasks: [
+				{
+					...base.tasks[0],
+					verificationRequirements: [
+						{ id: "tracing", kind: "test", required: true, description: "SQL tracing regression" },
+					],
+				},
+			],
+		});
+		expect(projection.content).toContain(
+			"Not checked: workflow_task_id=task-b requirement=tracing SQL tracing regression",
+		);
+		expect(projection.content).toContain("changed code and runtime success do not establish test coverage");
+	});
+
+	it("does not suggest finalizing a verifying workflow with failed checks", () => {
+		const base = createSnapshot();
+		const projection = projectWorkflowSnapshot({
+			...base,
+			workflow: { ...base.workflow, status: "verifying" },
+			verifications: [
+				{ revision: 1, result: { ...base.verifications[0].result, status: "failed", summary: "Repair upsert" } },
+			],
+		});
+		expect(projection.content).toContain(
+			"Next action: Continue workflow_verification_id=verification-1: Repair upsert",
+		);
+		expect(projection.content).not.toContain("finalize the workflow");
+	});
 });

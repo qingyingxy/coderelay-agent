@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added an optional Direct Workflow handoff to `new_context`, persisted in the existing task description and projected into the next window without a summary model call.
 - Added Core-backed Plan Mode with a read-only Planner, persisted approval and revision history, Plan-to-Task conversion, Task-derived progress, `/plan` lifecycle commands, and a deterministic Faux Provider demo.
 - Added persisted Task Graph readiness, constrained scheduling, executor interfaces, Task Tree commands, and a deterministic Scheduler demo.
 - Added effective permission and budget enforcement, cross-process Writer Leases, file modification ownership, runtime resource cancellation, and CLI guardrail status.
@@ -24,11 +25,13 @@
 
 ### Changed
 
+- Clarified Direct handoff guidance to carry unresolved items forward until item-specific evidence or a user scope change resolves them; passing existing tests alone is insufficient.
 - Changed automatic hard and high-risk workflows to use a strong read-only Planner that decomposes bounded Worker Tasks before balanced implementation and review.
 - Changed windowed hard cuts requested after a settled Direct Workflow to retain its authoritative Snapshot, enabling deterministic controller boundaries without relying on a model `new_context` call.
 
 ### Fixed
 
+- Fixed hard-window projections dropping unresolved verification behind completed task details; show declared checks without results before execution history.
 - Fixed explanatory `review:passed` verdicts being rejected and needlessly escalating a successful Reviewer to the strong tier.
 - Fixed resumed sessions losing subsequent entries when an existing Session JSONL ended with an incomplete record or lacked a trailing newline.
 - Fixed long Workflow objectives losing trailing continuation instructions in hard-window Snapshot projections.
