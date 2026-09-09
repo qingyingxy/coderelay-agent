@@ -21,6 +21,8 @@ import {
 	buildEvaluationReport,
 	createAgentSession,
 	type DecisionReasonCode,
+	digestProtectedPaths,
+	EVALUATION_PROTOCOL_VERSION,
 	EVALUATION_SCHEMA_VERSION,
 	EVALUATION_STRATEGIES,
 	type EvaluationModelIdentity,
@@ -387,6 +389,7 @@ async function runEvaluation(
 	const workspace = join(runRoot, "repository");
 	cpSync(resolve(TASK_SET_DIR, task.repositoryFixture), workspace, { recursive: true });
 	await initializeRepository(workspace);
+	const protectedPathsBaseline = digestProtectedPaths(workspace, task.protectedPaths);
 	const startedAtMs = Date.now();
 	const startedAt = new Date(startedAtMs).toISOString();
 	const limitations: string[] = [
@@ -395,6 +398,7 @@ async function runEvaluation(
 	let view: WorkflowView | undefined;
 	let runtimeFailure: string | undefined;
 	let mainSessionUsage = zeroUsage();
+	let mainSessionModelNames: string[] = [];
 	const sessionReasonCodes: DecisionReasonCode[] = [];
 	const evaluationSession = SessionManager.inMemory(workspace);
 	const { session } = await createAgentSession({
@@ -426,14 +430,25 @@ async function runEvaluation(
 		}
 	} finally {
 		mainSessionUsage = usageFromMessages(session.state.messages);
+		mainSessionModelNames = session.state.messages.flatMap((message) =>
+			message.role === "assistant" ? [`${message.provider}/${message.model}`] : [],
+		);
 		session.exportToJsonl(join(runRoot, "session.jsonl"));
 		unsubscribe();
 		session.dispose();
 	}
 
-	const verificationResults = await Promise.all(
-		task.verificationCommands.map((command) => runCommand(command, workspace, task.budget.maxDurationMs)),
-	);
+	const verificationIntegrityPassed = digestProtectedPaths(workspace, task.protectedPaths) === protectedPathsBaseline;
+	const verificationResults = verificationIntegrityPassed
+		? await Promise.all(
+				task.verificationCommands.map((command) => runCommand(command, workspace, task.budget.maxDurationMs)),
+			)
+		: task.verificationCommands.map(() => ({
+				exitCode: null,
+				stdout: "",
+				stderr: "Protected verification paths changed during the evaluation run",
+				timedOut: false,
+			}));
 	const passedVerifications = verificationResults.filter(
 		({ exitCode, timedOut }) => exitCode === 0 && !timedOut,
 	).length;
@@ -480,6 +495,7 @@ async function runEvaluation(
 		usage.cost > task.budget.maxCost || usage.turns > task.budget.maxTurns || agents.length > task.budget.maxAgents;
 	const durationMs = Date.now() - startedAtMs;
 	const succeeded =
+		verificationIntegrityPassed &&
 		!runtimeFailure &&
 		!budgetExceeded &&
 		protocolViolations.length === 0 &&
@@ -489,15 +505,17 @@ async function runEvaluation(
 	const protocolRuntimeFailure = runtimeFailure?.startsWith("Execution protocol") ?? false;
 	const failureType = succeeded
 		? undefined
-		: protocolRuntimeFailure || (!runtimeFailure && protocolViolations.length > 0)
-			? "strategy_protocol"
-			: runtimeFailure
-				? "model"
-				: budgetExceeded
-					? "budget"
-					: durationMs > task.budget.maxDurationMs || failedVerification?.timedOut
-						? "timeout"
-						: "verification";
+		: !verificationIntegrityPassed
+			? "verification_integrity"
+			: protocolRuntimeFailure || (!runtimeFailure && protocolViolations.length > 0)
+				? "strategy_protocol"
+				: runtimeFailure
+					? "model"
+					: budgetExceeded
+						? "budget"
+						: durationMs > task.budget.maxDurationMs || failedVerification?.timedOut
+							? "timeout"
+							: "verification";
 	const failureMessage =
 		(protocolRuntimeFailure || (!runtimeFailure && protocolViolations.length > 0)
 			? `Strategy protocol did not complete: ${protocolViolations.join("; ")}`
@@ -537,16 +555,33 @@ async function runEvaluation(
 		taskSetVersion: taskSet.version,
 		taskId: task.id,
 		strategy,
+		repetition: artifacts.repetition,
+		runConfigurationDigest: `sha256:${createHash("sha256")
+			.update(
+				JSON.stringify({
+					taskSet: { id: taskSet.id, version: taskSet.version },
+					task,
+					model: modelIdentity,
+					strategyProtocol: STRATEGY_PROTOCOLS[strategy],
+					strategyInstruction: STRATEGY_INSTRUCTIONS[strategy],
+					evaluationProtocolVersion: EVALUATION_PROTOCOL_VERSION,
+				}),
+			)
+			.digest("hex")}`,
 		model: modelIdentity,
 		repositoryBaseline: task.repositoryBaseline,
 		promptDigest: `sha256:${createHash("sha256").update(task.prompt).digest("hex")}`,
 		promptVersion: task.promptVersion,
 		strategyPromptDigest: `sha256:${createHash("sha256").update(STRATEGY_INSTRUCTIONS[strategy]).digest("hex")}`,
 		strategyProtocolVersion: EXECUTION_PROTOCOL_VERSION,
+		evaluationProtocolVersion: EVALUATION_PROTOCOL_VERSION,
 		budget: task.budget,
 		startedAt,
 		endedAt: new Date().toISOString(),
 		succeeded,
+		protocolStatus: protocolRuntimeFailure || protocolViolations.length > 0 ? "violated" : "satisfied",
+		protocolViolations,
+		verificationIntegrityPassed,
 		requiredVerifications: task.verificationCommands.length,
 		passedVerifications,
 		reviewerFindings: reviewerAgentIds.size > 0 ? task.expectedReviewerFindings.length : 0,
@@ -563,6 +598,17 @@ async function runEvaluation(
 		usage: { ...usage, durationMs },
 		decisionReasonCodes,
 		automaticDecisionCount,
+		actualModelNames: [
+			...new Set([
+				...mainSessionModelNames,
+				...agents
+					.filter(({ usage: agentUsage }) => agentUsage.turns > 0)
+					.map(
+						({ modelRoute, profile }) =>
+							modelRoute?.modelName ?? profile?.model ?? `${model.provider}/${model.id}`,
+					),
+			]),
+		],
 		failureType,
 		failureMessage,
 		limitations,
