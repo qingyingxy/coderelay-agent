@@ -1,0 +1,22 @@
+{
+  "jobflow-followup-dialogs": {
+    "writeRoots": ["frontend/app", "frontend/components", "frontend/lib"],
+    "dependencyRoots": ["E:/code/jobflow-agent/frontend/node_modules"],
+    "frontend": "frontend", "port": 3000,
+    "apiUrl": "http://127.0.0.1:18001", "browserCases": 8,
+    "acceptanceFiles": []
+  },
+  "memory-organization": {
+    "writeRoots": ["src/memory_assistant", "frontend/app", "frontend/components", "frontend/lib"],
+    "dependencyRoots": ["E:/code/Memory-RAG/frontend/node_modules"],
+    "frontend": "frontend", "port": 3011,
+    "apiUrl": "http://127.0.0.1:18002", "browserCases": 2,
+    "acceptanceFiles": ["test_memory_http.py"]
+  },
+  "live-state-pagination": {
+    "writeRoots": ["Tools/LiveCommentBridge"],
+    "dependencyRoots": ["E:/code/ballfightlive-version/Tools/LiveCommentBridge/desktop/node_modules"],
+    "frontend": "Tools/LiveCommentBridge/desktop", "browserCases": 5,
+    "acceptanceFiles": ["test_pagination.py", "live-acceptance.md"]
+  }
+}

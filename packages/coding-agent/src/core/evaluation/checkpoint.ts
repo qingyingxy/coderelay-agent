@@ -1,3 +1,4 @@
+import { EVALUATION_ESCALATION_POLICY_VERSION } from "./escalation-policy.ts";
 import {
 	EVALUATION_PROTOCOL_STATUSES,
 	EVALUATION_PROTOCOL_VERSION,
@@ -46,6 +47,8 @@ export function parseEvaluationCheckpoint(value: unknown, configurationDigest: s
 			!Number.isInteger(run.repetition) ||
 			(run.repetition as number) < 1 ||
 			typeof run.runConfigurationDigest !== "string" ||
+			!isRecord(run.escalationPolicy) ||
+			run.escalationPolicy.version !== EVALUATION_ESCALATION_POLICY_VERSION ||
 			run.evaluationProtocolVersion !== EVALUATION_PROTOCOL_VERSION ||
 			typeof run.protocolStatus !== "string" ||
 			!EVALUATION_PROTOCOL_STATUSES.includes(run.protocolStatus as EvaluationRunRecord["protocolStatus"]) ||

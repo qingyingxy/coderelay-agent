@@ -1,6 +1,7 @@
 import type { DecisionReasonCode } from "../workflow/decision-reasons.ts";
 import type { ModelRouteRecord, ModelRouteRole, ModelTier } from "../workflow/model-gateway.ts";
 import type { ResourceUsage } from "../workflow/types.ts";
+import type { EvaluationEscalationPolicy } from "./escalation-policy.ts";
 
 export const EVALUATION_SCHEMA_VERSION = 3;
 export const EVALUATION_PROTOCOL_VERSION = "model-routing-v4";
@@ -109,6 +110,7 @@ export interface EvaluationRunRecord {
 	readonly strategyPromptDigest: string;
 	readonly strategyProtocolVersion: string;
 	readonly evaluationProtocolVersion: string;
+	readonly escalationPolicy: EvaluationEscalationPolicy;
 	readonly budget: EvaluationBudget;
 	readonly startedAt: string;
 	readonly endedAt: string;

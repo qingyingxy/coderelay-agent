@@ -1,4 +1,5 @@
 export * from "./checkpoint.ts";
+export * from "./escalation-policy.ts";
 export * from "./integrity.ts";
 export * from "./manifest.ts";
 export * from "./metrics.ts";
@@ -6,5 +7,6 @@ export * from "./multi-writer-candidate-gate.ts";
 export * from "./protocol.ts";
 export * from "./regression-gate.ts";
 export * from "./report.ts";
+export * from "./shell-policy.ts";
 export * from "./team-candidate-gate.ts";
 export * from "./types.ts";

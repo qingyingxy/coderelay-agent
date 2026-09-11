@@ -1,0 +1,13 @@
+{
+  "version": "conversation-cost-matrix-v2",
+  "status": "offline-qualified-input-freeze",
+  "arms": ["sol", "luna", "terra"],
+  "tasks": [
+    {"id": "memory-organization", "sourceThread": "019fdc8c-4d50-7f90-9c83-29ae5a0acd03", "sourceTitle": "评估项目现状", "repository": "E:/code/Memory-RAG", "baseline": "336361099b34e5321e2f744e9b46fb22e602c121", "objective": "在既有知识助手中实现登录、组织与项目成员管理、资料可见性和检索权限隔离，并接通已有前端。共同验收使用 SQLite、离线检索和浏览器 API fixture；不扩展新的安全需求，不宣称验证 PostgreSQL 部署。"},
+    {"id": "jobflow-followup-dialogs", "sourceThread": "01a07561-3b16-7291-8325-976e1dcd8cf4", "sourceTitle": "分析项目当前进度与复杂度", "repository": "E:/code/jobflow-agent", "baseline": "1a3b55a6d834a2b93e559dc711cf1b3f5a71b503^", "objective": "保留三项主导航，在申请进度中恢复材料审核、投递记录、浏览器辅助、跟进管理的弹窗入口；桌面和手机均能完成既有受控流程。"},
+    {"id": "live-state-pagination", "sourceThread": "01a085de-8c97-77c1-b1a1-e08980163c09", "sourceTitle": "分析采集程序卡顿问题", "repository": "E:/code/ballfightlive-version", "baseline": "3f324ca2dd5f109f5984ab37dd18c8ded2004396", "objective": "状态 revision 增量响应和三类队列服务端分页，保留全局排名，正确处理空页、越界以及翻页与轮询的并发覆盖。不扩展 watchdog、媒体开关或 Unity 存盘。"}
+  ],
+  "policy": {"maxRepairs": 1, "thinking": "medium", "reviewer": "sol", "inactivityMinutes": 30, "repeatedResults": 12, "costLimit": null, "totalTimeLimit": null},
+  "models": {"sol": "qingyingxy/gpt-5.6-sol", "luna": "qingyingxy/gpt-5.6-luna", "terra": "qingyingxy/gpt-5.6-terra"},
+  "limitations": ["Configured-rate estimates, not provider invoices", "Preparation does not count as a paid trial", "Frozen inputs do not authorize paid execution; task-specific launcher integration and offline permission preflight remain required", "Memory acceptance covers SQLite and mocked frontend APIs, not PostgreSQL deployment or a live browser-to-backend integration"]
+}

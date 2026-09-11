@@ -186,6 +186,10 @@ function resolveSpawnContext(
 export interface BashToolOptions {
 	/** Custom operations for command execution. Default: local shell */
 	operations?: BashOperations;
+	/** Timeout used when the tool call omits one, in seconds. Default: no timeout */
+	defaultTimeout?: number;
+	/** Upper bound for tool-requested timeouts, in seconds. Default: no upper bound */
+	maximumTimeout?: number;
 	/** Command prefix prepended to every command (for example shell setup commands) */
 	commandPrefix?: string;
 	/** Optional explicit shell path from settings */
@@ -321,14 +325,28 @@ export function createBashToolDefinition(
 	const commandPrefix = options?.commandPrefix;
 	const exposeSessionEnvironment = options?.exposeSessionEnvironment ?? true;
 	const spawnHook = options?.spawnHook;
+	const defaultTimeout = options?.defaultTimeout;
+	const maximumTimeout = options?.maximumTimeout;
+	if (defaultTimeout !== undefined) resolveTimeoutMs(defaultTimeout);
+	if (maximumTimeout !== undefined) resolveTimeoutMs(maximumTimeout);
+	const promptGuidelines = [
+		...(exposeSessionEnvironment
+			? ["Inspect PI_* environment variables for current model and session details."]
+			: []),
+		...(defaultTimeout === undefined
+			? []
+			: [
+					maximumTimeout === undefined
+						? `Bash commands default to a ${defaultTimeout}-second timeout.`
+						: `Bash commands default to a ${defaultTimeout}-second timeout and cannot exceed ${maximumTimeout} seconds.`,
+				]),
+	];
 	return {
 		name: "bash",
 		label: "bash",
 		description: `Execute a bash command in the current working directory. Returns stdout and stderr. Output is truncated to last ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). If truncated, full output is saved to a temp file. Optionally provide a timeout in seconds.`,
 		promptSnippet: "Execute bash commands (ls, grep, find, etc.)",
-		promptGuidelines: exposeSessionEnvironment
-			? ["Inspect PI_* environment variables for current model and session details."]
-			: undefined,
+		promptGuidelines: promptGuidelines.length > 0 ? promptGuidelines : undefined,
 		parameters: bashSchema,
 		async execute(
 			_toolCallId,
@@ -338,6 +356,11 @@ export function createBashToolDefinition(
 			ctx?,
 		) {
 			const resolvedCommand = commandPrefix ? `${commandPrefix}\n${command}` : command;
+			const requestedTimeout = timeout ?? defaultTimeout;
+			const executionTimeout =
+				requestedTimeout === undefined || maximumTimeout === undefined
+					? requestedTimeout
+					: Math.min(requestedTimeout, maximumTimeout);
 			const spawnContext = resolveSpawnContext(resolvedCommand, cwd, spawnHook, exposeSessionEnvironment, ctx);
 			const output = new OutputAccumulator({ tempFilePrefix: "pi-bash" });
 			let acceptingOutput = true;
@@ -429,7 +452,7 @@ export function createBashToolDefinition(
 					const result = await ops.exec(spawnContext.command, spawnContext.cwd, {
 						onData: handleData,
 						signal,
-						timeout,
+						timeout: executionTimeout,
 						env: spawnContext.env,
 					});
 					exitCode = result.exitCode;

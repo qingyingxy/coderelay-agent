@@ -1,0 +1,468 @@
+{
+  "config": {
+    "mode": "auto",
+    "auto_fallback_seconds": 10,
+    "companion_log": {
+      "stale_seconds": 15
+    },
+    "kuaishou": {
+      "enabled": true,
+      "rooms": [
+        {
+          "id": "kuaishou-primary",
+          "name": "官方主直播间",
+          "room_url": "https://live.kuaishou.com/u/BALL_FIGHT",
+          "enabled": true
+        },
+        {
+          "id": "kuaishou-test",
+          "name": "玩法测试间",
+          "room_url": "https://live.kuaishou.com/u/BALL_FIGHT_TEST",
+          "enabled": false
+        }
+      ]
+    },
+    "web": {
+      "room_url": "https://live.kuaishou.com/u/BALL_FIGHT"
+    },
+    "xiaohongshu": {
+      "enabled": true,
+      "room_url": "https://www.xiaohongshu.com/livestream/570410187921782520",
+      "rooms": [
+        {
+          "id": "xiaohongshu-primary",
+          "name": "球球战斗直播间",
+          "room_url": "https://www.xiaohongshu.com/livestream/570410187921782520",
+          "enabled": true
+        },
+        {
+          "id": "xiaohongshu-backup",
+          "name": "活动备用间",
+          "room_url": "https://www.xiaohongshu.com/livestream/570410187921782521",
+          "enabled": false
+        }
+      ]
+    },
+    "ocr": {
+      "region": {
+        "left": 1180,
+        "top": 164,
+        "width": 520,
+        "height": 720
+      },
+      "fps": 5,
+      "confidence": 0.78,
+      "vision": {
+        "enabled": false,
+        "base_url": "https://api.example.com",
+        "model": "vision-model",
+        "minimum_interval": 1.5,
+        "timeout_seconds": 20
+      }
+    }
+  },
+  "state": {
+    "revision": 42,
+    "running": true,
+    "status": "弹幕采集已启动",
+    "mode": "auto",
+    "modeLabel": "自动",
+    "activeSource": "Web",
+    "sourceStates": {
+      "web": "connected",
+      "log": "connected",
+      "ocr": "idle"
+    },
+    "sourceMessages": {
+      "web": "快手实时消息已连接",
+      "log": "直播伴侣日志待命",
+      "ocr": ""
+    },
+    "platforms": [
+      {
+        "id": "kuaishou-primary",
+        "platform": "kuaishou",
+        "label": "官方主直播间",
+        "enabled": true,
+        "roomLabel": "BALL FIGHT 官方直播间",
+        "state": "connected",
+        "channels": [
+          {
+            "key": "web",
+            "label": "WEB",
+            "state": "connected"
+          },
+          {
+            "key": "log",
+            "label": "LOG",
+            "state": "connected"
+          }
+        ],
+        "message": "网页流主用，伴侣日志热备",
+        "latencyMs": 36,
+        "lastEventAt": "刚刚"
+      },
+      {
+        "id": "kuaishou-test",
+        "platform": "kuaishou",
+        "label": "玩法测试间",
+        "enabled": false,
+        "roomLabel": "BALL_FIGHT_TEST",
+        "state": "idle",
+        "channels": [
+          {
+            "key": "web",
+            "label": "WEB",
+            "state": "idle"
+          }
+        ],
+        "message": "已主动关闭"
+      },
+      {
+        "id": "xiaohongshu-primary",
+        "platform": "xiaohongshu",
+        "label": "球球战斗直播间",
+        "enabled": true,
+        "roomLabel": "球球战斗直播间",
+        "state": "connected",
+        "channels": [
+          {
+            "key": "bridge",
+            "label": "WEB",
+            "state": "connected"
+          }
+        ],
+        "message": "Chrome 直播桥已连接",
+        "latencyMs": 82,
+        "lastEventAt": "2 秒前"
+      },
+      {
+        "id": "xiaohongshu-backup",
+        "platform": "xiaohongshu",
+        "label": "活动备用间",
+        "enabled": false,
+        "roomLabel": "570410187921782521",
+        "state": "idle",
+        "channels": [
+          {
+            "key": "bridge",
+            "label": "WEB",
+            "state": "idle"
+          }
+        ],
+        "message": "已主动关闭"
+      }
+    ],
+    "unity": {
+      "connected": true,
+      "phase": "registration",
+      "registrationOpen": true,
+      "registrationCountdownActive": true,
+      "registrationSecondsRemaining": 7,
+      "registeredPlayers": 18,
+      "maximumPlayers": 8,
+      "pendingGiftTickets": 6,
+      "reservedGiftTickets": 2,
+      "pendingFreeGiftTickets": 3,
+      "reservedFreeGiftTickets": 1,
+      "pendingGiftItems": 4,
+      "freeGiftThreshold": 10,
+      "freeGiftItemThreshold": 5
+    },
+    "counts": {
+      "comments": 1284,
+      "gifts": 86,
+      "likes": 3291,
+      "registrations": 142
+    },
+    "countsByPlatform": {
+      "kuaishou": {
+        "comments": 842,
+        "gifts": 52,
+        "likes": 2371,
+        "registrations": 91
+      },
+      "xiaohongshu": {
+        "comments": 442,
+        "gifts": 34,
+        "likes": 920,
+        "registrations": 51
+      }
+    },
+    "giftQueue": [
+      {
+        "rank": 1,
+        "viewerName": "今晚一定赢",
+        "score": 880,
+        "availableTickets": 176,
+        "amountToNextTicket": 5,
+        "waitingRounds": 3,
+        "reserved": true,
+        "eligibleNextDraw": true,
+        "status": "席位已预留",
+        "platform": "kuaishou"
+      },
+      {
+        "rank": 2,
+        "viewerName": "球球研究员",
+        "score": 640,
+        "availableTickets": 128,
+        "amountToNextTicket": 5,
+        "waitingRounds": 2,
+        "reserved": false,
+        "eligibleNextDraw": true,
+        "status": "下轮可用",
+        "platform": "xiaohongshu"
+      },
+      {
+        "rank": 3,
+        "viewerName": "路过的老吴",
+        "score": 320,
+        "availableTickets": 64,
+        "amountToNextTicket": 5,
+        "waitingRounds": 1,
+        "reserved": false,
+        "eligibleNextDraw": true,
+        "status": "下轮可用",
+        "platform": "kuaishou"
+      },
+      {
+        "rank": 4,
+        "viewerName": "冲锋王子",
+        "score": 260,
+        "availableTickets": 52,
+        "amountToNextTicket": 5,
+        "waitingRounds": 0,
+        "reserved": false,
+        "eligibleNextDraw": false,
+        "status": "冷却一轮",
+        "platform": "xiaohongshu"
+      },
+      {
+        "rank": 5,
+        "viewerName": "今天吃妙脆角",
+        "score": 180,
+        "availableTickets": 36,
+        "amountToNextTicket": 5,
+        "waitingRounds": 4,
+        "reserved": false,
+        "eligibleNextDraw": true,
+        "status": "下轮可用",
+        "platform": "kuaishou"
+      }
+    ],
+    "freeGiftQueue": [
+      {
+        "rank": 1,
+        "viewerName": "野生大狗",
+        "points": 24,
+        "itemPoints": 4,
+        "availableTickets": 2,
+        "waitingRounds": 2,
+        "cooldownRounds": 0,
+        "canJoinOrdinary": false,
+        "paidPriority": false,
+        "reserved": true,
+        "eligibleNextDraw": true,
+        "threshold": 10,
+        "itemThreshold": 5,
+        "status": "已预留",
+        "platform": "kuaishou"
+      },
+      {
+        "rank": 2,
+        "viewerName": "香蕉皮专员",
+        "points": 18,
+        "itemPoints": 3,
+        "availableTickets": 1,
+        "waitingRounds": 1,
+        "cooldownRounds": 2,
+        "canJoinOrdinary": true,
+        "paidPriority": false,
+        "reserved": false,
+        "eligibleNextDraw": false,
+        "threshold": 10,
+        "itemThreshold": 5,
+        "status": "冷却 2 轮 · 可普通参与",
+        "platform": "xiaohongshu"
+      },
+      {
+        "rank": 3,
+        "viewerName": "蜘蛛网观察员",
+        "points": 7,
+        "itemPoints": 2,
+        "availableTickets": 0,
+        "waitingRounds": 0,
+        "cooldownRounds": 0,
+        "canJoinOrdinary": false,
+        "paidPriority": false,
+        "reserved": false,
+        "eligibleNextDraw": false,
+        "threshold": 10,
+        "itemThreshold": 5,
+        "status": "累计中",
+        "platform": "xiaohongshu"
+      }
+    ],
+    "ordinaryQueue": [
+      {
+        "rank": 1,
+        "viewerName": "连续报名的阿杰",
+        "missedRegistrations": 6,
+        "compensationOrder": 1,
+        "compensationQueued": true,
+        "giftPriority": false,
+        "status": "补偿队列 #1",
+        "platform": "kuaishou"
+      },
+      {
+        "rank": 2,
+        "viewerName": "今天一定上场",
+        "missedRegistrations": 4,
+        "compensationOrder": 0,
+        "compensationQueued": false,
+        "giftPriority": false,
+        "status": "加权等待",
+        "platform": "xiaohongshu"
+      },
+      {
+        "rank": 3,
+        "viewerName": "新来的观众",
+        "missedRegistrations": 1,
+        "compensationOrder": 0,
+        "compensationQueued": false,
+        "giftPriority": false,
+        "status": "普通候选",
+        "platform": "kuaishou"
+      }
+    ],
+    "giftActivity": [
+      {
+        "id": "g1",
+        "time": "21:43:18",
+        "viewer": "今晚一定赢",
+        "gift": "穿云箭",
+        "count": 1,
+        "points": 288,
+        "status": "道具已安排",
+        "statusKind": "arranged",
+        "platform": "kuaishou",
+        "channel": "web"
+      },
+      {
+        "id": "g2",
+        "time": "21:43:12",
+        "viewer": "香蕉皮专员",
+        "gift": "人气票",
+        "count": 5,
+        "points": 0,
+        "status": "资格已累计",
+        "statusKind": "arranged",
+        "platform": "xiaohongshu",
+        "channel": "bridge"
+      },
+      {
+        "id": "g3",
+        "time": "21:43:04",
+        "viewer": "球球研究员",
+        "gift": "棒棒糖",
+        "count": 12,
+        "points": 12,
+        "status": "同步重试",
+        "statusKind": "retrying",
+        "platform": "xiaohongshu",
+        "channel": "bridge"
+      },
+      {
+        "id": "g4",
+        "time": "21:42:56",
+        "viewer": "路过的老吴",
+        "gift": "啤酒",
+        "count": 2,
+        "points": 20,
+        "status": "道具已安排",
+        "statusKind": "arranged",
+        "platform": "kuaishou",
+        "channel": "log"
+      }
+    ],
+    "logs": [
+      {
+        "id": "l1",
+        "time": "21:43:21",
+        "source": "小王同学",
+        "message": "这局想看大狗和王子一起上",
+        "kind": "comment",
+        "platform": "kuaishou",
+        "channel": "web"
+      },
+      {
+        "id": "l2",
+        "time": "21:43:18",
+        "source": "今晚一定赢",
+        "message": "穿云箭 x1 · 288 快币",
+        "kind": "gift",
+        "platform": "kuaishou",
+        "channel": "web"
+      },
+      {
+        "id": "l3",
+        "time": "21:43:15",
+        "source": "蜘蛛网观察员",
+        "message": "进入直播间并发送：报名",
+        "kind": "system",
+        "platform": "xiaohongshu",
+        "channel": "bridge"
+      },
+      {
+        "id": "l4",
+        "time": "21:43:12",
+        "source": "香蕉皮专员",
+        "message": "人气票 x5 · 免费礼物",
+        "kind": "gift",
+        "platform": "xiaohongshu",
+        "channel": "bridge"
+      },
+      {
+        "id": "l5",
+        "time": "21:43:09",
+        "source": "球球研究员",
+        "message": "小球冲冲冲，下一局想上场",
+        "kind": "comment",
+        "platform": "xiaohongshu",
+        "channel": "bridge"
+      },
+      {
+        "id": "l6",
+        "time": "21:43:06",
+        "source": "Web",
+        "message": "快手实时消息心跳正常",
+        "kind": "system",
+        "platform": "kuaishou",
+        "channel": "web"
+      },
+      {
+        "id": "l7",
+        "time": "21:43:04",
+        "source": "提示",
+        "message": "礼物同步等待 Unity 确认，正在自动重试",
+        "kind": "warning",
+        "channel": "unity"
+      },
+      {
+        "id": "l8",
+        "time": "21:42:58",
+        "source": "路过的老吴",
+        "message": "啤酒 x2 · 20 快币",
+        "kind": "gift",
+        "platform": "kuaishou",
+        "channel": "log"
+      }
+    ],
+    "pendingGiftSync": 1,
+    "canForceEnd": false,
+    "visionKeyConfigured": true,
+    "lastError": "",
+    "uptimeSeconds": 76
+  }
+}
