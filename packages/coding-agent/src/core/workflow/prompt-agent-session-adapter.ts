@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AgentSessionEvent, PromptOptions } from "../agent-session.ts";
 import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import type { PromptContextSource, PromptEnvelope } from "./prompt-envelope.ts";
@@ -11,8 +12,11 @@ import {
 
 export interface PromptAgentSession {
 	readonly isIdle: boolean;
+	readonly sessionManager?: { getCwd(): string; appendCustomEntry?(type: string, data: unknown): void };
+	readonly thinkingLevel?: ThinkingLevel;
 	getActiveToolNames(): string[];
 	setActiveToolsByName(toolNames: string[]): void;
+	setThinkingLevel?(level: ThinkingLevel): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	steer?(text: string): Promise<void>;
 	abort?(): Promise<void>;
@@ -118,7 +122,9 @@ export async function executePromptEnvelope(
 
 	ACTIVE_PROMPT_SESSIONS.add(session);
 	const previousToolNames = session.getActiveToolNames();
+	const previousThinkingLevel = session.thinkingLevel;
 	let toolsChanged = false;
+	let thinkingLevelChanged = false;
 	try {
 		const profile = BUILTIN_AGENT_PROFILES[envelope.role];
 		const effectivePermission = resolveEffectivePermissions({
@@ -143,6 +149,24 @@ export async function executePromptEnvelope(
 				`PromptEnvelope requested tools outside the active AgentSession boundary: ${unavailableToolNames.join(", ")}`,
 				unavailableToolNames,
 			);
+		}
+		if (profile.thinkingLevel !== undefined) {
+			if (previousThinkingLevel === undefined || !session.setThinkingLevel) {
+				throw new PromptAgentSessionAdapterError(
+					"prompt_agent_session.thinking_level_unavailable",
+					`AgentSession cannot apply the ${profile.name} Profile thinking level`,
+				);
+			}
+			if (previousThinkingLevel !== profile.thinkingLevel) {
+				session.setThinkingLevel(profile.thinkingLevel);
+				thinkingLevelChanged = session.thinkingLevel !== previousThinkingLevel;
+				if (session.thinkingLevel !== profile.thinkingLevel) {
+					throw new PromptAgentSessionAdapterError(
+						"prompt_agent_session.thinking_level_activation_failed",
+						`AgentSession did not activate the ${profile.name} Profile thinking level`,
+					);
+				}
+			}
 		}
 
 		toolsChanged = !haveSameTools(previousToolNames, envelope.toolNames);
@@ -170,6 +194,9 @@ export async function executePromptEnvelope(
 	} finally {
 		if (toolsChanged) {
 			session.setActiveToolsByName(previousToolNames);
+		}
+		if (thinkingLevelChanged && previousThinkingLevel !== undefined) {
+			session.setThinkingLevel?.(previousThinkingLevel);
 		}
 		ACTIVE_PROMPT_SESSIONS.delete(session);
 	}

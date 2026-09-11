@@ -102,6 +102,25 @@ function submit(controller: WorkflowController): void {
 }
 
 describe("Plan WorkflowController", () => {
+	it.each([{}, { maxDurationMs: 600_000, maxTurns: 32 }, { maxDurationMs: 1_000, maxTurns: 1 }])(
+		"preserves caller time and turn limits on the planning root Task: %j",
+		(budget) => {
+			const { controller, store } = harness();
+			controller.startPlan({
+				commandId: "start-plan",
+				workflowId: WORKFLOW_ID,
+				rootTaskId: ROOT_TASK_ID,
+				planId: PLAN_ID,
+				request: { text: "Plan a multi-file CLI change", cwd: "C:/repo", attachments: [] },
+				budget,
+			});
+			const inherited = store.getTask(ROOT_TASK_ID)?.budget;
+			expect(inherited?.maxDurationMs).toBe(budget.maxDurationMs);
+			expect(inherited?.maxTurns).toBe(budget.maxTurns);
+			expect(inherited).toMatchObject({ maxConcurrentAgents: 0, maxConcurrentJobs: 0, maxAgentDepth: 0 });
+		},
+	);
+
 	it("starts a Plan workflow with a Draft Plan and control root Task", () => {
 		const { controller, store } = harness();
 

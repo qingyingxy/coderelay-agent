@@ -17,6 +17,7 @@ describe("Agent Profiles", () => {
 	});
 
 	it("keeps advisory, planning, exploration, and review roles read-only", () => {
+		expect(BUILTIN_AGENT_PROFILES.mode_advisor.thinkingLevel).toBe("off");
 		for (const role of ["mode_advisor", "planner", "explorer", "reviewer"] as const) {
 			const profile = BUILTIN_AGENT_PROFILES[role];
 			expect(profile.permissionCeiling).toMatchObject({

@@ -7,7 +7,14 @@ const FORCE_PLAN_PATTERNS = [
 ] as const;
 
 export function requiresPlanMode(request: Pick<UserRequest, "text">): boolean {
-	return FORCE_PLAN_PATTERNS.some((pattern) => pattern.test(request.text));
+	// A CLI declaration names commands to implement; it does not invoke those commands.
+	// Only suppress destructive verb prefixes in that declaration, retaining other risk terms.
+	const text = request.text.replace(
+		/^(\s*(?:-\s*)?Add commands:\s*)([^\r\n]*)/gim,
+		(_line, prefix: string, names: string) =>
+			prefix + names.replace(/\b(?:delete|remove|drop|truncate)(?=-[a-z][a-z0-9-]*)/gi, "command"),
+	);
+	return FORCE_PLAN_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 export function createWorkflowAutomationPolicy(

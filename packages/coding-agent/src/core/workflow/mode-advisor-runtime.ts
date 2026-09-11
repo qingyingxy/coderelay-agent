@@ -22,6 +22,8 @@ const CLARIFICATION_IMPACTS = [
 	"preference",
 ] as const satisfies readonly ClarificationCandidate["impact"][];
 
+export const MODE_ADVISOR_PROMPT_VERSION = "mode-advisor-v5";
+
 const MODE_ADVISOR_OUTPUT_SCHEMA = {
 	type: "object",
 	required: ["complexity", "riskLevel", "confidence", "reason", "clarificationCandidates"],
@@ -29,7 +31,7 @@ const MODE_ADVISOR_OUTPUT_SCHEMA = {
 		complexity: { enum: ["low", "medium", "high"] },
 		riskLevel: { enum: ["low", "medium", "high"] },
 		confidence: { enum: ["low", "medium", "high"] },
-		reason: { type: "string" },
+		reason: { type: "string", maxLength: 240 },
 		clarificationCandidates: {
 			type: "array",
 			items: {
@@ -88,7 +90,7 @@ export function createModeAdvisorPromptEnvelope(input: CreateModeAdvisorPromptIn
 		verificationRequirements: [],
 	};
 	return createPromptEnvelope({
-		promptVersion: "mode-advisor-v3",
+		promptVersion: MODE_ADVISOR_PROMPT_VERSION,
 		createdAt: input.createdAt,
 		role: "mode_advisor",
 		profileName: profile.name,
@@ -157,7 +159,7 @@ export function createModeAdvisorPromptEnvelope(input: CreateModeAdvisorPromptIn
 			{
 				id: "mode-advisor-output",
 				kind: "output",
-				description: `Return only one JSON object. Each clarification candidate has id, question, impact (${CLARIFICATION_IMPACTS.join(" | ")}), changesImplementation, and optional safeDefault {answer, reason}.`,
+				description: `Return only one compact JSON object with a reason of at most 240 characters and no extra prose. Each clarification candidate has id, question, impact (${CLARIFICATION_IMPACTS.join(" | ")}), changesImplementation, and optional safeDefault {answer, reason}.`,
 			},
 		],
 		outputSchema: {
@@ -243,12 +245,34 @@ function parseCandidates(values: readonly unknown[]): readonly ClarificationCand
 	return candidates;
 }
 
+const TRUNCATED_DIRECT_ADVICE_PREFIX =
+	/^\s*(?:```(?:json)?\s*)?\{\s*"complexity"\s*:\s*"low"\s*,\s*"riskLevel"\s*:\s*"low"\s*,\s*"confidence"\s*:\s*"high"\s*,\s*"reason"\s*:\s*"/i;
+
+function recoverTruncatedDirectAdvice(text: string): ModeAdvisorResult | undefined {
+	const trimmed = text.trim();
+	if (trimmed.endsWith("}") || !TRUNCATED_DIRECT_ADVICE_PREFIX.test(trimmed)) return undefined;
+	const advice = adviseExecutionMode({
+		complexity: "low",
+		riskLevel: "low",
+		confidence: "high",
+		reason: "Recovered the complete low-complexity, low-risk, high-confidence assessment from truncated output",
+	});
+	const candidates: readonly ClarificationCandidate[] = [];
+	return {
+		advice,
+		clarification: evaluateClarificationGate(candidates),
+		candidates,
+	};
+}
+
 export function parseModeAdvisorResult(text: string): ModeAdvisorResult {
 	const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1]?.trim();
 	const start = text.indexOf("{");
 	const end = text.lastIndexOf("}");
 	const json = fenced ?? (start >= 0 && end > start ? text.slice(start, end + 1) : undefined);
 	if (!json) {
+		const recovered = recoverTruncatedDirectAdvice(text);
+		if (recovered) return recovered;
 		throw new ModeAdvisorRuntimeError(
 			"mode_advisor.output_not_json",
 			"Mode Advisor response does not contain a JSON object",
@@ -258,15 +282,23 @@ export function parseModeAdvisorResult(text: string): ModeAdvisorResult {
 	try {
 		value = JSON.parse(json);
 	} catch (error) {
+		const recovered = recoverTruncatedDirectAdvice(text);
+		if (recovered) return recovered;
 		throw new ModeAdvisorRuntimeError(
 			"mode_advisor.output_invalid_json",
 			error instanceof Error ? error.message : "Mode Advisor response contains invalid JSON",
 		);
 	}
-	if (!isRecord(value) || !Array.isArray(value.clarificationCandidates)) {
+	if (!isRecord(value)) {
 		throw new ModeAdvisorRuntimeError(
 			"mode_advisor.output_invalid_shape",
 			"Mode Advisor response does not match the required object shape",
+		);
+	}
+	if (value.clarificationCandidates !== undefined && !Array.isArray(value.clarificationCandidates)) {
+		throw new ModeAdvisorRuntimeError(
+			"mode_advisor.output_invalid_shape",
+			"clarificationCandidates must be an array when present",
 		);
 	}
 	const advice = adviseExecutionMode({
@@ -275,7 +307,7 @@ export function parseModeAdvisorResult(text: string): ModeAdvisorResult {
 		confidence: requiredString(value, "confidence") as ModeAdvice["confidence"],
 		reason: requiredString(value, "reason"),
 	});
-	const candidates = parseCandidates(value.clarificationCandidates);
+	const candidates = parseCandidates(value.clarificationCandidates ?? []);
 	return {
 		advice,
 		clarification: evaluateClarificationGate(candidates),

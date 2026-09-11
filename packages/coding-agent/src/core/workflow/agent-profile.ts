@@ -72,6 +72,7 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		name: "mode-advisor",
 		role: "mode_advisor",
 		description: "Assesses request complexity, risk, confidence, and execution mode",
+		thinkingLevel: "off",
 		systemPrompt:
 			"Assess the supplied request and context. Return only the structured mode assessment requested by the caller. Do not execute or modify the project.",
 		allowedTools: [],
@@ -90,10 +91,9 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 			"Analyze requirements and repository context, then produce a structured implementation plan. Do not modify files or execute commands.",
 		allowedTools: READ_ONLY_TOOLS,
 		permissionCeiling: READ_ONLY_PERMISSION_CEILING,
+		// Planner progress is watched by the runtime; hard limits must come from the caller.
 		defaultBudget: {
 			...ISOLATED_ROLE_BUDGET,
-			maxTurns: 12,
-			maxDurationMs: 240_000,
 		},
 	},
 	planner_lite: {

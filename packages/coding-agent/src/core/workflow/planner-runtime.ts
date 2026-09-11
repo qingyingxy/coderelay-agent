@@ -1,4 +1,7 @@
+import { dirname } from "node:path";
+import { resolveReadPath } from "../tools/path-utils.ts";
 import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
+import { ExecutionWatchdog, LONG_TASK_WATCHDOG } from "./execution-watchdog.ts";
 import {
 	executePromptEnvelope,
 	type PromptAgentSession,
@@ -20,12 +23,47 @@ import {
 
 export type PlannerPhase = "investigating" | "finalizing" | "repairing_json";
 
-const PLANNER_INVESTIGATION_TIMEOUT_MS = 90_000;
-const PLANNER_FINALIZE_INSTRUCTION = [
-	"The single investigation round is complete. Stop repository exploration now.",
-	"Use the evidence already collected and return only the complete PlanContent JSON object required by the envelope.",
-	"Do not call another tool.",
-].join(" ");
+interface PlannerEvidence {
+	readonly cwd: string;
+	readonly reads: Set<string>;
+	readonly directories: Set<string>;
+	completed: boolean;
+}
+
+const PLANNER_EVIDENCE = new WeakMap<PromptAgentSession, PlannerEvidence>();
+
+function evidencePath(path: string, cwd: string): string {
+	const resolved = resolveReadPath(path, cwd);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function validatePlannerEvidence(session: PromptAgentSession, content: PlanContent): PlanContent {
+	const evidence = PLANNER_EVIDENCE.get(session);
+	// Standalone JSON parsing does not represent an executed Planner investigation.
+	if (!evidence) return content;
+	if (!evidence.completed) {
+		throw new PlannerRuntimeError("planner.investigation_incomplete", "Planner investigation did not complete");
+	}
+	const missing = content.steps.flatMap((step) =>
+		step.fileIntents.flatMap((intent) => {
+			if (intent.action === "inspect") return [];
+			const path = evidencePath(intent.path, evidence.cwd);
+			const supported =
+				intent.action === "create"
+					? evidence.directories.has(dirname(path)) ||
+						[...evidence.reads].some((read) => dirname(read) === dirname(path))
+					: evidence.reads.has(path);
+			return supported ? [] : [intent.path];
+		}),
+	);
+	if (missing.length > 0) {
+		throw new PlannerRuntimeError(
+			"planner.evidence_missing",
+			`Plan has no successful read evidence for modification/deletion targets or parent-directory evidence for creation targets: ${[...new Set(missing)].join(", ")}`,
+		);
+	}
+	return content;
+}
 
 const PLANNER_OUTPUT_SCHEMA = {
 	type: "object",
@@ -160,7 +198,7 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 			: []),
 	];
 	return createPromptEnvelope({
-		promptVersion: "planner-v2",
+		promptVersion: "planner-v3",
 		createdAt: input.createdAt,
 		role: "planner",
 		profileName: profile.name,
@@ -189,7 +227,7 @@ export function createPlannerPromptEnvelope(input: CreatePlannerPromptInput): Pr
 				id: "planner-bounded-investigation",
 				kind: "budget",
 				description:
-					"Use at most one investigation round. If repository context is needed, issue every necessary read, grep, find, or ls call together in the first response so they can run in parallel. After those results, the tool boundary closes and the next response must be the complete PlanContent JSON. If the request already contains enough information, return PlanContent immediately without tools.",
+					"Investigate within the configured turn and time budgets. Batch independent calls, but use subsequent rounds for dependent reads and recovery. If find fails, use ls and read; narrow truncated searches and read relevant source ranges. Before submitting, successfully read every concrete file you intend to modify or delete; search hits alone are not read evidence. For creation, inspect the parent directory or a sibling source file first. List concrete file targets rather than directory or glob modification intents. Check relevant consumers and state mutation entry points. Return PlanContent only after collecting this evidence; do not present failed tool calls as evidence.",
 			},
 			{
 				id: "planner-verification-efficiency",
@@ -262,52 +300,81 @@ export async function executePlannerPrompt(
 	options: ExecutePlannerPromptOptions = {},
 ): Promise<PromptEnvelopeExecutionResult> {
 	validatePlannerPromptEnvelope(envelope);
-	const budget = options.budget ?? BUILTIN_AGENT_PROFILES.planner.defaultBudget;
+	// Only caller-supplied hard limits apply; progress is governed by the watchdog.
+	const budget = options.budget ?? {};
 	const maxTurns = budget.maxTurns;
 	const maxDurationMs = budget.maxDurationMs;
 	const investigationTimeoutMs = Math.min(
-		options.investigationTimeoutMs ?? PLANNER_INVESTIGATION_TIMEOUT_MS,
+		options.investigationTimeoutMs ?? Number.POSITIVE_INFINITY,
 		maxDurationMs ?? Number.POSITIVE_INFINITY,
 	);
-	let phase: PlannerPhase = "investigating";
 	let assistantTurns = 0;
-	let investigationUsedTools = false;
+	const evidence: PlannerEvidence = {
+		cwd: session.sessionManager?.getCwd() ?? process.cwd(),
+		reads: new Set(),
+		directories: new Set(),
+		completed: false,
+	};
+	PLANNER_EVIDENCE.set(session, evidence);
+	const toolPaths = new Map<string, string>();
+	const recoveryTools = new Set<string>();
 	let budgetFailure: PlannerRuntimeError | undefined;
+	let requestFailure: PlannerRuntimeError | undefined;
 	let durationTimeout: ReturnType<typeof setTimeout> | undefined;
 	let investigationTimeout: ReturnType<typeof setTimeout> | undefined;
 
-	const requestFinalOutput = (): void => {
-		if (phase !== "investigating") return;
-		phase = "finalizing";
-		if (investigationTimeout) clearTimeout(investigationTimeout);
-		session.setActiveToolsByName([]);
-		void session.steer?.(PLANNER_FINALIZE_INSTRUCTION).catch(() => undefined);
-	};
 	const abortForBudget = (code: string, message: string): void => {
 		if (budgetFailure) return;
 		budgetFailure = new PlannerRuntimeError(code, message);
+		session.sessionManager?.appendCustomEntry?.("planner_stop", { code, message, stoppedAt: Date.now() });
 		void session.abort?.().catch(() => undefined);
 	};
+	const watchdog = new ExecutionWatchdog(LONG_TASK_WATCHDOG, (evidence) => {
+		abortForBudget(`planner.${evidence.kind}`, JSON.stringify(evidence));
+	});
 	const unsubscribe = session.subscribe?.((event) => {
+		watchdog.observe(event);
+		if (event.type === "tool_execution_start" && isRecord(event.args)) {
+			const path = event.args.path ?? event.args.file_path ?? (event.toolName === "ls" ? "." : undefined);
+			if (typeof path === "string") toolPaths.set(event.toolCallId, path);
+		}
+		if (event.type === "tool_execution_end") {
+			const result: unknown = event.result;
+			const details = isRecord(result) && isRecord(result.details) ? result.details : undefined;
+			const truncated =
+				details &&
+				((isRecord(details.truncation) && details.truncation.truncated === true) ||
+					details.linesTruncated === true ||
+					typeof details.matchLimitReached === "number" ||
+					typeof details.resultLimitReached === "number" ||
+					typeof details.entryLimitReached === "number");
+			const path = toolPaths.get(event.toolCallId);
+			toolPaths.delete(event.toolCallId);
+			if (event.isError || truncated) {
+				recoveryTools.add(event.toolName);
+			} else if (path && event.toolName === "read") {
+				evidence.reads.add(evidencePath(path, evidence.cwd));
+			} else if (path && event.toolName === "ls") {
+				evidence.directories.add(evidencePath(path, evidence.cwd));
+			}
+		}
 		if (event.type === "message_end" && event.message.role === "assistant") {
+			requestFailure = ["error", "aborted"].includes(event.message.stopReason)
+				? new PlannerRuntimeError("planner.request_failed", event.message.errorMessage ?? event.message.stopReason)
+				: undefined;
 			assistantTurns++;
 			if (maxTurns !== undefined && assistantTurns > maxTurns) {
 				abortForBudget("planner.max_turns", `Planner exceeded its ${maxTurns}-turn budget before producing a plan`);
 				return;
 			}
-			if (event.message.stopReason === "toolUse") {
-				if (phase !== "investigating" || investigationUsedTools) {
-					abortForBudget(
-						"planner.investigation_round_exceeded",
-						"Planner attempted another tool round after the single investigation round",
-					);
-					return;
-				}
-				investigationUsedTools = true;
-			}
 		}
-		if (event.type === "turn_end" && phase === "investigating" && investigationUsedTools) {
-			requestFinalOutput();
+		if (event.type === "turn_end" && recoveryTools.size > 0 && !budgetFailure) {
+			void session
+				.steer?.(
+					`Investigation returned failed or truncated results from: ${[...recoveryTools].join(", ")}. Recover within the remaining budget: use ls/read if find is unavailable, narrow searches or read relevant ranges. Obtain successful source reads for planned modification targets before returning PlanContent.`,
+				)
+				.catch(() => undefined);
+			recoveryTools.clear();
 		}
 	});
 	if (maxDurationMs !== undefined) {
@@ -334,11 +401,14 @@ export async function executePlannerPrompt(
 	try {
 		const result = await executePromptEnvelope(session, envelope);
 		if (budgetFailure) throw budgetFailure;
+		if (requestFailure) throw requestFailure;
+		evidence.completed = true;
 		return result;
 	} catch (error) {
 		if (budgetFailure) throw budgetFailure;
 		throw error;
 	} finally {
+		watchdog.dispose();
 		if (durationTimeout) clearTimeout(durationTimeout);
 		if (investigationTimeout) clearTimeout(investigationTimeout);
 		unsubscribe?.();
@@ -583,11 +653,19 @@ export async function parsePlannerPlanContentWithRepair(
 	text: string,
 	allowedVerificationCommands: readonly string[] = [],
 ): Promise<PlanContent> {
+	let content: PlanContent;
 	try {
-		return parsePlannerPlanContent(text, allowedVerificationCommands);
+		content = parsePlannerPlanContent(text, allowedVerificationCommands);
 	} catch (error) {
 		if (!(error instanceof PlannerRuntimeError)) throw error;
 		const previousToolNames = session.getActiveToolNames();
+		let repairStop: PlannerRuntimeError | undefined;
+		const watchdog = new ExecutionWatchdog(LONG_TASK_WATCHDOG, (evidence) => {
+			repairStop = new PlannerRuntimeError(`planner.${evidence.kind}`, JSON.stringify(evidence));
+			session.sessionManager?.appendCustomEntry?.("planner_stop", { code: repairStop.code, stoppedAt: Date.now() });
+			void session.abort?.().catch(() => undefined);
+		});
+		const unsubscribe = session.subscribe?.((event) => watchdog.observe(event));
 		try {
 			session.setActiveToolsByName([]);
 			await session.prompt(
@@ -597,6 +675,7 @@ export async function parsePlannerPlanContentWithRepair(
 				].join("\n"),
 				{ expandPromptTemplates: false, source: "extension" },
 			);
+			if (repairStop) throw repairStop;
 			const repairedText = session.getLastAssistantText?.();
 			if (!repairedText) {
 				throw new PlannerRuntimeError(
@@ -604,9 +683,12 @@ export async function parsePlannerPlanContentWithRepair(
 					"Planner JSON repair completed without an Assistant response",
 				);
 			}
-			return parsePlannerPlanContent(repairedText, allowedVerificationCommands);
+			content = parsePlannerPlanContent(repairedText, allowedVerificationCommands);
 		} finally {
+			watchdog.dispose();
+			unsubscribe?.();
 			session.setActiveToolsByName(previousToolNames);
 		}
 	}
+	return validatePlannerEvidence(session, content);
 }

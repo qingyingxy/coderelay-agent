@@ -1,3 +1,4 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import type { PromptOptions } from "../../src/core/agent-session.ts";
 import {
@@ -95,8 +96,15 @@ function createEnvelope(toolNames: readonly string[] = ["read"]): PromptEnvelope
 
 class TestPromptAgentSession implements PromptAgentSession {
 	isIdle = true;
+	thinkingLevel: ThinkingLevel = "high";
 	activeToolNames = ["read", "edit", "write"];
-	readonly promptCalls: Array<{ text: string; options: PromptOptions | undefined; activeToolNames: string[] }> = [];
+	readonly promptCalls: Array<{
+		text: string;
+		options: PromptOptions | undefined;
+		activeToolNames: string[];
+		thinkingLevel: ThinkingLevel;
+	}> = [];
+	readonly thinkingLevelCalls: ThinkingLevel[] = [];
 	failPrompt = false;
 
 	getActiveToolNames(): string[] {
@@ -107,8 +115,18 @@ class TestPromptAgentSession implements PromptAgentSession {
 		this.activeToolNames = [...toolNames];
 	}
 
+	setThinkingLevel(level: ThinkingLevel): void {
+		this.thinkingLevel = level;
+		this.thinkingLevelCalls.push(level);
+	}
+
 	async prompt(text: string, options?: PromptOptions): Promise<void> {
-		this.promptCalls.push({ text, options, activeToolNames: [...this.activeToolNames] });
+		this.promptCalls.push({
+			text,
+			options,
+			activeToolNames: [...this.activeToolNames],
+			thinkingLevel: this.thinkingLevel,
+		});
 		if (this.failPrompt) {
 			throw new Error("Prompt failed");
 		}
@@ -153,6 +171,21 @@ describe("PromptEnvelope AgentSession adapter", () => {
 			promptVersion: "worker-v1",
 			toolNames: ["read"],
 		});
+	});
+
+	it("temporarily applies and restores the Profile thinking level", async () => {
+		const session = new TestPromptAgentSession();
+		const envelope: PromptEnvelope = {
+			...createEnvelope([]),
+			role: "mode_advisor",
+			profileName: "mode-advisor",
+		};
+
+		await executePromptEnvelope(session, envelope);
+
+		expect(session.promptCalls[0]?.thinkingLevel).toBe("off");
+		expect(session.thinkingLevelCalls).toEqual(["off", "high"]);
+		expect(session.thinkingLevel).toBe("high");
 	});
 
 	it("rejects tool escalation before changing the AgentSession", async () => {

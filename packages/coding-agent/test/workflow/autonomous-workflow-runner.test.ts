@@ -106,7 +106,9 @@ function planContent(): PlanContent {
 				title: "Implement",
 				description: "Run deterministic implementation",
 				dependsOn: [],
-				fileIntents: [],
+				fileIntents: [
+					{ path: "src/fix.ts", action: "create", reason: "Simulated implementation and repair output" },
+				],
 				verificationRequirementIds: ["implementation"],
 			},
 		],
