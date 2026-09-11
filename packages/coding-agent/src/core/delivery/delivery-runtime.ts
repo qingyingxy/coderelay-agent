@@ -58,7 +58,20 @@ export class DeliveryRuntime {
 		if (!rootTask) {
 			throw new Error(`Workflow ${workflow.id} has no root Task`);
 		}
-		const diff = this.#diffCollector.collect(workflow.request.cwd, port.tasks);
+		const diff = this.#diffCollector.collect(workflow.request.cwd, port.tasks, port.deliveryBaseline);
+		const unavailable = diff.files.filter((file) => file.unavailableReason);
+		if (unavailable.length > 0) {
+			const reason = `Delivery diff unavailable: ${unavailable.map((file) => `${file.path}: ${file.unavailableReason}`).join("; ")}`;
+			port.failDelivery(reason);
+			return {
+				status: "failed",
+				diff,
+				verifications: port.verifications,
+				risks: [],
+				unfinishedItems: [reason],
+				usage: zeroUsage(),
+			};
+		}
 		const risks: string[] = [];
 		const unfinishedItems: string[] = [];
 		const jobUsage: ResourceUsage[] = [];
@@ -71,7 +84,11 @@ export class DeliveryRuntime {
 				.map((verification) => [verification.requirementId, verification]),
 		);
 		const hasRepairTask = port.tasks.some(({ kind }) => kind === "repair");
-		for (const requirement of port.currentPlan.verificationRequirements) {
+		// Reviews consume completed command evidence regardless of the Planner's requirement order.
+		const requirements = [...port.currentPlan.verificationRequirements].sort(
+			(left, right) => Number(left.kind === "review") - Number(right.kind === "review"),
+		);
+		for (const requirement of requirements) {
 			const owningAgentTask = port.tasks.find(
 				(task) =>
 					task.kind === "agent" &&
@@ -115,7 +132,7 @@ export class DeliveryRuntime {
 				const review = await this.#runReview(port, requirement.id, diff, rootTask, deliveryFingerprint);
 				risks.push(...review.risks);
 				unfinishedItems.push(...review.unfinishedItems);
-				if (review.failureKind === "infrastructure") {
+				if (review.failureKind === "infrastructure" || review.failureKind === "confirmation") {
 					port.failDelivery(review.summary);
 					return {
 						status: "failed",
@@ -357,11 +374,43 @@ export class DeliveryRuntime {
 	): Promise<ReviewResult> {
 		let review: ReviewResult;
 		try {
+			const commandRequirements = new Set(
+				port.currentPlan.verificationRequirements
+					.filter((requirement) => requirement.kind === "test" || requirement.kind === "build")
+					.map((requirement) => requirement.id),
+			);
+			const latest = new Map(
+				port.verifications
+					.filter(
+						(result) =>
+							!result.taskId &&
+							commandRequirements.has(result.requirementId) &&
+							result.deliveryFingerprint === deliveryFingerprint,
+					)
+					.map((result) => [result.requirementId, result]),
+			);
+			const verificationEvidence = [...latest.values()].map((result) => {
+				const job = this.#jobRuntime
+					.jobs(port.workflow.id)
+					.find(
+						(candidate) =>
+							candidate.command === result.command && result.evidenceRefs.includes(candidate.stdoutRef),
+					);
+				const logs = job ? this.#jobRuntime.logs(job.id) : undefined;
+				const text = logs?.chunks.map((chunk) => `[${chunk.stream}] ${chunk.text}`).join("");
+				return {
+					result: structuredClone(result),
+					logExcerpt: text?.slice(-4000),
+					logsTruncated: logs ? logs.truncated || (text?.length ?? 0) > 4000 : undefined,
+				};
+			});
 			review = this.#reviewer
 				? await this.#reviewer.review({
 						workflow: port.workflow,
 						rootTask,
 						diff,
+						acceptanceRequirements: structuredClone(port.currentPlan.verificationRequirements),
+						verificationEvidence,
 					})
 				: {
 						status: "failed",

@@ -29,6 +29,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import type { ModelRuntime } from "./core/model-runtime.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
+import { createPlannerExecutorSession } from "./core/planner-executor.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
@@ -676,6 +677,9 @@ export async function main(args: string[], options?: MainOptions) {
 			},
 		});
 		const { settingsManager, modelRuntime, resourceLoader } = services;
+		if (parsed.contextMode !== undefined) {
+			settingsManager.applyOverrides({ contextManagement: { mode: parsed.contextMode } });
+		}
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...projectTrustDiagnostics,
 			...services.diagnostics,
@@ -714,21 +718,36 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 		}
 
-		const created = await createAgentSessionFromServices({
-			services,
-			sessionManager,
-			sessionStartEvent,
-			model: sessionOptions.model,
-			thinkingLevel: sessionOptions.thinkingLevel,
-			scopedModels: sessionOptions.scopedModels,
-			modelRoutingUserOverride:
-				parsed.model !== undefined || parsed.provider !== undefined || parsed.models !== undefined,
-			tools: sessionOptions.tools,
-			excludeTools: sessionOptions.excludeTools,
-			noTools: sessionOptions.noTools,
-			customTools: sessionOptions.customTools,
-		});
-		created.session.enableWorkflowTracking(parsed.workflowMode ?? "auto", true);
+		const created =
+			parsed.plannerModel && parsed.executorModel && parsed.verificationCommands
+				? await createPlannerExecutorSession({
+						...sessionOptions,
+						cwd: services.cwd,
+						agentDir: services.agentDir,
+						modelRuntime,
+						settingsManager,
+						resourceLoader,
+						sessionManager,
+						sessionStartEvent,
+						plannerModel: parsed.plannerModel,
+						executorModel: parsed.executorModel,
+						verificationCommands: parsed.verificationCommands,
+					})
+				: await createAgentSessionFromServices({
+						services,
+						sessionManager,
+						sessionStartEvent,
+						model: sessionOptions.model,
+						thinkingLevel: sessionOptions.thinkingLevel,
+						scopedModels: sessionOptions.scopedModels,
+						modelRoutingUserOverride:
+							parsed.model !== undefined || parsed.provider !== undefined || parsed.models !== undefined,
+						tools: sessionOptions.tools,
+						excludeTools: sessionOptions.excludeTools,
+						noTools: sessionOptions.noTools,
+						customTools: sessionOptions.customTools,
+					});
+		if (!parsed.plannerModel) created.session.enableWorkflowTracking(parsed.workflowMode ?? "auto", true);
 		const cliThinkingOverride = parsed.thinking !== undefined || cliThinkingFromModel;
 		if (created.session.model && cliThinkingOverride) {
 			created.session.setThinkingLevel(created.session.thinkingLevel);

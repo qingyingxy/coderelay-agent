@@ -170,6 +170,14 @@ import {
 	type WorkflowContextCheckpoint,
 	type WorkflowContextProvider,
 } from "./workflow/context-window-projection.ts";
+import {
+	collectWorkflowCost,
+	currentWorkflowCostScope,
+	formatWorkflowCost,
+	WORKFLOW_COST_BINDING,
+	WORKFLOW_COST_SCOPE,
+	workflowCostStage,
+} from "./workflow/cost.ts";
 import type { DecisionExplanation } from "./workflow/decision-reasons.ts";
 import { decideDirectPlanUpgrade } from "./workflow/direct-plan-upgrade.ts";
 import { WORKFLOW_SNAPSHOT_CUSTOM_TYPE } from "./workflow/event-log.ts";
@@ -425,6 +433,10 @@ export interface ExtensionBindings {
 
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
+	/** Trusted host only: fixes Direct execution for an externally isolated task.
+	 * The caller owns isolation and authorization. Not a sandbox or a persisted setting.
+	 */
+	isolatedDirectExecution?: { reason: string };
 	/** Whether to expand file-based prompt templates (default: true) */
 	expandPromptTemplates?: boolean;
 	/** Image attachments */
@@ -1958,6 +1970,10 @@ export class AgentSession {
 	private async _routeWorkflowModel(
 		input: Omit<ModelRouteRequest, "currentModel" | "currentModelName">,
 	): Promise<void> {
+		const scope = currentWorkflowCostScope(this.sessionManager);
+		if (scope) {
+			this.sessionManager.appendCustomEntry(WORKFLOW_COST_SCOPE, { ...scope, stage: workflowCostStage(input.role) });
+		}
 		const decision = this._modelGateway.route({
 			...input,
 			currentModel: this.model ?? undefined,
@@ -1993,8 +2009,15 @@ export class AgentSession {
 		if (view.workflow.modeDecision?.mode === "plan") {
 			protocol?.observeAgents(agents);
 		}
+		const cost = collectWorkflowCost(this.sessionManager.getEntries(), { ...view, agents });
+		const enriched = this._withWorkflowAutomation({ ...view, agents });
 		return {
-			...this._withWorkflowAutomation({ ...view, agents }),
+			...enriched,
+			cost,
+			reportLines: [
+				...enriched.reportLines.filter((line) => !line.startsWith("Recorded cost (")),
+				formatWorkflowCost(cost),
+			],
 			executionProtocol: protocol?.view,
 			modelRoutes: structuredClone(this._modelRoutes),
 		};
@@ -2233,7 +2256,23 @@ export class AgentSession {
 			});
 	}
 
-	private async _preflightWorkflowMode(requestText: string): Promise<WorkflowModePreflight | undefined> {
+	private async _preflightWorkflowMode(
+		requestText: string,
+		isolatedDirectExecution?: PromptOptions["isolatedDirectExecution"],
+	): Promise<WorkflowModePreflight | undefined> {
+		if (!this._pendingWorkflowClarification || !currentWorkflowCostScope(this.sessionManager)) {
+			this.sessionManager.appendCustomEntry(WORKFLOW_COST_SCOPE, { scopeId: randomUUID(), stage: "other" });
+		}
+		if (isolatedDirectExecution) {
+			const decision = createModeDecision({
+				selection: selectExecutionMode({ requestedMode: "direct" }),
+				reason: `Host-authorized isolated Direct execution: ${isolatedDirectExecution.reason.trim()}`,
+				riskLevel: requiresPlanMode({ text: requestText }) ? "high" : "low",
+				decidedAt: new Date().toISOString(),
+			});
+			this._emit({ type: "workflow_mode_decided", decision });
+			return { requestText, decision };
+		}
 		let effectiveRequestText = requestText;
 		let clarificationContext: string | undefined;
 		if (this._pendingWorkflowClarification) {
@@ -2381,6 +2420,7 @@ export class AgentSession {
 			this._autonomousWorkflowId = undefined;
 		}
 		const workflow = runtime.workflow;
+		this._bindWorkflowCost(workflow.id);
 		await this._routeWorkflowModel({
 			role: "planner",
 			riskLevel: workflow.modeDecision?.riskLevel,
@@ -2430,6 +2470,12 @@ export class AgentSession {
 		});
 	}
 
+	private _bindWorkflowCost(workflowId: string): void {
+		const scope = currentWorkflowCostScope(this.sessionManager) ?? { scopeId: randomUUID(), stage: "other" };
+		this.sessionManager.appendCustomEntry(WORKFLOW_COST_SCOPE, scope);
+		this.sessionManager.appendCustomEntry(WORKFLOW_COST_BINDING, { scopeId: scope.scopeId, workflowId });
+	}
+
 	private _startDirectWorkflow(requestText: string, modeDecision?: ModeDecision): AgentSessionAdapter {
 		if (this._planWorkflowRuntime?.isTerminal) {
 			this._planWorkflowRuntime = undefined;
@@ -2457,6 +2503,7 @@ export class AgentSession {
 			},
 			{ deferCompletion: requiresDeliveryGate },
 		);
+		this._bindWorkflowCost(adapter.workflowId);
 		this._protocolRuntimeFor(adapter.workflowId);
 		return adapter;
 	}
@@ -2974,6 +3021,24 @@ export class AgentSession {
 		let workflowAdapter: AgentSessionAdapter | undefined;
 
 		try {
+			if (
+				options?.isolatedDirectExecution &&
+				(!options.isolatedDirectExecution.reason.trim() ||
+					!this._workflowTrackingEnabled ||
+					this.isStreaming ||
+					options.source === "extension" ||
+					this._workflowMode !== "direct" ||
+					this._nextWorkflowMode === "plan" ||
+					this._workflowAutomationEnabled ||
+					this._workflowExecutionProtocol !== undefined ||
+					this._workflowVerificationCommands.length > 0 ||
+					this._pendingWorkflowClarification !== undefined ||
+					(this._planWorkflowRuntime !== undefined && !this._planWorkflowRuntime.isTerminal))
+			) {
+				throw new Error(
+					"Isolated Direct execution requires an idle Direct Workflow without automation, protocol, or pending Plan/clarification, and a host authorization reason",
+				);
+			}
 			if (expandPromptTemplates && text.startsWith("/") && (await this._tryExecuteContextManagementCommand(text))) {
 				preflightResult?.(true);
 				return;
@@ -3026,7 +3091,7 @@ export class AgentSession {
 						`Plan Workflow ${activePlan.workflow.id} is ${activePlan.workflow.status}; approve, revise, reject, or cancel it before starting another request`,
 					);
 				}
-				const preflight = await this._preflightWorkflowMode(currentText);
+				const preflight = await this._preflightWorkflowMode(currentText, options?.isolatedDirectExecution);
 				if (!preflight) {
 					await this._emitAgentSettled();
 					preflightResult?.(true);

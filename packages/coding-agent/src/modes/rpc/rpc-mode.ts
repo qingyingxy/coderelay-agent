@@ -396,6 +396,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				let preflightSucceeded = false;
 				void session
 					.prompt(command.message, {
+						isolatedDirectExecution: command.isolatedDirectExecution,
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",

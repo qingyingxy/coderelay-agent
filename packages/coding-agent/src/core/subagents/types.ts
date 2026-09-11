@@ -18,6 +18,7 @@ import type {
 	WorkflowId,
 } from "../workflow/types.ts";
 import type { AgentEnforcementPlan, SandboxVerification } from "./enforcement-plan.ts";
+import type { WorkerExecutionContract } from "./worker-context.ts";
 
 export const AGENT_INSTANCE_STATUSES = [
 	"starting",
@@ -290,6 +291,7 @@ export interface AgentTranscriptView {
 }
 
 export interface SpawnSubagentInput {
+	readonly executionContract?: WorkerExecutionContract;
 	readonly workflowId: WorkflowId;
 	readonly taskId: TaskId;
 	readonly attemptId: AttemptId;
@@ -323,6 +325,7 @@ export interface SpawnSubagentInput {
 }
 
 export interface RetrySubagentInput {
+	readonly executionContract?: WorkerExecutionContract;
 	readonly attemptId: AttemptId;
 	readonly autoStart?: boolean;
 	/** Process-recovery retries do not consume the configured Task retry count. */
@@ -334,7 +337,11 @@ export interface RetrySubagentInput {
 }
 
 export interface SubagentSessionConfig {
+	/** Transport acknowledgement fallback when a host watchdog owns the run deadline. */
+	readonly responseTimeoutMs?: number;
 	readonly cwd: string;
+	/** Opt-in hard windows with a caller-owned persistent session directory. Tools must be explicitly allowed. */
+	readonly contextWindow?: { readonly sessionDir: string; readonly executionContract?: WorkerExecutionContract };
 	readonly profile: AgentProfile;
 	readonly modelName?: string;
 	readonly toolNames: readonly string[];
@@ -351,6 +358,7 @@ export interface SubagentSession {
 	prompt(message: string): Promise<void>;
 	steer(message: string): Promise<void>;
 	abort(): Promise<void>;
+	/** Zero disables the total wait deadline; the caller must own cancellation/watchdog. */
 	waitForIdle(timeoutMs: number): Promise<void>;
 	getSessionId(): Promise<string>;
 	getLastAssistantText(): Promise<string | null>;

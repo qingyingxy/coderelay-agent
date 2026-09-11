@@ -46,8 +46,15 @@ describe("ContextWindowEntry", () => {
 		});
 		expect(validateContextWindowEntry(entry)).toEqual([]);
 		expect(session.buildSessionContext().messages).toMatchObject([
-			{ role: "custom", customType: "context-window", content: "Current objective: continue the task." },
+			{
+				role: "custom",
+				customType: "context-window",
+				content: expect.stringContaining("Current objective: continue the task."),
+			},
 		]);
+		expect(session.buildSessionContext().messages[0]).toMatchObject({
+			content: expect.stringContaining("completedCuts=1"),
+		});
 	});
 
 	it("persists snapshot and note provenance with the copied seed", () => {

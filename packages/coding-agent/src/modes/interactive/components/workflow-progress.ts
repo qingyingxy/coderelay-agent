@@ -1,4 +1,5 @@
 import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { formatWorkflowCost } from "../../../core/workflow/cost.ts";
 import type { WorkflowView } from "../../../core/workflow/view.ts";
 import { theme } from "../theme/theme.ts";
 
@@ -67,6 +68,9 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 	const runningTasks = tasks.filter(({ status }) => status === "running" || status === "verifying");
 	const failed = tasks.filter(({ status }) => status === "failed" || status === "cancelled").length;
 	const statusParts = [`Workflow: ${label(view.workflow.status)}`, `Tasks ${succeeded}/${tasks.length}`];
+	if (view.cost) {
+		statusParts.push(`~$${view.cost.totalEstimatedUsd.toFixed(6)}${view.cost.hostAttributed ? "" : " (partial)"}`);
+	}
 	if (failed > 0) {
 		statusParts.push(`Failed ${failed}`);
 	}
@@ -119,6 +123,7 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 	}
 
 	if (expanded) {
+		if (view.cost) lines.push(formatWorkflowCost(view.cost));
 		const activeAgents = view.agents.filter(
 			({ handoffId, status }) =>
 				!handoffId && ["starting", "idle", "running", "waiting", "stopping", "failed"].includes(status),

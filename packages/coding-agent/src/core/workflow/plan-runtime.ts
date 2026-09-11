@@ -1,4 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
+import {
+	captureDeliveryBaseline,
+	DELIVERY_BASELINE_ENTRY,
+	type DeliveryBaseline,
+	readDeliveryBaseline,
+} from "../delivery/baseline.ts";
 import type { DeliveryWorkflowPort } from "../delivery/types.ts";
 import type { JobRuntime } from "../jobs/job-runtime.ts";
 import type { Job } from "../jobs/types.ts";
@@ -7,6 +13,7 @@ import { aggregateHandoffs, STRUCTURED_HANDOFF_RETRY_INSTRUCTION } from "../suba
 import type { SubagentService } from "../subagents/subagent-service.ts";
 import type { TeamTaskProposal } from "../subagents/team-types.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
+import { createWorkerExecutionContract } from "../subagents/worker-context.ts";
 import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
 import type { WorkflowContextCheckpoint, WorkflowContextProvider } from "./context-window-projection.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
@@ -146,6 +153,12 @@ function workerPromptLines(
 	const diagnostics = recovery?.commandDiagnostics ?? [];
 	return [
 		"Execution role: implementation Worker. Do not create, restate, review, or revise a plan. Start editing after only the minimum reads needed for the listed files.",
+		...(agent.modelRoute?.policy === "planner_executor"
+			? [
+					`Execution contract: ${JSON.stringify(createWorkerExecutionContract(plan, task, agent.attemptId, verificationCommands))}`,
+					"If the approved plan conflicts with repository evidence, stop and report the conflict and unfinished work in your Handoff. Do not silently change scope. A code edit or an agent-reported progress note is not verification evidence.",
+				]
+			: []),
 		`Workflow goal: ${plan.goal}`,
 		`Assigned Task: ${task.title}`,
 		task.description,
@@ -282,6 +295,8 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 	readonly #workflowId: string;
 	readonly #createId: (kind: "command" | "plan") => string;
 	readonly #snapshotStore: SessionWorkflowSnapshotStore;
+	readonly #sessionManager: SessionManager;
+	#deliveryBaseline?: DeliveryBaseline;
 	#lastSchedulingDecisions: readonly TaskSchedulingDecision[] = [];
 
 	private constructor(
@@ -289,11 +304,14 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 		workflowId: string,
 		createId: (kind: "command" | "plan") => string,
 		snapshotStore: SessionWorkflowSnapshotStore,
+		sessionManager: SessionManager,
 	) {
 		this.#controller = controller;
 		this.#workflowId = workflowId;
 		this.#createId = createId;
 		this.#snapshotStore = snapshotStore;
+		this.#sessionManager = sessionManager;
+		this.#deliveryBaseline = readDeliveryBaseline(sessionManager, workflowId, this.workflow.request.cwd);
 	}
 
 	static start(
@@ -318,7 +336,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 			modeDecision: input.modeDecision,
 		});
 		const snapshotStore = new SessionWorkflowSnapshotStore(sessionManager);
-		const runtime = new PlanWorkflowRuntime(controller, workflowId, createId, snapshotStore);
+		const runtime = new PlanWorkflowRuntime(controller, workflowId, createId, snapshotStore, sessionManager);
 		runtime.#checkpoint();
 		return runtime;
 	}
@@ -345,7 +363,7 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 			return undefined;
 		}
 		const createId = (kind: "command" | "plan"): string => `${kind}-${randomUUID()}`;
-		const runtime = new PlanWorkflowRuntime(controller, workflow.id, createId, snapshotStore);
+		const runtime = new PlanWorkflowRuntime(controller, workflow.id, createId, snapshotStore, sessionManager);
 		controller.recoverInterrupted({
 			commandId: createId("command"),
 			workflowId: workflow.id,
@@ -429,6 +447,17 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 				}),
 			)
 			.digest("hex");
+	}
+
+	get deliveryBaseline(): DeliveryBaseline {
+		return this.#deliveryBaseline
+			? structuredClone(this.#deliveryBaseline)
+			: {
+					version: 1,
+					workflowId: this.#workflowId,
+					cwd: this.workflow.request.cwd,
+					files: [],
+				};
 	}
 
 	get statusLines(): readonly string[] {
@@ -734,6 +763,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 			.flatMap(({ artifact }) => (artifact ? [artifact.id] : []));
 		const agent = sourceAgentId
 			? await runtime.retry(sourceAgentId, {
+					executionContract:
+						profile.role === "worker"
+							? createWorkerExecutionContract(this.currentPlan, task, attemptId, verificationCommands)
+							: undefined,
 					attemptId,
 					autoStart: false,
 					recoveryReason,
@@ -742,6 +775,10 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 					taskBudget: attemptBudget,
 				})
 			: await runtime.spawn({
+					executionContract:
+						profile.role === "worker"
+							? createWorkerExecutionContract(this.currentPlan, task, attemptId, verificationCommands)
+							: undefined,
 					workflowId: workflow.id,
 					taskId: task.id,
 					attemptId,
@@ -1053,6 +1090,20 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 			planId: plan.id,
 			comment,
 		});
+		// Preserve the pre-execution workspace, including existing uncommitted edits.
+		// Repairs and recovered runtimes must never rebase this on the modified files.
+		if (!this.#deliveryBaseline && this.attempts.length === 0) {
+			this.#deliveryBaseline =
+				readDeliveryBaseline(this.#sessionManager, this.#workflowId, this.workflow.request.cwd) ??
+				captureDeliveryBaseline(
+					this.workflow.request.cwd,
+					this.#workflowId,
+					plan.steps.flatMap((step) =>
+						step.fileIntents.filter(({ action }) => action !== "inspect").map(({ path }) => path),
+					),
+				);
+			this.#sessionManager.appendCustomEntry(DELIVERY_BASELINE_ENTRY, this.#deliveryBaseline);
+		}
 		this.refreshTaskReadiness();
 	}
 

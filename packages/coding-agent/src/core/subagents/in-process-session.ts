@@ -120,6 +120,7 @@ class InProcessSubagentSession implements SubagentSession {
 			await Promise.race([
 				Promise.all([session.waitForIdle(), runPromise]).then(() => undefined),
 				new Promise<never>((_resolve, reject) => {
+					if (timeoutMs === 0) return;
 					timeout = setTimeout(
 						() => reject(new Error(`In-process Subagent timed out after ${timeoutMs}ms`)),
 						timeoutMs,

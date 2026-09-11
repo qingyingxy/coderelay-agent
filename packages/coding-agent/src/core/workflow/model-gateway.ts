@@ -5,11 +5,18 @@ import type { BudgetLimit, ResourceUsage, RiskLevel } from "./types.ts";
 export const MODEL_TIERS = ["fast", "balanced", "strong"] as const;
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
-export type ModelEscalationReason = "retry" | "no_progress" | "repeated_failure" | "verification_failure";
+export type ModelEscalationReason =
+	| "retry"
+	| "soft_limit"
+	| "no_progress"
+	| "repeated_failure"
+	| "verification_failure";
 
 export type ModelRouteRole = AgentProfileRole | "main" | "repair";
 
 export interface ModelRoutingOptions {
+	/** Opt-in stable tiers for a strong Planner and fast Executor. Does not enable scheduling. */
+	readonly policy?: "role_based" | "planner_executor";
 	/** Routing is enabled when true; tier model names are still optional fallbacks. */
 	readonly enabled?: boolean;
 	/** Fully-qualified model names such as `deepseek/deepseek-v4-flash`. */
@@ -32,6 +39,7 @@ export interface ModelRouteRequest {
 }
 
 export interface ModelRouteRecord {
+	readonly policy?: ModelRoutingOptions["policy"];
 	readonly role: ModelRouteRole;
 	readonly tier: ModelTier;
 	readonly modelName: string;
@@ -185,6 +193,13 @@ function applyBudgetPressure(
 export function selectModelTier(
 	input: Pick<ModelRouteRequest, "role" | "riskLevel" | "escalationReason" | "budget" | "usage">,
 ): ModelTierSelection {
+	if (input.escalationReason === "soft_limit") {
+		return {
+			tier: "strong",
+			reasonCode: "model.soft_limit_escalated_strong",
+			reason: "The soft turn or duration limit was reached, so the remaining work is forced to the strong tier",
+		};
+	}
 	if (input.escalationReason === "no_progress" || input.escalationReason === "repeated_failure") {
 		return {
 			tier: "strong",
@@ -278,9 +293,19 @@ export class ModelGateway {
 
 	route(input: ModelRouteRequest): ModelRouteDecision {
 		const currentModelName = input.currentModelName ?? modelNameOf(input.currentModel);
-		const selection = selectModelTier(input);
+		const stableExecution = this.#options.policy === "planner_executor";
+		const selection =
+			stableExecution && input.role === "worker" && (!input.escalationReason || input.escalationReason === "retry")
+				? {
+						tier: "fast" as const,
+						reasonCode: "model.worker.planned_fast",
+						reason:
+							"The Worker executes an approved plan on the fast tier; budget pressure does not change its model",
+					}
+				: selectModelTier(stableExecution ? { ...input, budget: undefined, usage: undefined } : input);
 		const roleSelection: ModelRouteRecord = {
 			...withRecord(input.role, selection, currentModelName ?? "(unselected)", currentModelName, "current"),
+			...(stableExecution ? { policy: "planner_executor" as const } : {}),
 		};
 
 		if (input.explicitModel && !input.escalationReason && this.#options.respectExplicitModel !== false) {
@@ -308,6 +333,9 @@ export class ModelGateway {
 
 		const configuredName = tierModelName(this.#options, selection.tier);
 		if (!configuredName) {
+			if (stableExecution) {
+				throw new Error(`Planner/Executor routing requires a configured ${selection.tier} model`);
+			}
 			return {
 				model: input.currentModel,
 				record: {
@@ -322,6 +350,9 @@ export class ModelGateway {
 		const parsed = parseQualifiedModelName(configuredName);
 		const target = parsed ? this.#runtime.getModel(parsed.provider, parsed.modelId) : undefined;
 		if (!target || !this.#runtime.hasConfiguredAuth(target.provider)) {
+			if (stableExecution) {
+				throw new Error(`Planner/Executor model ${configuredName} is unavailable or unauthenticated`);
+			}
 			return {
 				model: input.currentModel,
 				record: {

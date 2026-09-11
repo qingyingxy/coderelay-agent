@@ -1,6 +1,7 @@
 import type { Job } from "../jobs/types.ts";
 import type { AgentInstance } from "../subagents/types.ts";
 import type { WorkflowAutomationWaitReason } from "./autonomous-workflow-types.ts";
+import type { WorkflowCost } from "./cost.ts";
 import { type DecisionExplanation, resolveModeDecisionReasonCode } from "./decision-reasons.ts";
 import type { ExecutionProtocolView } from "./execution-protocol.ts";
 import type { ModelRouteRecord } from "./model-gateway.ts";
@@ -40,6 +41,7 @@ export interface WorkflowView {
 	readonly stopReason?: string;
 	readonly executionProtocol?: ExecutionProtocolView;
 	readonly modelRoutes?: readonly ModelRouteRecord[];
+	readonly cost?: WorkflowCost;
 	readonly automation?: {
 		readonly enabled: boolean;
 		readonly mode: ExecutionMode;

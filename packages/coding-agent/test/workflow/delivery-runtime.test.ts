@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
+import { applyReviewBoundary } from "../../src/core/delivery/review-boundary.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { parseHandoff } from "../../src/core/subagents/handoff.ts";
 import {
 	DeliveryRuntime,
 	DiffCollector,
@@ -147,7 +149,9 @@ function createPlan(
 				title: "Implement",
 				description: "Apply a deterministic change",
 				dependsOn: [],
-				fileIntents: [],
+				fileIntents: [
+					{ path: "src/fix.ts", action: "create", reason: "Simulated implementation and repair output" },
+				],
 				verificationRequirementIds: ["implementation"],
 			},
 			...(includeReviewerTask
@@ -274,6 +278,139 @@ function createAgentVerifiedPlan(id: string, includeSecondaryWorkerRequirement =
 }
 
 describe("DeliveryRuntime", () => {
+	it.each([
+		"missing",
+		"malformed",
+		"unknown-requirement",
+		"invented-quote",
+		"no-evidence",
+		"unrelated-file",
+		"mixed",
+		"valid-request",
+	])("validates finding evidence and requirement anchors: %s", (variant) => {
+		const plan = createPlan(`boundary-${variant}`, true);
+		const finding = {
+			category: "must_fix",
+			basis: "requirement",
+			introducedByChange: false,
+			summary: "Acceptance failure",
+			evidence: ["src/index.ts:1 concrete failure"],
+			requirementId: variant === "valid-request" ? "$request" : "implementation",
+			requirementQuote: variant === "valid-request" ? "Implement and verify" : "Implementation command completed",
+		};
+		if (variant === "unknown-requirement") finding.requirementId = "new-unapproved-requirement";
+		if (variant === "invented-quote") finding.requirementQuote = "Validate all subscribers";
+		if (variant === "no-evidence") finding.evidence = [];
+		if (variant === "unrelated-file") finding.evidence = ["unrelated.ts:1 unrelated finding"];
+		const findings =
+			variant === "mixed" ? [finding, { ...finding, category: "confirmation", basis: "ambiguity" }] : [finding];
+		const handoff = parseHandoff(
+			subagentHandoff({
+				verificationSummary: [
+					"review:failed",
+					...(variant === "missing"
+						? []
+						: [`review_findings:${variant === "malformed" ? "{" : JSON.stringify(findings)}`]),
+				],
+			}),
+			{
+				id: "handoff-boundary",
+				agentId: "reviewer",
+				workflowId: plan.workflow.id,
+				taskId: plan.workflow.rootTaskId!,
+				attemptId: "review-attempt",
+				createdAt: new Date().toISOString(),
+			},
+		);
+		const result = applyReviewBoundary(
+			{
+				workflow: plan.workflow,
+				rootTask: plan.tasks.find((task) => task.id === plan.workflow.rootTaskId)!,
+				acceptanceRequirements: plan.currentPlan.verificationRequirements,
+				diff: { files: [], changedFiles: ["src/index.ts"], summary: "Scoped change", evidenceRefs: [] },
+			},
+			{ status: "failed", summary: "Review failed", evidenceRefs: [], risks: [], unfinishedItems: [], handoff },
+		);
+		expect(result.failureKind).toBe(
+			variant === "valid-request" ? "finding" : variant === "unrelated-file" ? "infrastructure" : "confirmation",
+		);
+	});
+
+	it.each([
+		{ category: "suggestion", basis: "hardening", introducedByChange: false, expected: "completed" },
+		{ category: "must_fix", basis: "requirement", introducedByChange: false, expected: "repair_created" },
+		{ category: "must_fix", basis: "regression", introducedByChange: true, expected: "repair_created" },
+		{ category: "must_fix", basis: "regression", introducedByChange: false, expected: "failed" },
+		{ category: "must_fix", basis: "hardening", introducedByChange: false, expected: "failed" },
+		{ category: "confirmation", basis: "ambiguity", introducedByChange: false, expected: "failed" },
+		{ category: "suggestion", basis: "safety", introducedByChange: false, expected: "failed" },
+	])("enforces review boundary: $category/$basis/$introducedByChange", async (finding) => {
+		const plan = createPlan(`boundary-${finding.category}-${finding.basis}-${finding.introducedByChange}`, true);
+		const jobs = new JobRuntime({
+			processFactory: new SequencedFactory([0, 0]),
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+		});
+		const [implementation] = await plan.startReadyJobs(jobs, 1);
+		await implementation?.completion;
+		const sessions = new FakeSubagentSessionFactory();
+		const subagents = new SubagentRuntime({
+			sessionFactory: sessions,
+			runtimeRegistry: new WorkflowRuntimeRegistry(),
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		const collector = new DiffCollector();
+		vi.spyOn(collector, "collect").mockReturnValue({
+			files: [],
+			changedFiles: ["src/index.ts"],
+			summary: "one changed file",
+			evidenceRefs: [],
+		});
+		const delivery = new DeliveryRuntime({
+			jobRuntime: jobs,
+			reviewer: new SubagentReadonlyReviewer(subagents),
+			diffCollector: collector,
+			writerLeaseRegistry: new WriterLeaseRegistry(),
+		});
+		try {
+			const pending = delivery.run(plan);
+			await vi.waitFor(() => expect(sessions.sessions[0]?.promptCalls).toHaveLength(1));
+			expect(sessions.sessions[0]?.promptCalls[0]).toContain('"description":"Implementation command completed"');
+			expect(sessions.sessions[0]?.promptCalls[0]).toContain("Repairs do not expand that scope");
+			sessions.sessions[0]!.complete(
+				subagentHandoff({
+					verificationSummary: [
+						"review:failed",
+						`review_findings:${JSON.stringify([
+							{
+								category: finding.category,
+								basis: finding.basis,
+								introducedByChange: finding.introducedByChange,
+								summary: "Counter boundary finding",
+								evidence: ["src/index.ts:1 before committed; after mutates on failure"],
+								requirementId: "implementation",
+								requirementQuote: "Implementation command completed",
+							},
+						])}`,
+					],
+					unfinishedItems: ["Do not blindly forward this unclassified repair instruction"],
+				}),
+			);
+			const result = await pending;
+			expect(result.status).toBe(finding.expected);
+			expect(plan.tasks.filter((task) => task.kind === "repair")).toHaveLength(
+				finding.expected === "repair_created" ? 1 : 0,
+			);
+			if (finding.expected === "completed") {
+				expect(result.risks.join(" ")).toContain("Counter boundary finding");
+				expect(result.unfinishedItems).toEqual([]);
+			} else if (finding.expected === "failed") {
+				expect(plan.workflow.result?.reason).toContain("Review requires confirmation:");
+			}
+		} finally {
+			await subagents.dispose();
+		}
+	});
+
 	it("classifies a repeatedly missing Reviewer verdict as infrastructure failure", async () => {
 		const plan = createPlan("reviewer-verdict-invalid", true);
 		const sessions = new FakeSubagentSessionFactory();

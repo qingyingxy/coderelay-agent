@@ -1,24 +1,12 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { resolve } from "node:path";
+import { createTwoFilesPatch } from "diff";
 import { spawnProcessSync } from "../../utils/child-process.ts";
 import type { Task } from "../workflow/types.ts";
+import { type DeliveryBaseline, normalizeDeliveryPath, readDeliveryFile } from "./baseline.ts";
 import type { DeliveryDiff, DeliveryFileDiff, DeliveryFileOwner } from "./types.ts";
 
 export interface DiffCollectorOptions {
 	readonly maxPatchBytes?: number;
-}
-
-function normalizeCandidate(cwd: string, path: string): string | undefined {
-	const absolute = resolve(cwd, path);
-	const scoped = relative(cwd, absolute).replaceAll("\\", "/");
-	return scoped && scoped !== ".." && !scoped.startsWith("../") && !isAbsolute(scoped) ? scoped : undefined;
-}
-
-function addedFilePatch(path: string, content: string): string {
-	const lines = content.split(/\r?\n/).map((line) => `+${line}`);
-	return [`diff --git a/${path} b/${path}`, "new file mode 100644", "--- /dev/null", `+++ b/${path}`, ...lines].join(
-		"\n",
-	);
 }
 
 export class DiffCollector {
@@ -28,16 +16,16 @@ export class DiffCollector {
 		this.#maxPatchBytes = options.maxPatchBytes ?? 256 * 1024;
 	}
 
-	collect(cwd: string, tasks: readonly Task[]): DeliveryDiff {
+	collect(cwd: string, tasks: readonly Task[], baseline?: DeliveryBaseline): DeliveryDiff {
 		const candidates = new Set<string>();
 		const ownersByPath = new Map<string, DeliveryFileOwner[]>();
 		for (const task of tasks) {
 			for (const rawPath of [...task.modifications.map(({ path }) => path), ...(task.result?.changedFiles ?? [])]) {
-				const path = normalizeCandidate(cwd, rawPath);
+				const path = normalizeDeliveryPath(cwd, rawPath);
 				if (!path) continue;
 				candidates.add(path);
 				const modifications = task.modifications.filter(
-					(modification) => normalizeCandidate(cwd, modification.path) === path,
+					(modification) => normalizeDeliveryPath(cwd, modification.path) === path,
 				);
 				const owner: DeliveryFileOwner = {
 					taskId: task.id,
@@ -54,24 +42,51 @@ export class DiffCollector {
 		}
 		const files: DeliveryFileDiff[] = [];
 		for (const path of candidates) {
-			const tracked = spawnProcessSync("git", ["ls-files", "--error-unmatch", "--", path], {
-				cwd,
-				encoding: "utf8",
-				windowsHide: true,
-			});
 			let patch = "";
-			if (tracked.status === 0) {
-				const diff = spawnProcessSync("git", ["diff", "HEAD", "--no-ext-diff", "--", path], {
-					cwd,
-					encoding: "utf8",
-					windowsHide: true,
-				});
-				patch = diff.stdout;
-			} else {
-				const absolute = resolve(cwd, path);
-				if (existsSync(absolute) && statSync(absolute).isFile()) {
-					patch = addedFilePatch(path, readFileSync(absolute, "utf8"));
+			let unavailableReason: string | undefined;
+			try {
+				if (baseline) {
+					if (baseline.cwd !== resolve(cwd) || tasks.some((task) => task.workflowId !== baseline.workflowId)) {
+						throw new Error("Delivery baseline belongs to another workspace or Workflow");
+					}
+					const original =
+						baseline.files.find((file) => file.path === path) ??
+						(baseline.directories?.some((directory) => path.startsWith(`${directory}/`))
+							? { path, content: null }
+							: undefined);
+					if (!original || original.unavailableReason || original.content === undefined) {
+						throw new Error(original?.unavailableReason ?? "No pre-execution baseline for this path");
+					}
+					const current = readDeliveryFile(cwd, path);
+					if (original.content === current) continue;
+					patch =
+						createTwoFilesPatch(
+							original.content === null ? "/dev/null" : `a/${path}`,
+							current === null ? "/dev/null" : `b/${path}`,
+							original.content ?? "",
+							current ?? "",
+							undefined,
+							undefined,
+							{ context: 3, timeout: 1000 },
+						) ?? "";
+					if (!patch) throw new Error("Diff computation timed out");
+				} else {
+					const tracked = spawnProcessSync("git", ["ls-files", "--error-unmatch", "--", path], {
+						cwd,
+						encoding: "utf8",
+						windowsHide: true,
+					});
+					if (tracked.status !== 0) throw new Error("No captured baseline or readable tracked Git baseline");
+					const diff = spawnProcessSync("git", ["diff", "HEAD", "--no-ext-diff", "--", path], {
+						cwd,
+						encoding: "utf8",
+						windowsHide: true,
+					});
+					if (diff.status !== 0) throw new Error("Git baseline diff failed");
+					patch = diff.stdout;
 				}
+			} catch (error) {
+				unavailableReason = error instanceof Error ? error.message : String(error);
 			}
 			const bytes = Buffer.byteLength(patch);
 			const truncated = bytes > this.#maxPatchBytes;
@@ -80,14 +95,17 @@ export class DiffCollector {
 				patch: truncated ? Buffer.from(patch).subarray(0, this.#maxPatchBytes).toString("utf8") : patch,
 				owners: ownersByPath.get(path) ?? [],
 				truncated,
+				unavailableReason,
 			});
 		}
 		const changedFiles = files.map(({ path }) => path);
 		return {
 			files,
 			changedFiles,
-			summary: `${changedFiles.length} scoped file${changedFiles.length === 1 ? "" : "s"} changed`,
-			evidenceRefs: files.map(({ path }) => `diff:${path}`),
+			summary: files.some((file) => file.unavailableReason)
+				? "Delivery diff unavailable: missing or unreadable baseline"
+				: `${changedFiles.length} scoped file${changedFiles.length === 1 ? "" : "s"} changed`,
+			evidenceRefs: files.filter((file) => !file.unavailableReason).map(({ path }) => `diff:${path}`),
 		};
 	}
 }

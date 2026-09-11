@@ -21,17 +21,23 @@ function createRpcChild(promptResponseDelayMs = 0, abortResponseDelayMs = 0): st
 		path,
 		[
 			'import { createInterface } from "node:readline";',
+			"if (process.env.PI_WORKFLOW_NETWORK_RETRY !== '1') throw new Error('Missing child network policy');",
 			`const handoff = ${JSON.stringify(SUBAGENT_HANDOFF)};`,
 			"const reply = (value) => process.stdout.write(JSON.stringify(value) + '\\n');",
 			"createInterface({ input: process.stdin }).on('line', (line) => {",
 			"  const command = JSON.parse(line);",
 			"  if (command.type === 'get_state') {",
+			"    if (process.argv.includes('--context-mode')) {",
+			"      const value = (flag) => process.argv[process.argv.indexOf(flag) + 1];",
+			"      reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: JSON.stringify({ mode: value('--context-mode'), sessionDir: value('--session-dir'), ephemeral: process.argv.includes('--no-session'), tools: value('--tools'), model: value('--model') }) } });",
+			"      return;",
+			"    }",
 			"    const toolsMode = process.argv.includes('--tools') ? 'restricted' : process.argv.includes('--no-tools') ? 'none' : 'default';",
 			"    const workflowMode = process.argv.includes('--workflow-mode') && process.argv.includes('direct') ? '-direct' : '-auto';",
 			"    const modelMode = process.argv.includes('openai/test-model') ? 'model' : 'no-model';",
 			"    const thinkingMode = process.argv.includes('high') ? 'high' : process.argv.includes('medium') ? 'medium' : 'no-thinking';",
 			"    const envMode = process.env.PI_RPC_ALLOWED === 'yes' ? (process.env.PI_R14_RPC_SECRET ? '-leaked' : '-clean') : '';",
-			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { sessionId: 'rpc-' + process.pid + '-' + toolsMode + workflowMode + '-' + modelMode + '-' + thinkingMode + envMode } });",
+			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { thinkingLevel: process.env.PI_TEST_CLAMP || process.argv[process.argv.indexOf('--thinking') + 1], sessionId: 'rpc-' + process.pid + '-' + toolsMode + workflowMode + '-' + modelMode + '-' + thinkingMode + envMode } });",
 			"  } else if (command.type === 'get_last_assistant_text') {",
 			"    reply({ id: command.id, type: 'response', command: command.type, success: true, data: { text: handoff } });",
 			"  } else if (command.type === 'get_session_stats') {",
@@ -61,6 +67,75 @@ afterEach(() => {
 });
 
 describe("RpcSubagentSessionFactory", () => {
+	it.each(["max", "xhigh"])("checks requested max against actual %s before prompting", async (actual) => {
+		const factory = new RpcSubagentSessionFactory({
+			command: process.execPath,
+			commandArgs: [createRpcChild()],
+			thinkingLevel: "max",
+			env: { PI_TEST_CLAMP: actual },
+		});
+		const session = factory.create({
+			cwd: process.cwd(),
+			profile: BUILTIN_AGENT_PROFILES.explorer,
+			toolNames: [],
+			effectivePermissions: FULL_PERMISSION_SET,
+			budget: {},
+		});
+		try {
+			if (actual === "max") await session.start();
+			else await expect(session.start()).rejects.toThrow("thinking level mismatch");
+		} finally {
+			await session.stop();
+		}
+	});
+	it("passes explicit persistent window settings without changing the model or tools", async () => {
+		const factory = new RpcSubagentSessionFactory({ command: process.execPath, commandArgs: [createRpcChild()] });
+		const toolNames = ["read", "new_context", "history", "notes"];
+		const session = factory.create({
+			cwd: process.cwd(),
+			profile: BUILTIN_AGENT_PROFILES.worker,
+			modelName: "openai/test-model",
+			toolNames,
+			effectivePermissions: FULL_PERMISSION_SET,
+			budget: {},
+			contextWindow: { sessionDir: tmpdir() },
+		});
+		try {
+			await session.start();
+			expect(JSON.parse(await session.getSessionId())).toEqual({
+				mode: "windowed",
+				sessionDir: tmpdir(),
+				ephemeral: false,
+				tools: toolNames.join(","),
+				model: "openai/test-model",
+			});
+		} finally {
+			await session.stop();
+		}
+	});
+
+	it("rejects incomplete window configuration instead of widening permissions", () => {
+		const factory = new RpcSubagentSessionFactory();
+		const config = {
+			cwd: process.cwd(),
+			profile: BUILTIN_AGENT_PROFILES.worker,
+			toolNames: ["read", "new_context", "history", "notes"],
+			effectivePermissions: FULL_PERMISSION_SET,
+			budget: {},
+			contextWindow: { sessionDir: tmpdir() },
+		};
+		for (const missing of ["new_context", "history", "notes"]) {
+			expect(() =>
+				factory.create({ ...config, toolNames: config.toolNames.filter((name) => name !== missing) }),
+			).toThrow(missing);
+		}
+		expect(() => factory.create({ ...config, contextWindow: { sessionDir: "relative" } })).toThrow("absolute");
+		expect(() => factory.create({ ...config, profile: BUILTIN_AGENT_PROFILES.explorer })).toThrow("Worker");
+		expect(() =>
+			factory.create({ ...config, effectivePermissions: { ...FULL_PERMISSION_SET, read: false } }),
+		).toThrow("read permission");
+	});
+
 	it("launches the repository CLI when an SDK script runs under Node", () => {
 		const invocation = resolveDefaultRpcInvocation({
 			currentScript: join(process.cwd(), "examples", "sdk", "evaluation.ts"),
@@ -215,8 +290,11 @@ describe("RpcSubagentSessionFactory", () => {
 		});
 
 		await session.start();
+		const idle = session.waitForIdle(0);
+		const rejected = expect(idle).rejects.toThrow(/exited|stopped/);
 		const startedAt = Date.now();
 		await session.abort();
+		await rejected;
 
 		expect(Date.now() - startedAt).toBeLessThan(3_000);
 	});

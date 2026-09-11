@@ -5,6 +5,7 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import chalk from "chalk";
 import { APP_NAME, CONFIG_DIR_NAME, ENV_AGENT_DIR, ENV_SESSION_DIR } from "../config.ts";
+import type { ContextManagementMode } from "../core/context-management.ts";
 import type { ExtensionFlag } from "../core/extensions/types.ts";
 import { type ExecutionMode, isExecutionMode } from "../core/workflow/types.ts";
 
@@ -38,6 +39,10 @@ export interface Args {
 	print?: boolean;
 	workflowReport?: boolean;
 	workflowMode?: ExecutionMode;
+	plannerModel?: string;
+	executorModel?: string;
+	verificationCommands?: string[];
+	contextMode?: ContextManagementMode;
 	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
@@ -147,8 +152,36 @@ export function parseArgs(args: string[]): Args {
 				result.messages.push(next);
 				i++;
 			}
+		} else if (arg === "--planner-model" || arg === "--executor-model" || arg === "--verify") {
+			const value = args[i + 1];
+			if (value === undefined || !value.trim() || value.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: `${arg} requires a value` });
+			} else {
+				i++;
+				if (arg === "--planner-model") result.plannerModel = value;
+				else if (arg === "--executor-model") result.executorModel = value;
+				else {
+					result.verificationCommands ??= [];
+					result.verificationCommands.push(value);
+				}
+			}
 		} else if (arg === "--workflow-report") {
 			result.workflowReport = true;
+		} else if (arg === "--context-mode") {
+			const mode = args[i + 1];
+			if (mode === undefined || mode.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--context-mode requires a value" });
+			} else {
+				i++;
+				if (mode === "summary" || mode === "windowed" || mode === "hybrid") {
+					result.contextMode = mode;
+				} else {
+					result.diagnostics.push({
+						type: "error",
+						message: `Invalid context mode "${mode}". Valid values: summary, windowed, hybrid`,
+					});
+				}
+			}
 		} else if (arg === "--workflow-mode") {
 			const workflowMode = args[i + 1];
 			if (workflowMode === undefined || workflowMode.startsWith("-")) {
@@ -225,6 +258,32 @@ export function parseArgs(args: string[]): Args {
 		}
 	}
 
+	if (result.plannerModel || result.executorModel || result.verificationCommands) {
+		if (!result.plannerModel || !result.executorModel || !result.verificationCommands?.length) {
+			result.diagnostics.push({
+				type: "error",
+				message: "Use --planner-model, --executor-model and --verify together",
+			});
+		}
+		if (
+			(result.workflowMode !== undefined && result.workflowMode !== "plan") ||
+			result.model ||
+			result.provider ||
+			result.models ||
+			result.apiKey ||
+			result.continue ||
+			result.resume ||
+			result.session ||
+			result.sessionId ||
+			result.fork ||
+			result.noSession
+		) {
+			result.diagnostics.push({
+				type: "error",
+				message: "Planner/Executor requires a new persistent Plan session without single-model overrides",
+			});
+		}
+	}
 	return result;
 }
 
@@ -263,6 +322,10 @@ ${chalk.bold("Options:")}
   --print, -p                    Non-interactive mode: process prompt and exit
   --workflow-report             Append the structured Workflow report in text mode
   --workflow-mode <mode>        Workflow mode: auto (default), direct, or plan
+  --planner-model <provider/id> Strong Planner and Reviewer model (new Plan session)
+  --executor-model <provider/id> Fast Executor model; requires --planner-model and --verify
+  --verify <command>           Fixed external acceptance command (repeatable)
+  --context-mode <mode>         Context management for this run: summary, windowed, or hybrid
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
   --session <path|id>            Use specific session file or partial UUID

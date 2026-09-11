@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { getAgentDir } from "../../config.ts";
 import { executeBashWithOperations } from "../bash-executor.ts";
 import { createLocalBashOperations } from "../tools/bash.ts";
 import { validateAgentProfile } from "../workflow/agent-profile.ts";
 import type { AgentCreationReasonCode, BackendSelectionReasonCode } from "../workflow/decision-reasons.ts";
+import { ExecutionWatchdog, type ExecutionWatchdogPolicy, watchdogBudget } from "../workflow/execution-watchdog.ts";
 import type { ModelGateway } from "../workflow/model-gateway.ts";
 import {
 	assertBudgetAvailable,
@@ -73,6 +76,7 @@ import type {
 	WorkspaceArtifact,
 	WorkspaceRecoveryVerification,
 } from "./types.ts";
+import { formatWorkerExecutionContext } from "./worker-context.ts";
 import type { WorkspaceProvider } from "./workspace-provider.ts";
 
 const ACTIVE_AGENT_STATUSES = new Set(["starting", "running", "waiting"]);
@@ -144,6 +148,8 @@ const defaultVerificationRunner: ControlledVerificationRunner = async (input) =>
 };
 
 export interface SubagentRuntimeOptions {
+	/** Host opt-in: replace cost/time/turn caps and no-edit heuristics with response/loop detection. */
+	readonly executionWatchdog?: ExecutionWatchdogPolicy;
 	readonly sessionFactory: SubagentSessionFactory;
 	readonly inProcessSessionFactory?: SubagentSessionFactory;
 	readonly registry?: AgentRegistry;
@@ -320,6 +326,8 @@ function decrementedDepthBudget(budget: BudgetLimit): BudgetLimit {
 }
 
 export class SubagentRuntime implements SubagentService {
+	readonly #executionWatchdog?: ExecutionWatchdogPolicy;
+	readonly #watchdogs = new Map<AgentId, ExecutionWatchdog>();
 	readonly registry: AgentRegistry;
 	readonly #sessionFactories: ReadonlyMap<AgentBackend, SubagentSessionFactory>;
 	readonly #writerLeaseRegistry: WriterLeaseRegistry;
@@ -385,6 +393,7 @@ export class SubagentRuntime implements SubagentService {
 	#disposePromise: Promise<void> | undefined;
 
 	constructor(options: SubagentRuntimeOptions) {
+		this.#executionWatchdog = options.executionWatchdog;
 		const sessionFactories = new Map<AgentBackend, SubagentSessionFactory>([["rpc", options.sessionFactory]]);
 		if (options.inProcessSessionFactory) {
 			sessionFactories.set("in-process", options.inProcessSessionFactory);
@@ -504,6 +513,16 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	async spawn(input: SpawnSubagentInput): Promise<AgentInstance> {
+		if (this.#executionWatchdog) {
+			input = {
+				...input,
+				workflowDeadlineAtMs: undefined,
+				parentBudget: watchdogBudget(input.parentBudget),
+				workflowBudget: watchdogBudget(input.workflowBudget),
+				taskBudget: watchdogBudget(input.taskBudget),
+				profile: { ...input.profile, defaultBudget: watchdogBudget(input.profile.defaultBudget) },
+			};
+		}
 		await this.#resourceRecovery;
 		const profileViolations = validateAgentProfile(input.profile);
 		if (profileViolations.length > 0) {
@@ -580,7 +599,7 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const durationLimits = [
 			inheritedBudget.maxDurationMs,
-			this.#maxAgentDurationMs,
+			this.#executionWatchdog ? undefined : this.#maxAgentDurationMs,
 			remainingWorkflowDurationMs,
 		].filter((value): value is number => value !== undefined);
 		const budget =
@@ -601,7 +620,7 @@ export class SubagentRuntime implements SubagentService {
 		if (!sessionFactory) {
 			throw new SubagentRuntimeError("subagent.backend_unsupported", `Subagent backend ${backend} is unavailable`);
 		}
-		const toolNames = filterToolsByPermissions(input.profile.allowedTools, effectivePermissions);
+		const toolNames = [...filterToolsByPermissions(input.profile.allowedTools, effectivePermissions)];
 		if (!this.#workflowBudgets.has(input.workflowId)) {
 			this.#workflowBudgets.set(input.workflowId, workflowBudget);
 		}
@@ -622,6 +641,27 @@ export class SubagentRuntime implements SubagentService {
 				})
 			: undefined;
 		const modelName = modelRoute?.model ? modelRoute.record.modelName : configuredModelName;
+		const useWorkerWindows = modelRoute?.record.policy === "planner_executor" && input.profile.role === "worker";
+		if (useWorkerWindows) {
+			const contract = input.executionContract;
+			if (
+				!effectivePermissions.read ||
+				!contract ||
+				contract.workflowId !== input.workflowId ||
+				contract.taskId !== input.taskId ||
+				contract.attemptId !== input.attemptId
+			) {
+				throw new SubagentRuntimeError(
+					"subagent.invalid_execution_contract",
+					"Planner/Executor Worker requires read permission and a matching execution contract",
+				);
+			}
+			formatWorkerExecutionContext(contract);
+			// Session-memory tools do not grant repository writes, commands, or network access.
+			for (const name of ["new_context", "history", "notes"]) {
+				if (!toolNames.includes(name)) toolNames.push(name);
+			}
+		}
 		const effectiveProfile =
 			modelRoute && modelRoute.record.source === "configured" && modelRoute.record.modelName !== configuredModelName
 				? { ...input.profile, model: modelRoute.record.modelName }
@@ -713,7 +753,11 @@ export class SubagentRuntime implements SubagentService {
 			updatedAt: timestamp,
 		});
 		const session = sessionFactory.create({
+			responseTimeoutMs: this.#executionWatchdog?.inactivityMs,
 			cwd: workspace.path,
+			contextWindow: useWorkerWindows
+				? { sessionDir: join(getAgentDir(), "sessions", "workers"), executionContract: input.executionContract }
+				: undefined,
 			profile: effectiveProfile,
 			modelName,
 			toolNames,
@@ -745,7 +789,7 @@ export class SubagentRuntime implements SubagentService {
 			session.onEvent((event) => this.#handleSessionEvent(agentId, event)),
 		);
 		try {
-			const startTimeoutMs = budget.maxDurationMs ?? 300_000;
+			const startTimeoutMs = this.#executionWatchdog?.inactivityMs ?? budget.maxDurationMs ?? 300_000;
 			let startTimer: ReturnType<typeof setTimeout> | undefined;
 			const startPromise = session.start().then(() => session.getSessionId());
 			const startDeadline = new Promise<never>((_resolve, reject) => {
@@ -855,7 +899,15 @@ export class SubagentRuntime implements SubagentService {
 		this.registry.transition(agentId, "running");
 		const startedAt = this.#now();
 		this.#startNoProgressTimers(agentId);
-		const timeoutMs = agent.budget.maxDurationMs ?? 300_000;
+		if (this.#executionWatchdog) {
+			this.#watchdogs.set(
+				agentId,
+				new ExecutionWatchdog(this.#executionWatchdog, (evidence) => {
+					void this.interrupt(agentId, `Execution watchdog: ${JSON.stringify(evidence)}`).catch(() => undefined);
+				}),
+			);
+		}
+		const timeoutMs = this.#executionWatchdog ? 0 : (agent.budget.maxDurationMs ?? 300_000);
 		const idlePromise = session.waitForIdle(timeoutMs).catch((error) => {
 			const message = error instanceof Error ? error.message : String(error);
 			if (
@@ -869,6 +921,7 @@ export class SubagentRuntime implements SubagentService {
 		const promptPromise = session.prompt(message);
 		let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
 		const deadlinePromise = new Promise<void>((_resolve, reject) => {
+			if (timeoutMs === 0) return;
 			deadlineTimer = setTimeout(
 				() =>
 					reject(
@@ -1043,6 +1096,11 @@ export class SubagentRuntime implements SubagentService {
 						: "retry");
 		const retried = await this.spawn({
 			...spawnInput,
+			executionContract:
+				input.executionContract ??
+				(spawnInput.executionContract
+					? { ...spawnInput.executionContract, attemptId: input.attemptId }
+					: undefined),
 			attemptId: input.attemptId,
 			taskBudget: input.taskBudget ?? spawnInput.taskBudget,
 			modelEscalationReason,
@@ -1189,6 +1247,12 @@ export class SubagentRuntime implements SubagentService {
 			const parsedHandoff = this.#redactor.redact(
 				await this.#parseHandoffWithRepair(agentId, agent, session, text, identity, startedAt, timeoutMs),
 			);
+			if (this.#interrupting.has(agentId)) {
+				throw new SubagentRuntimeError(
+					"subagent.interrupted",
+					this.#interruptReasons.get(agentId) ?? "Agent interrupted",
+				);
+			}
 			completedUsage = {
 				...(await this.#getSessionUsage(agentId, session)),
 				durationMs: Math.max(0, this.#now() - startedAt),
@@ -1233,6 +1297,8 @@ export class SubagentRuntime implements SubagentService {
 			}
 			return await this.#failRun(agentId, error, startedAt);
 		} finally {
+			this.#watchdogs.get(agentId)?.dispose();
+			this.#watchdogs.delete(agentId);
 			this.#clearNoProgressTimers(agentId);
 			this.#runPromises.delete(agentId);
 			this.#interrupting.delete(agentId);
@@ -1306,8 +1372,8 @@ export class SubagentRuntime implements SubagentService {
 			) {
 				throw lastError;
 			}
-			const remainingMs = timeoutMs - Math.max(0, this.#now() - startedAt);
-			if (remainingMs <= 0) {
+			const remainingMs = timeoutMs === 0 ? 0 : timeoutMs - Math.max(0, this.#now() - startedAt);
+			if (timeoutMs !== 0 && remainingMs <= 0) {
 				throw lastError ?? new SubagentRuntimeError("subagent.verification_failed", verificationProblem!.message);
 			}
 			const workerHasNoChanges = agent.profile?.role === "worker" && !this.#hasImplementationProgress(agentId);
@@ -1592,6 +1658,7 @@ export class SubagentRuntime implements SubagentService {
 
 	#startNoProgressTimers(agentId: AgentId): void {
 		this.#clearNoProgressTimers(agentId);
+		if (this.#executionWatchdog) return;
 		const agent = this.#requireAgent(agentId);
 		if (agent.profile?.role !== "worker" || !agent.effectivePermissions.write) {
 			return;
@@ -1697,6 +1764,7 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	#handleSessionEvent(agentId: AgentId, value: unknown): void {
+		this.#watchdogs.get(agentId)?.observe(value);
 		if (typeof value !== "object" || value === null) {
 			return;
 		}
@@ -1803,6 +1871,7 @@ export class SubagentRuntime implements SubagentService {
 				return;
 			}
 			if (
+				!this.#executionWatchdog &&
 				agent.profile?.role === "reviewer" &&
 				usage.turns >= REVIEWER_FINALIZE_TURNS &&
 				!this.#reviewerFinalizeSteered.has(agentId)
@@ -1814,6 +1883,7 @@ export class SubagentRuntime implements SubagentService {
 				).catch(() => undefined);
 			}
 			const noImplementationProgress =
+				!this.#executionWatchdog &&
 				agent.profile?.role === "worker" &&
 				agent.effectivePermissions.write &&
 				!this.#hasImplementationProgress(agentId);
@@ -1850,6 +1920,8 @@ export class SubagentRuntime implements SubagentService {
 	}
 
 	async #cleanupAgent(agentId: AgentId): Promise<void> {
+		this.#watchdogs.get(agentId)?.dispose();
+		this.#watchdogs.delete(agentId);
 		this.#clearNoProgressTimers(agentId);
 		this.#unsubscribeEvents.get(agentId)?.();
 		this.#unsubscribeEvents.delete(agentId);

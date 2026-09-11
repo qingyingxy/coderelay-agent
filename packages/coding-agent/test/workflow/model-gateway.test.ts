@@ -62,6 +62,10 @@ describe("Model Gateway", () => {
 			tier: "strong",
 			reasonCode: "model.verification_failure_escalated_strong",
 		});
+		expect(selectModelTier({ role: "main", escalationReason: "soft_limit" })).toMatchObject({
+			tier: "strong",
+			reasonCode: "model.soft_limit_escalated_strong",
+		});
 		expect(selectModelTier({ role: "worker", escalationReason: "no_progress" })).toMatchObject({
 			tier: "strong",
 			reasonCode: "model.no_progress_escalated_strong",

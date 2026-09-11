@@ -9,6 +9,7 @@ import type {
 	VerificationResult,
 	Workflow,
 } from "../workflow/types.ts";
+import type { DeliveryBaseline } from "./baseline.ts";
 
 export interface DeliveryFileOwner {
 	readonly taskId: string;
@@ -18,6 +19,7 @@ export interface DeliveryFileOwner {
 }
 
 export interface DeliveryFileDiff {
+	readonly unavailableReason?: string;
 	readonly path: string;
 	readonly patch: string;
 	readonly owners: readonly DeliveryFileOwner[];
@@ -33,7 +35,7 @@ export interface DeliveryDiff {
 
 export interface ReviewResult {
 	readonly status: "passed" | "failed";
-	readonly failureKind?: "finding" | "infrastructure";
+	readonly failureKind?: "finding" | "infrastructure" | "confirmation";
 	readonly summary: string;
 	readonly evidenceRefs: readonly string[];
 	readonly risks: readonly string[];
@@ -46,10 +48,17 @@ export interface ReadonlyReviewer {
 		readonly workflow: Workflow;
 		readonly rootTask: Task;
 		readonly diff: DeliveryDiff;
+		readonly acceptanceRequirements?: readonly VerificationRequirement[];
+		readonly verificationEvidence?: readonly {
+			readonly result: VerificationResult;
+			readonly logExcerpt?: string;
+			readonly logsTruncated?: boolean;
+		}[];
 	}): Promise<ReviewResult>;
 }
 
 export interface DeliveryWorkflowPort {
+	readonly deliveryBaseline?: DeliveryBaseline;
 	readonly workflow: Workflow;
 	readonly deliveryFingerprint?: string;
 	readonly currentPlan: {

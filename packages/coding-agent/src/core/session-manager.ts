@@ -473,7 +473,11 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [
 			createCustomMessage(
 				CONTEXT_WINDOW_CUSTOM_MESSAGE_TYPE,
-				entry.contextSeed.content,
+				[
+					`Runtime context-window receipt: completedCuts=${entry.windowIndex}; latestBoundary=${entry.id}; reason=${entry.reason}. This cut has already completed; you are in the replacement window.`,
+					"Do not repeat a one-off cut instruction that this boundary already satisfied. Continue the unfinished implementation and verification. A later cut requires a new context need or an explicit additional request.",
+					entry.contextSeed.content,
+				].join("\n\n"),
 				false,
 				{
 					windowId: entry.windowId,

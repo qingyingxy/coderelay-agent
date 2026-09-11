@@ -32,6 +32,8 @@ import {
 	withFileMutationQueue,
 } from "./tools/index.ts";
 import type { ModelRoutingOptions } from "./workflow/model-gateway.ts";
+import { WORKFLOW_NETWORK_RETRY } from "./workflow/network-policy.ts";
+import { attachRequestDiagnostics } from "./workflow/request-diagnostics.ts";
 
 // Preserve the pre-0.81 fallback for extensions that construct Agent instances
 // or invoke low-level agent loops without supplying streamFn. Agent core remains
@@ -91,6 +93,8 @@ export interface CreateAgentSessionOptions {
 	sessionStartEvent?: SessionStartEvent;
 	/** Optional governed Subagent Runtime. Default: created lazily by AgentSession. */
 	subagentRuntime?: SubagentService;
+	/** Use one observable retry layer, with at most two transient-request retries. */
+	workflowNetworkRetry?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -185,6 +189,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	const workflowNetworkRetry =
+		options.workflowNetworkRetry ??
+		(options.modelRouting?.policy === "planner_executor" || process.env.PI_WORKFLOW_NETWORK_RETRY === "1");
+	if (workflowNetworkRetry) settingsManager.applyOverrides({ retry: WORKFLOW_NETWORK_RETRY });
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 	const modelRoutingUserOverride = options.modelRoutingUserOverride ?? options.model !== undefined;
 
@@ -346,6 +354,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return runner.emitBeforeProviderRequest(payload);
 		},
 		onResponse: async (response, _model) => {
+			if (workflowNetworkRetry)
+				sessionManager.appendCustomEntry("model_response_headers", {
+					receivedAt: Date.now(),
+					status: response.status,
+				});
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("after_provider_response")) {
 				return;
@@ -419,6 +432,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools: [...config.toolNames],
 				sessionManager: SessionManager.inMemory(config.cwd),
 				settingsManager: SettingsManager.create(config.cwd, agentDir),
+				workflowNetworkRetry,
 			});
 			return {
 				get sessionId() {
@@ -438,6 +452,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}),
 	});
 	const extensionsResult = resourceLoader.getExtensions();
+	if (workflowNetworkRetry) {
+		attachRequestDiagnostics(session);
+		sessionManager.appendCustomEntry("network_policy", {
+			retry: settingsManager.getRetrySettings(),
+			provider: settingsManager.getProviderRetrySettings(),
+			httpIdleTimeoutMs: settingsManager.getHttpIdleTimeoutMs(),
+		});
+	}
 
 	return {
 		session,

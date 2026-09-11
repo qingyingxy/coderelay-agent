@@ -242,7 +242,7 @@ describe("buildSessionContext", () => {
 			expect(context.messages[0]).toMatchObject({
 				role: "custom",
 				customType: "context-window",
-				content: "objective and state",
+				content: expect.stringContaining("objective and state"),
 				display: false,
 			});
 			expect(context.messages[1]).toMatchObject({ role: "user", content: "new request" });
@@ -259,7 +259,7 @@ describe("buildSessionContext", () => {
 
 			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["4", "5"]);
 			expect(buildSessionContext(entries).messages).toMatchObject([
-				{ role: "custom", content: "second seed" },
+				{ role: "custom", content: expect.stringContaining("second seed") },
 				{ role: "user", content: "current" },
 			]);
 		});
@@ -273,7 +273,9 @@ describe("buildSessionContext", () => {
 			];
 
 			expect(buildContextEntries(entries).map(({ id }) => id)).toEqual(["4"]);
-			expect(buildSessionContext(entries).messages).toMatchObject([{ role: "custom", content: "hard-cut seed" }]);
+			expect(buildSessionContext(entries).messages).toMatchObject([
+				{ role: "custom", content: expect.stringContaining("hard-cut seed") },
+			]);
 		});
 
 		it("does not let a later compaction retain entries before a hard cut", () => {
@@ -314,6 +316,8 @@ describe("buildSessionContext", () => {
 
 			expect(buildContextEntries(entries, "3").map(({ id }) => id)).toEqual(["2", "3"]);
 			expect(buildContextEntries(entries, "4").map(({ id }) => id)).toEqual(["1", "4"]);
+			expect(JSON.stringify(buildSessionContext(entries, "3").messages)).toContain("completedCuts=1");
+			expect(JSON.stringify(buildSessionContext(entries, "4").messages)).not.toContain("completedCuts=");
 		});
 	});
 

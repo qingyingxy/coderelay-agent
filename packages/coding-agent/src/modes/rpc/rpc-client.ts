@@ -72,6 +72,7 @@ export class RpcClient {
 	private requestId = 0;
 	private stderr = "";
 	private exitError: Error | null = null;
+	private idleRejectors = new Set<(error: Error) => void>();
 	private options: RpcClientOptions;
 
 	constructor(options: RpcClientOptions = {}) {
@@ -212,8 +213,9 @@ export class RpcClient {
 	 * Returns immediately after sending; use onEvent() to receive streaming events.
 	 * Use waitForIdle() to wait for completion.
 	 */
-	async prompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.send({ type: "prompt", message, images });
+	async prompt(message: string, images?: ImageContent[], isolatedDirectExecution?: { reason: string }): Promise<void> {
+		const response = await this.send({ type: "prompt", message, images, isolatedDirectExecution });
+		if (!response.success) throw new Error(response.error);
 	}
 
 	/**
@@ -500,21 +502,31 @@ export class RpcClient {
 	/**
 	 * Wait for agent to become idle (no streaming).
 	 * Resolves when agent_settled event is received.
+	 * Zero disables the deadline; process exit and stop still reject the wait.
 	 */
 	waitForIdle(timeout = 60000): Promise<void> {
 		return new Promise((resolve, reject) => {
-			const timer = setTimeout(() => {
+			if (this.exitError) {
+				reject(this.exitError);
+				return;
+			}
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			const finish = (error?: Error) => {
+				clearTimeout(timer);
 				unsubscribe();
-				reject(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`));
-			}, timeout);
-
+				this.idleRejectors.delete(finish);
+				if (error) reject(error);
+				else resolve();
+			};
 			const unsubscribe = this.onEvent((event) => {
-				if (event.type === "agent_settled") {
-					clearTimeout(timer);
-					unsubscribe();
-					resolve();
-				}
+				if (event.type === "agent_settled") finish();
 			});
+			this.idleRejectors.add(finish);
+			if (timeout !== 0)
+				timer = setTimeout(
+					() => finish(new Error(`Timeout waiting for agent to become idle. Stderr: ${this.stderr}`)),
+					timeout,
+				);
 		});
 	}
 
@@ -579,6 +591,8 @@ export class RpcClient {
 	}
 
 	private rejectPendingRequests(error: Error): void {
+		for (const reject of this.idleRejectors) reject(error);
+		this.idleRejectors.clear();
 		for (const pending of this.pendingRequests.values()) {
 			pending.reject(error);
 		}
