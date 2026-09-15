@@ -109,6 +109,7 @@ function deriveNextAction(
 	workflow: Workflow,
 	tasks: readonly Task[],
 	verifications: readonly VerificationResult[],
+	unchecked: readonly string[],
 ): string {
 	switch (workflow.status) {
 		case "received":
@@ -126,9 +127,9 @@ function deriveNextAction(
 		}
 		case "verifying": {
 			const pending = verifications.find(({ status }) => status !== "passed");
-			return pending
-				? `Continue workflow_verification_id=${pending.id}: ${truncateField(pending.summary)}`
-				: "Reconcile verification results and finalize the workflow.";
+			if (pending) return `Continue workflow_verification_id=${pending.id}: ${truncateField(pending.summary)}`;
+			if (unchecked.length > 0) return `Complete unchecked verification before finalizing: ${unchecked[0]}`;
+			return "Reconcile verification results and finalize the workflow.";
 		}
 		case "blocked":
 			return `Resolve the workflow block: ${truncateField(workflow.blockedReason?.message ?? "unknown reason")}`;
@@ -238,7 +239,11 @@ export function projectWorkflowSnapshot(
 			content: `Active constraints: workflowBudget=${formatBudget(workflow.budget)} assumptions=${assumptions}`,
 			required: true,
 		},
-		{ content: `Next action: ${deriveNextAction(workflow, tasks, verifications)}`, required: true },
+		{ content: `Next action: ${deriveNextAction(workflow, tasks, verifications, unchecked)}`, required: true },
+		...verifications
+			.filter(({ status }) => status !== "passed")
+			.map((verification) => ({ content: verificationLine(verification), required: false })),
+		...unchecked.map((content) => ({ content, required: false })),
 		...(directTask && directTask.description !== workflow.request.text
 			? [
 					{
@@ -247,10 +252,6 @@ export function projectWorkflowSnapshot(
 					},
 				]
 			: []),
-		...verifications
-			.filter(({ status }) => status !== "passed")
-			.map((verification) => ({ content: verificationLine(verification), required: false })),
-		...unchecked.map((content) => ({ content, required: false })),
 		{
 			content:
 				"Verification scope: changed code and runtime success do not establish test coverage. Resolve unchecked work before final submission; consult original requirements in History. In each replacement handoff, retain unresolved items unless item-specific evidence or a user scope change resolves them. Existing-suite success alone does not resolve untested requirements.",

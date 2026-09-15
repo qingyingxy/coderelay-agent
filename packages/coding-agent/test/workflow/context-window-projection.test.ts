@@ -273,6 +273,88 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.content).toContain("changed code and runtime success do not establish test coverage");
 	});
 
+	it("keeps failed and unchecked requirements ahead of a long agent-reported handoff", () => {
+		const base = createSnapshot();
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			workflow: {
+				...base.workflow,
+				rootTaskId: "task-a",
+				modeDecision: { ...base.workflow.modeDecision!, mode: "direct" },
+			},
+			tasks: [
+				{
+					...base.tasks[1],
+					description: `Existing suite passed. ${"Implementation details. ".repeat(80)}`,
+					verificationRequirements: [
+						{ id: "rollback", kind: "test", required: true, description: "Verify upsert rollback" },
+					],
+				},
+			],
+			verifications: [
+				{
+					revision: 1,
+					result: { ...base.verifications[0].result, status: "failed", summary: "Upsert savepoint lost" },
+				},
+			],
+		};
+		const projection = projectWorkflowSnapshot(snapshot, 1800);
+		expect(projection.truncated).toBe(true);
+		expect(projection.byteLength).toBeLessThanOrEqual(1800);
+		expect(projection.content).toContain("Upsert savepoint lost");
+		expect(projection.content).toContain("Not checked: workflow_task_id=task-a requirement=rollback");
+		expect(projection.content).not.toContain("Existing suite passed.");
+		const full = projectWorkflowSnapshot(snapshot);
+		expect(full.content).toContain("Existing suite passed.");
+		expect(full.truncated).toBe(false);
+	});
+
+	it.each(["plan", "task"] as const)("does not suggest finalizing with an unchecked %s requirement", (scope) => {
+		const base = createSnapshot();
+		const requirement = {
+			id: "rollback",
+			kind: "test" as const,
+			required: true,
+			description: "Verify upsert rollback",
+		};
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			workflow: { ...base.workflow, status: "verifying" },
+			plans: base.plans.map((plan) => ({
+				...plan,
+				verificationRequirements: scope === "plan" ? [requirement] : [],
+			})),
+			tasks: [{ ...base.tasks[1], verificationRequirements: scope === "task" ? [requirement] : [] }],
+			verifications: [
+				{
+					revision: 1,
+					result: { ...base.verifications[0].result, status: "passed", summary: "Existing suite passed" },
+				},
+			],
+		};
+		const projection = projectWorkflowSnapshot(snapshot);
+		expect(projection.content).toContain("Next action: Complete unchecked verification");
+		expect(projection.content).not.toContain("finalize the workflow");
+		const checked = projectWorkflowSnapshot({
+			...snapshot,
+			verifications: [
+				...snapshot.verifications,
+				{
+					revision: 1,
+					result: {
+						...base.verifications[0].result,
+						id: "rollback-result",
+						taskId: scope === "task" ? "task-a" : undefined,
+						requirementId: requirement.id,
+						status: "passed",
+						summary: "Targeted rollback test passed",
+					},
+				},
+			],
+		});
+		expect(checked.content).toContain("Next action: Reconcile verification results and finalize the workflow.");
+	});
+
 	it("does not suggest finalizing a verifying workflow with failed checks", () => {
 		const base = createSnapshot();
 		const projection = projectWorkflowSnapshot({
