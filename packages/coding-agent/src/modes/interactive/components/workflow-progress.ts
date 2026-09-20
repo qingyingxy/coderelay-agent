@@ -1,7 +1,8 @@
-import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { formatWorkflowCost } from "../../../core/workflow/cost.ts";
 import type { WorkflowView } from "../../../core/workflow/view.ts";
 import { theme } from "../theme/theme.ts";
+import { agentRoleLabel } from "./workflow-presentation.ts";
 
 const ACTIVE_WORKFLOW_STATUSES = new Set([
 	"received",
@@ -59,7 +60,7 @@ function taskExecutor(view: WorkflowView, taskId: string): string | undefined {
 }
 
 export function formatWorkflowProgress(view: WorkflowView | undefined, expanded = false): readonly string[] {
-	if (!view || !ACTIVE_WORKFLOW_STATUSES.has(view.workflow.status)) {
+	if (!view) {
 		return [];
 	}
 
@@ -67,7 +68,53 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 	const succeeded = tasks.filter(({ status }) => status === "succeeded" || status === "skipped").length;
 	const runningTasks = tasks.filter(({ status }) => status === "running" || status === "verifying");
 	const failed = tasks.filter(({ status }) => status === "failed" || status === "cancelled").length;
-	const statusParts = [`Workflow: ${label(view.workflow.status)}`, `Tasks ${succeeded}/${tasks.length}`];
+	if (view.plan && !expanded) {
+		const stages: Record<string, string> = {
+			planning: "正在规划",
+			awaiting_approval: "等待批准",
+			executing: "正在执行",
+			verifying: "正在检查交付",
+			completed: "工作流已完成",
+			failed: "工作流失败",
+			cancelled: "已取消",
+			cancelling: "正在取消",
+			blocked: "受阻",
+		};
+		if (
+			view.workflow.status === "executing" &&
+			tasks.length > 0 &&
+			tasks.every((task) => task.status === "succeeded")
+		) {
+			stages.executing = "执行已完成";
+		}
+		const lines = [
+			`Workflow: ${stages[view.workflow.status] ?? label(view.workflow.status)} · 任务 ${succeeded}/${tasks.length}${view.cost ? ` · ~$${view.cost.totalEstimatedUsd.toFixed(6)}` : ""}${failed ? ` · 失败 ${failed}` : ""}`,
+		];
+		if (!ACTIVE_WORKFLOW_STATUSES.has(view.workflow.status)) return lines;
+		if (view.workflow.status === "awaiting_approval")
+			return [...lines, "规划代理：已提交计划，等待批准", "操作：/approve 批准 · /replan 调整 · /reject 拒绝"];
+		if (view.workflow.status === "blocked")
+			return [...lines, `受阻：${sanitize(view.workflow.blockedReason?.message ?? "等待依赖或输入")}`];
+		if (view.workflow.status === "cancelling") return [...lines, "正在停止代理和后台命令"];
+		const current = runningTasks[0] ?? tasks.find((task) => task.status === "ready");
+		if (current) {
+			const agent = view.agents.find(
+				(entry) => entry.taskId === current.id && ["starting", "running", "waiting", "idle"].includes(entry.status),
+			);
+			const role = agent ? agentRoleLabel(agent) : current.kind === "command" ? "命令任务" : "执行任务";
+			lines.push(
+				`${role}：${sanitize(current.title)}${agent?.modelRoute ? ` · ${agent.modelRoute.modelName}` : ""}`,
+			);
+			lines.push(`规划代理：计划已交接 · ${runningTasks.length} 项正在执行`);
+		} else if (tasks.length && succeeded === tasks.length) {
+			lines.push("执行结果已返回 · 交付详情：/workflow");
+		} else lines.push(`规划代理：${sanitize(view.plan.goal)}`);
+		return lines;
+	}
+	const statusParts = [
+		`Workflow: ${label(view.workflow.status)}`,
+		tasks.length ? `Tasks ${succeeded}/${tasks.length}` : "Tasks pending",
+	];
 	if (view.cost) {
 		statusParts.push(`~$${view.cost.totalEstimatedUsd.toFixed(6)}${view.cost.hostAttributed ? "" : " (partial)"}`);
 	}
@@ -76,11 +123,14 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 	}
 
 	const lines = [statusParts.join(" · ")];
+	if (!ACTIVE_WORKFLOW_STATUSES.has(view.workflow.status) && !expanded) return lines;
 	const runningAgents = view.agents.filter(({ status }) => status === "running" || status === "waiting");
 	const queuedAgents = view.agents.filter(
 		({ handoffId, status }) => !handoffId && (status === "starting" || status === "idle"),
 	);
-	lines.push(`Agents: ${runningAgents.length} running · ${queuedAgents.length} queued`);
+	if (expanded || runningAgents.length > 0 || queuedAgents.length > 0) {
+		lines.push(`Agents: ${runningAgents.length} running · ${queuedAgents.length} queued`);
+	}
 	const currentTask =
 		runningTasks[0] ??
 		tasks.find(({ kind, status }) => kind === "repair" && status === "ready") ??
@@ -123,6 +173,7 @@ export function formatWorkflowProgress(view: WorkflowView | undefined, expanded 
 	}
 
 	if (expanded) {
+		if (view.statusLine) lines.push(view.statusLine);
 		if (view.cost) lines.push(formatWorkflowCost(view.cost));
 		const activeAgents = view.agents.filter(
 			({ handoffId, status }) =>
@@ -188,9 +239,26 @@ export class WorkflowProgressComponent implements Component {
 		if (width <= 0) {
 			return [];
 		}
-		return formatWorkflowProgress(this.getWorkflowView(), this.expanded).map((line, index) => {
-			const text = index === 0 ? theme.fg("accent", line) : theme.fg("muted", line);
-			return truncateToWidth(text, width, theme.fg("muted", "..."));
+		const view = this.getWorkflowView();
+		return formatWorkflowProgress(view, this.expanded).flatMap((line, index) => {
+			if (index === 0) {
+				const [status, progress, ...details] = line.split(" · ");
+				const mode = view?.workflow.modeDecision?.mode;
+				const left = [
+					view?.plan && !this.expanded ? "规划协作" : mode ? label(mode) : "Workflow",
+					status.replace("Workflow: ", ""),
+					...details,
+				].join(" · ");
+				// Keep task counts visible even when the stage and cost need their own line.
+				if (visibleWidth(left) + visibleWidth(progress) + 2 > width) {
+					return [left, progress].map((part) => theme.fg("accent", truncateToWidth(part, width, "...")));
+				}
+				return [
+					theme.fg("accent", left + " ".repeat(width - visibleWidth(left) - visibleWidth(progress)) + progress),
+				];
+			}
+			const text = theme.fg("muted", line);
+			return [truncateToWidth(text, width, theme.fg("muted", "..."))];
 		});
 	}
 }

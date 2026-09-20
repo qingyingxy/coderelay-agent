@@ -1,6 +1,6 @@
-# Contributing to Pi Windows Agent
+# Contributing to CodeRelay Agent
 
-Pi Windows Agent is a personal, Windows-focused experimental fork of
+CodeRelay Agent is a personal, Windows-focused experimental fork of
 [earendil-works/pi](https://github.com/earendil-works/pi). Contributions are
 welcome when they are focused on the fork's workflow orchestration, subagent and
 job runtimes, delivery verification, recovery, model routing, or Windows

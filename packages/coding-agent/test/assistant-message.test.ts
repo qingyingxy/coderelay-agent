@@ -33,6 +33,26 @@ function createAssistantMessage(
 }
 
 describe("AssistantMessageComponent", () => {
+	test("keeps plan draft JSON expandable and does not call a truncated response a complete plan", () => {
+		initTheme("dark");
+		const raw = JSON.stringify({
+			goal: "修复端口",
+			assumptions: [],
+			risks: [],
+			steps: [],
+			verificationRequirements: [],
+		});
+		const message = createAssistantMessage([{ type: "text", text: raw }]);
+		const component = new AssistantMessageComponent(message);
+		expect(stripAnsi(component.render(100).join("\n"))).toContain("计划草案");
+		component.setExpanded(true);
+		expect(stripAnsi(component.render(100).join("\n"))).toContain('"verificationRequirements"');
+		component.setExpanded(false);
+		component.updateContent({ ...message, stopReason: "length" });
+		const truncated = stripAnsi(component.render(100).join("\n"));
+		expect(truncated).not.toContain("计划草案");
+		expect(truncated).toContain("maximum output token limit");
+	});
 	test("adds OSC 133 zone markers to assistant messages without tool calls", () => {
 		initTheme("dark");
 

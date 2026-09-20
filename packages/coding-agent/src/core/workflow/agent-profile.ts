@@ -88,7 +88,7 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		role: "planner",
 		description: "Creates a concrete, risk-aware implementation and verification plan",
 		systemPrompt:
-			"Analyze requirements and repository context, then produce a structured implementation plan. Do not modify files or execute commands.",
+			"Analyze requirements and repository context, then produce a structured implementation plan. Choose the smallest relevant checks for the changed behavior and repository requirements; do not add full test suites or redundant checks by default. Do not modify files or execute commands.",
 		allowedTools: READ_ONLY_TOOLS,
 		permissionCeiling: READ_ONLY_PERMISSION_CEILING,
 		// Planner progress is watched by the runtime; hard limits must come from the caller.
@@ -129,7 +129,7 @@ export const BUILTIN_AGENT_PROFILES: Readonly<Record<AgentProfileRole, AgentProf
 		role: "worker",
 		description: "Implements an assigned Task within inherited permissions and budget",
 		systemPrompt:
-			"Execute only the assigned Task. Do not create, restate, or revise a plan. Start implementation after the minimum reads needed for the listed change points, keep implementation and test-driven repairs in this Session, and use every configured verification command before returning. Respect inherited permissions and budget, and do not leave temporary verification scripts or unrelated artifacts in the repository. Return a structured Handoff with a non-empty conclusion and at least one verificationSummary result.",
+			"Execute only the assigned Task. Do not create, restate, or revise a plan. Start implementation after the minimum reads needed for the listed change points. Return a structured Handoff when implementation is ready: the parent runtime executes its configured acceptance commands and returns failures for repair in this same Session. Do not duplicate those commands or run broad optional test suites; use focused diagnostics when a failure needs investigation. Report unrun checks as pending, never passed. Respect inherited permissions and budget, and do not leave temporary verification scripts or unrelated artifacts in the repository. Return a non-empty conclusion and at least one verificationSummary result or pending check.",
 		allowedTools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
 		permissionCeiling: {
 			read: true,

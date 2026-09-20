@@ -4,6 +4,8 @@ import { Box, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@ear
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { keyText } from "./keybinding-hints.ts";
+import { workflowCommandSummary } from "./workflow-presentation.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -89,7 +91,10 @@ export class CustomMessageComponent extends Container {
 		this.box.clear();
 
 		// Default rendering: label + content
-		const label = theme.fg("customMessageLabel", `\x1b[1m[${this.message.customType}]\x1b[22m`);
+		const label = theme.fg(
+			"customMessageLabel",
+			`\x1b[1m[${this.message.customType === "workflow" ? "工作流" : this.message.customType}]\x1b[22m`,
+		);
 		this.box.addChild(new Text(label, 0, 0));
 		this.box.addChild(new Spacer(1));
 
@@ -104,6 +109,13 @@ export class CustomMessageComponent extends Container {
 				.join("\n");
 		}
 
+		const summary =
+			this.message.customType === "workflow" ? workflowCommandSummary(this.message.details, text) : undefined;
+		if (summary && !this._expanded) {
+			this.box.addChild(new Text(summary, 0, 0));
+			this.box.addChild(new Text(theme.fg("dim", `${keyText("app.tools.expand")} 展开原始详情`), 0, 0));
+			return;
+		}
 		this.box.addChild(
 			new Markdown(text, 0, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),

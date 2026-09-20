@@ -1,3 +1,5 @@
+import { MAX_HANDOFF_BYTES } from "./context-handoff.ts";
+import { HANDOFF_ARCHIVE_PREFIX } from "./handoff-archive.ts";
 import type { WorkflowSnapshot } from "./stores.ts";
 import type { Attempt, BudgetLimit, Plan, Task, VerificationResult, Workflow } from "./types.ts";
 
@@ -247,8 +249,8 @@ export function projectWorkflowSnapshot(
 		...(directTask && directTask.description !== workflow.request.text
 			? [
 					{
-						content: `Current task brief (agent-reported, not verification evidence): ${truncateField(directTask.description, 2000)}`,
-						required: false,
+						content: `Current task brief (agent-reported, not verification evidence): ${truncateField(directTask.description, MAX_HANDOFF_BYTES)}`,
+						required: directTask.description.startsWith(HANDOFF_ARCHIVE_PREFIX),
 					},
 				]
 			: []),

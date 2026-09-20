@@ -1,6 +1,8 @@
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { keyText } from "./keybinding-hints.ts";
+import { plannerDraftSummary } from "./workflow-presentation.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -17,6 +19,7 @@ export class AssistantMessageComponent extends Container {
 	private outputPad: number;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
+	private expanded = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -69,6 +72,11 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		if (this.lastMessage) this.updateContent(this.lastMessage);
+	}
+
 	override render(width: number): string[] {
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
@@ -98,6 +106,15 @@ export class AssistantMessageComponent extends Container {
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
 			if (content.type === "text" && content.text.trim()) {
+				const summary =
+					!this.expanded && message.stopReason === "stop" ? plannerDraftSummary(content.text) : undefined;
+				if (summary) {
+					this.contentContainer.addChild(new Text(summary, this.outputPad, 0));
+					this.contentContainer.addChild(
+						new Text(theme.fg("dim", `${keyText("app.tools.expand")} 展开计划原文`), this.outputPad, 0),
+					);
+					continue;
+				}
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.contentContainer.addChild(new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme));

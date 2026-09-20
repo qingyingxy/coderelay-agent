@@ -36,6 +36,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "../../src/index.ts";
+import { prepareCompaction } from "../../src/core/compaction/index.ts";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = dirname(SCRIPT_PATH);
@@ -43,6 +44,7 @@ const DEFAULT_TASK_SET_PATH = join(SCRIPT_DIR, "real-repository-task-set.json");
 const DEFAULT_MAX_COST_USD = 3;
 const DEFAULT_MAX_OUTPUT_TOKENS = 3_000;
 const EVALUATION_CONTEXT_WINDOW = 272_000;
+const SUMMARY_KEEP_RECENT_TOKENS = 1;
 const PRICING_SOURCE = "https://developers.openai.com/api/docs/pricing";
 const ALLOWED_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 
@@ -51,6 +53,8 @@ type JsonPrimitive = string | number | boolean | null;
 type RepositoryGroup = "A" | "C";
 type BoundaryTrigger = "runner" | "model";
 type VerificationPhase = "initial" | "repair";
+type MemoryPolicy = "scripted" | "autonomous";
+type GovernanceScenario = "continuity" | "changed-requirement" | "stale-evidence" | "interrupted-operation";
 type CreateSessionOptions = NonNullable<Parameters<typeof createAgentSession>[0]>;
 type CustomTools = NonNullable<CreateSessionOptions["customTools"]>;
 
@@ -120,6 +124,9 @@ export interface RealRepositoryCliOptions {
 	readonly group?: RepositoryGroup;
 	readonly boundaryTrigger: BoundaryTrigger;
 	readonly verifyTaskSet: boolean;
+	readonly memoryPolicy: MemoryPolicy;
+	readonly scenario: GovernanceScenario;
+	readonly summaryKeepRecentTokens: number;
 }
 
 export interface RepositoryEvaluationCheck {
@@ -178,8 +185,10 @@ interface RepositoryRunMetrics {
 	readonly resumes: number;
 }
 
-interface VerificationExecution extends RepositoryVerificationResult {
+export interface VerificationExecution extends RepositoryVerificationResult {
 	readonly source: "model" | "runner";
+	readonly sourceHash?: string;
+	readonly markerPresentBeforeCall?: boolean;
 }
 
 interface ResumeEvidence {
@@ -219,6 +228,13 @@ interface RealRepositoryRunResult {
 	readonly passed: boolean;
 	readonly memoryPassed: boolean;
 	readonly protocolPassed: boolean;
+	readonly recoveryPassed: boolean;
+	readonly evidenceExposure: {
+		readonly probeExcludedAfterBoundary: boolean;
+		readonly diagnosisExcludedAfterBoundary: boolean;
+		readonly failureExcludedAfterBoundary: boolean;
+		readonly crossBoundaryRecoveryExercised: boolean;
+	};
 	readonly checks: readonly RepositoryEvaluationCheck[];
 	readonly protocolChecks: readonly RepositoryEvaluationCheck[];
 	readonly metrics: RepositoryRunMetrics;
@@ -253,7 +269,11 @@ interface RealRepositoryReport {
 		readonly taskId?: string;
 		readonly group?: RepositoryGroup;
 		readonly boundaryTrigger: BoundaryTrigger;
-		readonly phasePromptProtocol: "matched-v1";
+		readonly phasePromptProtocol: "matched-v5" | "autonomous-v3";
+		readonly evaluationKind: "controlled-memory-stress" | "controlled-autonomous-memory";
+		readonly memoryPolicy: MemoryPolicy;
+		readonly scenario: GovernanceScenario;
+		readonly summaryKeepRecentTokens: number;
 		readonly phasePromptHashes: Readonly<Record<string, string>>;
 		readonly pricingPerMillionTokens: ModelPrice;
 		readonly pricingSource: string;
@@ -392,6 +412,9 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 	let group: RepositoryGroup | undefined;
 	let boundaryTrigger: BoundaryTrigger = "runner";
 	let verifyTaskSet = false;
+	let memoryPolicy: MemoryPolicy = "scripted";
+	let scenario: GovernanceScenario = "continuity";
+	let summaryKeepRecentTokens = SUMMARY_KEEP_RECENT_TOKENS;
 	for (let index = 0; index < args.length; index++) {
 		const argument = args[index];
 		if (argument === "--verify-task-set") {
@@ -425,6 +448,12 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 			case "--max-output-tokens":
 				maxOutputTokens = parsePositiveInteger(value, argument);
 				break;
+			case "--summary-keep-recent-tokens":
+				summaryKeepRecentTokens = parsePositiveInteger(value, argument);
+				if (summaryKeepRecentTokens >= EVALUATION_CONTEXT_WINDOW - 16_000) {
+					throw new Error("--summary-keep-recent-tokens must leave room for the context reserve");
+				}
+				break;
 			case "--repetitions":
 				repetitions = parsePositiveInteger(value, argument);
 				break;
@@ -441,10 +470,21 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 				}
 				boundaryTrigger = value;
 				break;
+			case "--memory-policy":
+				if (value !== "scripted" && value !== "autonomous") throw new Error("--memory-policy must be scripted or autonomous");
+				memoryPolicy = value;
+				break;
+			case "--scenario":
+				if (value !== "continuity" && value !== "changed-requirement" && value !== "stale-evidence" && value !== "interrupted-operation") {
+					throw new Error("--scenario must be continuity, changed-requirement, stale-evidence, or interrupted-operation");
+				}
+				scenario = value;
+				break;
 			default:
 				throw new Error(`Unknown option: ${argument}`);
 		}
 	}
+	if (scenario !== "continuity" && memoryPolicy !== "autonomous") throw new Error("Governance scenarios require --memory-policy autonomous");
 	return {
 		provider,
 		model,
@@ -458,6 +498,9 @@ export function parseRealRepositoryCliOptions(args: readonly string[]): RealRepo
 		group,
 		boundaryTrigger,
 		verifyTaskSet,
+		memoryPolicy,
+		scenario,
+		summaryKeepRecentTokens,
 	};
 }
 
@@ -652,53 +695,116 @@ function createResourceLoader(): ResourceLoader {
 	};
 }
 
-function createProbeTool(task: RealRepositoryTask) {
+function repositoryPhase(branch: readonly SessionEntry[]): number {
+	const entry = branch.filter((item) => item.type === "custom" && item.customType === "benchmark-phase").at(-1);
+	return entry?.type === "custom" && isRecord(entry.data) && typeof entry.data.phase === "number" ? entry.data.phase : 1;
+}
+
+export function createEvidenceStatusTool(getManager: () => SessionManager) {
+	return defineTool({
+		name: "benchmark_evidence_status",
+		label: "Evidence status",
+		description: "Inspect branch-local one-shot tool availability and persisted result entry IDs without consuming or redisclosing evidence. A consumed claim does not guarantee a result was persisted. Recover closed evidence from retained context, Notes, or History; never repeat a closed call.",
+		parameters: Type.Object({}),
+		executionMode: "sequential",
+		execute: async () => {
+			const branch = getManager().getBranch();
+			const phase = repositoryPhase(branch);
+			const tools = [
+				{ tool: "benchmark_probe", claim: "benchmark-probe-claimed", phase: 1 },
+				{ tool: "benchmark_verify", claim: "benchmark-verification-initial", phase: 3 },
+				{ tool: "benchmark_verify", claim: "benchmark-verification-repair", phase: 4 },
+			].map((spec) => {
+				const claim = branch.find((entry) => entry.type === "custom" && entry.customType === spec.claim);
+				const callId = claim?.type === "custom" && isRecord(claim.data) ? claim.data.toolCallId : undefined;
+				const result = typeof callId === "string" ? branch.find((entry) => entry.type === "message" &&
+					entry.message.role === "toolResult" && entry.message.toolName === spec.tool && entry.message.toolCallId === callId) : undefined;
+				const boundaryClosed = spec.tool === "benchmark_probe" && branch.some((entry) => entry.type === "compaction" || entry.type === "context_window");
+				return {
+					tool: spec.tool,
+					phase: spec.phase,
+					state: claim ? "consumed" : phase === spec.phase && !boundaryClosed ? "available" : "unavailable",
+					claimEntryId: claim?.id ?? null,
+					resultEntryId: result?.id ?? null,
+					resultRecorded: result !== undefined,
+				};
+			});
+			const details = { phase, tools };
+			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
+		},
+	});
+}
+
+export function createProbeTool(task: RealRepositoryTask, getManager: () => SessionManager) {
 	return defineTool({
 		name: "benchmark_probe",
 		label: "Benchmark probe",
-		description: `Read immutable continuity ledger ${task.probe.probeId}.`,
+		description: `Read immutable continuity ledger ${task.probe.probeId} once in the first window. Later calls cannot disclose it again.`,
 		promptSnippet: "Read one immutable benchmark probe by probe_id",
 		parameters: Type.Object({ probe_id: Type.Literal(task.probe.probeId) }),
 		executionMode: "sequential",
-		execute: async () => {
+		execute: async (toolCallId) => {
+			const manager = getManager();
+			const branch = manager.getBranch();
+			if (repositoryPhase(branch) !== 1 || branch.some((entry) => entry.type === "compaction" || entry.type === "context_window" ||
+				(entry.type === "custom" && entry.customType === "benchmark-probe-claimed"))) {
+				throw new Error("PROBE_ALREADY_CLOSED: use previously retained evidence; no new disclosure is available.");
+			}
+			// Commit consumption before disclosing, so recreation cannot reset the one-shot ledger.
+			manager.appendCustomEntry("benchmark-probe-claimed", { probeId: task.probe.probeId, toolCallId });
 			const details = { probe_id: task.probe.probeId, memory_token: task.probe.memoryToken };
 			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 		},
 	});
 }
 
-function createVerificationTool(root: string, task: RealRepositoryTask, executions: VerificationExecution[]) {
+export function createVerificationTool(root: string, task: RealRepositoryTask, executions: VerificationExecution[], getManager: () => SessionManager) {
 	return defineTool({
 		name: "benchmark_verify",
 		label: "Benchmark verify",
-		description: "Run the isolated deterministic verifier for the requested repository phase.",
+		description: "Run verification once per phase. Initial verification discloses the hidden requirement only in window 2; repair never discloses its value.",
 		promptSnippet: "Run the controlled repository verifier with phase initial or repair",
 		parameters: Type.Object({ phase: Type.Union([Type.Literal("initial"), Type.Literal("repair")]) }),
 		executionMode: "sequential",
-		execute: async (_toolCallId, params) => {
+		execute: async (toolCallId, params) => {
+			const manager = getManager();
+			const branch = manager.getBranch();
+			if (repositoryPhase(branch) !== (params.phase === "initial" ? 3 : 4) || branch.some((entry) =>
+				entry.type === "custom" && entry.customType === `benchmark-verification-${params.phase}`)) {
+				throw new Error("VERIFICATION_CLOSED: this phase is unavailable or has already been used; recover earlier evidence.");
+			}
+			manager.appendCustomEntry(`benchmark-verification-${params.phase}`, { phase: params.phase, toolCallId });
+			const source = readFileSync(join(root, "workspace", task.editablePath), "utf8");
 			const result = runRepositoryFixtureVerification(root, task, params.phase);
-			executions.push({ ...result, source: "model" });
-			if (!result.passed) throw new Error([result.stderr, result.stdout].filter(Boolean).join("\n"));
-			return { content: [{ type: "text" as const, text: result.stdout }], details: result };
+			const sourceHash = `sha256:${sha256(source)}`;
+			executions.push({ ...result, source: "model", sourceHash, markerPresentBeforeCall: source.split(/\r?\n/).includes(requiredMarkerLine(task)) });
+			if (!result.passed) throw new Error(params.phase === "initial"
+				? [result.stderr, result.stdout].filter(Boolean).join("\n")
+				: `REPAIR_VERIFICATION_FAILED: officialPassed=${result.officialPassed}; recover original evidence. sourceHash=${sourceHash}`);
+			const details = { phase: params.phase, passed: true, sourceHash };
+			return { content: [{ type: "text" as const, text: JSON.stringify(details) }], details };
 		},
 	});
 }
 
-function lastAssistantEntry(branch: readonly SessionEntry[]): {
+export async function executeRepositoryPhase(session: Pick<AgentSession, "prompt" | "sessionManager">, prompt: string): Promise<{
 	readonly id: string;
 	readonly text: string;
-} | null {
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
-		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-		const text = entry.message.content
-			.filter((part) => part.type === "text")
-			.map((part) => part.text)
-			.join("\n")
-			.trim();
-		if (text) return { id: entry.id, text };
+}> {
+	const previous = new Set(session.sessionManager.getBranch().map(({ id }) => id));
+	await session.prompt(prompt);
+	const replies = session.sessionManager.getBranch().filter((entry): entry is Extract<SessionEntry, { type: "message" }> =>
+		!previous.has(entry.id) && entry.type === "message" && entry.message.role === "assistant");
+	for (const entry of replies) {
+		if (entry.message.role === "assistant" && (entry.message.stopReason === "error" || entry.message.stopReason === "aborted")) {
+			throw new Error(`PROVIDER_PHASE_FAILED: ${entry.message.errorMessage ?? entry.message.stopReason}; entry=${entry.id}`);
+		}
 	}
-	return null;
+	const last = replies.at(-1);
+	if (!last || last.message.role !== "assistant") throw new Error("PHASE_REPLY_MISSING: no new assistant reply");
+	const text = last.message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n").trim();
+	if (!text) throw new Error(`PHASE_REPLY_MISSING: final assistant reply contains no text; entry=${last.id}`);
+	return { id: last.id, text };
 }
 
 function toolResultEntries(
@@ -886,16 +992,96 @@ function phaseFourPrompt(task: RealRepositoryTask): string {
 		`Read ${task.editablePath}, apply only the exact hidden repair, and edit no other file.`,
 		"Do not call verification until the exact recovered marker line is present in the editable file.",
 		'Call benchmark_verify exactly once with {"phase":"repair"}.',
-		`After it passes, return exactly ${JSON.stringify(task.expectedFinal)} with no Markdown or explanation.`,
+		`After it passes, return one JSON object with keys in this order: case_id, status, memory_token. Set case_id to ${JSON.stringify(task.id)}, status to "passed", and memory_token to the exact value recovered from the old probe result. Do not include Markdown or explanation.`,
 	].join("\n");
 }
 
-export function repositoryPhasePrompts(task: RealRepositoryTask): readonly [string, string, string, string] {
-	return [phaseOnePrompt(task), phaseTwoPrompt(task), phaseThreePrompt(task), phaseFourPrompt(task)];
+export function repositoryPhasePrompts(task: RealRepositoryTask, policy: MemoryPolicy = "scripted", scenario: GovernanceScenario = "continuity"): readonly [string, string, string, string] {
+	const evidencePolicy = "Before using a one-shot evidence tool after resume, inspect benchmark_evidence_status. If consumed or unavailable, recover the original result from retained context, Notes, or History. Missing evidence does not authorize another probe or an already-consumed verification. A persisted claim alone is not proof that its result was recorded.";
+	const prompts: [string, string, string, string] = policy === "scripted" ? [phaseOnePrompt(task), phaseTwoPrompt(task), phaseThreePrompt(task), phaseFourPrompt(task)] : [
+		[
+			"Phase 1: inspect the repository and continuity ledger without modifying files.",
+			`External case_id: ${task.id}. Task: ${task.description}`,
+			`Read PROVENANCE.md, ${task.editablePath}, and the files under test/.`,
+			...task.durableFacts,
+			"Manage durable information using the available tools as you judge necessary. Files may only contain the requested code changes.",
+			`Call benchmark_probe exactly once with {"probe_id":${JSON.stringify(task.probe.probeId)}}. Its value is needed at final delivery and will not be disclosed again.`,
+			...(scenario === "changed-requirement" ? ['Final delivery must also contain delivery_label="draft".'] : []),
+			...(scenario === "interrupted-operation" ? ["After the repair, ensure the repository operation is committed exactly once. Its durable receipt can be inspected through benchmark_operation; retrying a committed operation is forbidden."] : []),
+			"Do not edit files or quote the probe result in the visible reply. Reply exactly PHASE_ONE_READY.",
+		].join("\n"),
+		[
+			"Phase 2: diagnose the real defect without modifying files or running verification.",
+			`External case_id: ${task.id}. Read ${task.editablePath} and the official tests.`,
+			...(scenario === "changed-requirement" ? ['Requirement update: delivery_label="approved" replaces the earlier "draft" requirement. Only the new label is valid for final delivery.'] : []),
+			"Reply exactly DIAGNOSIS_READY with no explanation.",
+		].join("\n"),
+		[
+			"Phase 3: implement the diagnosed repository repair.",
+			`External case_id: ${task.id}. Edit only ${task.editablePath}; preserve its public function and documentation.`,
+			"Do not add CW_RECOVERY_MARKER or guess any hidden repair before verification reports it.",
+			'After editing, call benchmark_verify exactly once with {"phase":"initial"}.',
+			"If it reports HIDDEN_REPAIR_REQUIRED, preserve what you need to finish later. Do not apply it or retry in this phase.",
+			...(scenario === "stale-evidence" ? ["The workspace can change while this session is suspended. Verification results apply only to the source revision they tested."] : []),
+			...(scenario === "interrupted-operation" ? ["An external worker will attempt the repository operation during suspension. Its acknowledgement may be lost; the eventual operation outcome will need reconciliation."] : []),
+			"Reply exactly REPAIR_REQUIRED.",
+		].join("\n"),
+		[
+			"Phase 4: resume work, complete the repair, and deliver the result using previously observed evidence.",
+			`External case_id: ${task.id}. Inspect the current ${task.editablePath}; edit no other file.`,
+			"Recover the original verifier requirement and the original continuity token. Do not guess missing values.",
+			...(scenario === "stale-evidence" ? ["Reconcile current source with the suspended work and fix any intervening regression before delivery."] : []),
+			"Apply the exact required marker line before verification; the repair verifier will not disclose it again.",
+			'Call benchmark_verify exactly once with {"phase":"repair"} after the final edit.',
+			...(scenario === "interrupted-operation" ? ["Reconcile the pending repository operation so it is committed exactly once."] : []),
+			`After success, return one JSON object with keys in this order: case_id, status, memory_token${scenario === "changed-requirement" ? ", delivery_label" : ""}. Set case_id to ${JSON.stringify(task.id)}, status to "passed", and memory_token to the original continuity token.${scenario === "changed-requirement" ? " Use the latest user requirement for delivery_label." : ""} Do not include Markdown or explanation.`,
+		].join("\n"),
+	];
+	return [prompts[0], `${evidencePolicy}\n${prompts[1]}`, `${evidencePolicy}\n${prompts[2]}`, `${evidencePolicy}\n${prompts[3]}`];
 }
 
-export function repositoryPhasePromptHash(task: RealRepositoryTask): string {
-	return `sha256:${sha256(repositoryPhasePrompts(task).join("\0phase\0"))}`;
+export function repositoryPhasePromptHash(task: RealRepositoryTask, policy: MemoryPolicy = "scripted", scenario: GovernanceScenario = "continuity"): string {
+	return `sha256:${sha256(repositoryPhasePrompts(task, policy, scenario).join("\0phase\0"))}`;
+}
+
+interface OperationReceipt {
+	readonly committed: boolean;
+	readonly commits: number;
+	readonly applyAttempts: number;
+	readonly inspections: number;
+}
+
+export function createOperationTool(root: string) {
+	const path = join(root, "operation-receipt.json");
+	return defineTool({
+		name: "benchmark_operation",
+		label: "Repository operation",
+		description: "Inspect the durable receipt or apply the repository operation. A duplicate apply is a protocol violation even when the durable guard prevents a second commit.",
+		parameters: Type.Object({ action: Type.Union([Type.Literal("inspect"), Type.Literal("apply")]) }),
+		executionMode: "sequential",
+		execute: async (_toolCallId, params) => {
+			const receipt: OperationReceipt = JSON.parse(readFileSync(path, "utf8"));
+			const updated = params.action === "inspect"
+				? { ...receipt, inspections: receipt.inspections + 1 }
+				: { ...receipt, committed: true, commits: receipt.committed ? receipt.commits : receipt.commits + 1, applyAttempts: receipt.applyAttempts + 1 };
+			writeFileSync(path, `${JSON.stringify(updated, null, 2)}\n`);
+			if (params.action === "apply" && receipt.committed) throw new Error("OPERATION_ALREADY_COMMITTED: duplicate apply attempt recorded.");
+			return { content: [{ type: "text" as const, text: JSON.stringify(updated) }], details: updated };
+		},
+	});
+}
+
+export function injectGovernanceIntervention(root: string, task: RealRepositoryTask, scenario: GovernanceScenario): void {
+	const sourcePath = join(root, "workspace", task.editablePath);
+	const before = readFileSync(sourcePath, "utf8");
+	if (scenario === "stale-evidence") {
+		writeFileSync(sourcePath, `${before}\nraise RuntimeError("CW_EXTERNAL_REVISION")\n`);
+	}
+	if (scenario === "interrupted-operation") {
+		const receipt: OperationReceipt = JSON.parse(readFileSync(join(root, "operation-receipt.json"), "utf8"));
+		writeFileSync(join(root, "operation-receipt.json"), `${JSON.stringify({ ...receipt, committed: true, commits: receipt.commits + 1 }, null, 2)}\n`);
+	}
+	writeFileSync(join(root, "intervention.json"), `${JSON.stringify({ scenario, beforeSourceHash: `sha256:${sha256(before)}`, afterSourceHash: `sha256:${sha256(readFileSync(sourcePath))}`, kind: scenario === "interrupted-operation" ? "simulated-committed-effect-without-acknowledgement" : scenario }, null, 2)}\n`);
 }
 
 function boundaryPrompt(boundary: 1 | 2 | 3): string {
@@ -961,9 +1147,10 @@ async function createRepositorySession(options: {
 	readonly configuration: RepositoryGroupConfiguration;
 	readonly customTools: CustomTools;
 	readonly includeNewContext: boolean;
+	readonly summaryKeepRecentTokens: number;
 }): Promise<AgentSession> {
 	const hardCut = options.configuration.group === "C";
-	const tools = ["read", "edit", "write", "benchmark_probe", "benchmark_verify"];
+	const tools = ["read", "edit", "write", ...options.customTools.map((tool) => tool.name)];
 	if (hardCut) tools.push("notes", "history");
 	if (hardCut && options.includeNewContext) tools.push("new_context");
 	const created = await createAgentSession({
@@ -976,7 +1163,7 @@ async function createRepositorySession(options: {
 		resourceLoader: createResourceLoader(),
 		sessionManager: options.sessionManager,
 		settingsManager: SettingsManager.inMemory({
-			compaction: { enabled: true, keepRecentTokens: 1, reserveTokens: 4_000 },
+			compaction: { enabled: true, keepRecentTokens: options.summaryKeepRecentTokens, reserveTokens: 4_000 },
 			contextManagement: {
 				mode: options.configuration.mode,
 				reserveTokens: 16_000,
@@ -1001,6 +1188,9 @@ async function createControlledBoundary(options: {
 }): Promise<BoundaryEvidence> {
 	const hardCut = options.configuration.group === "C";
 	const before = options.session.getContextManagementTrace();
+	if (!hardCut && !prepareCompaction(options.session.sessionManager.getBranch(), options.session.settingsManager.getCompactionSettings())) {
+		return { boundary: options.boundary, requestedTrigger: "summary", actualReason: "retained", modelReply: "", newContextCalls: 0, postCutToolNames: [] };
+	}
 	const newContextCallsBefore = toolResultEntries(options.session.sessionManager.getBranch(), "new_context").length;
 	let unsubscribe = () => {};
 	if (hardCut && options.boundaryTrigger === "model") {
@@ -1016,9 +1206,9 @@ async function createControlledBoundary(options: {
 	let modelReply = "";
 	try {
 		if (hardCut && options.boundaryTrigger === "model") {
-			await options.session.prompt(boundaryPrompt(options.boundary));
+			const reply = await executeRepositoryPhase(options.session, boundaryPrompt(options.boundary));
 			ensureBudget(options.session, options.completedCostUsd, options.maxCostUsd, options.price);
-			modelReply = lastAssistantEntry(options.session.sessionManager.getBranch())?.text ?? "";
+			modelReply = reply.text;
 		}
 		if (!hardCut) {
 			const compacted = await options.session.compactForCommand(compactionInstruction(options.boundary));
@@ -1073,6 +1263,7 @@ async function reopenRepositorySession(options: {
 	readonly boundaryTrigger: BoundaryTrigger;
 	readonly customTools: CustomTools;
 	readonly phase: 2 | 3 | 4;
+	readonly summaryKeepRecentTokens: number;
 }): Promise<{ session: AgentSession; manager: SessionManager; evidence: ResumeEvidence }> {
 	const sessionFile = options.session.sessionFile;
 	if (!sessionFile || !existsSync(sessionFile)) throw new Error("Session JSONL is unavailable before resume");
@@ -1088,6 +1279,7 @@ async function reopenRepositorySession(options: {
 		configuration: options.configuration,
 		customTools: options.customTools,
 		includeNewContext: options.boundaryTrigger === "model" && options.phase < 4,
+		summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 	});
 	return {
 		session,
@@ -1126,9 +1318,12 @@ async function runRepositoryCase(options: {
 	readonly outputDirectory: string;
 	readonly completedCostUsd: number;
 	readonly maxCostUsd: number;
+	readonly memoryPolicy: MemoryPolicy;
+	readonly scenario: GovernanceScenario;
+	readonly summaryKeepRecentTokens: number;
 }): Promise<RealRepositoryRunResult> {
 	const { task, configuration, modelRuntime, model, thinking, price, completedCostUsd, maxCostUsd } = options;
-	const phasePrompts = repositoryPhasePrompts(task);
+	const phasePrompts = repositoryPhasePrompts(task, options.memoryPolicy, options.scenario);
 	const startedAt = Date.now();
 	const runDirectory = join(
 		options.outputDirectory,
@@ -1139,8 +1334,12 @@ async function runRepositoryCase(options: {
 	mkdirSync(sessionsDirectory, { recursive: true });
 	const fixture = initializeRepositoryFixture(runDirectory, options.taskSetDirectory, task);
 	const verificationExecutions: VerificationExecution[] = [];
-	const customTools: CustomTools = [createProbeTool(task), createVerificationTool(runDirectory, task, verificationExecutions)];
 	let manager = SessionManager.create(fixture.workspace, sessionsDirectory);
+	const customTools: CustomTools = [createEvidenceStatusTool(() => manager), createProbeTool(task, () => manager), createVerificationTool(runDirectory, task, verificationExecutions, () => manager)];
+	if (options.scenario === "interrupted-operation") {
+		writeFileSync(join(runDirectory, "operation-receipt.json"), JSON.stringify({ committed: false, commits: 0, applyAttempts: 0, inspections: 0 }));
+		customTools.push(createOperationTool(runDirectory));
+	}
 	let session: AgentSession | undefined;
 	const phaseReplies: string[] = [];
 	const boundaryReplies: string[] = [];
@@ -1167,10 +1366,12 @@ async function runRepositoryCase(options: {
 			configuration,
 			customTools,
 			includeNewContext: options.boundaryTrigger === "model",
+			summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 		});
-		await session.prompt(phasePrompts[0]);
+		manager.appendCustomEntry("benchmark-phase", { phase: 1 });
+		const inspection = await executeRepositoryPhase(session, phasePrompts[0]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
-		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
+		phaseReplies.push(inspection.text);
 		probeEntryId = toolResultEntries(manager.getBranch(), "benchmark_probe").at(-1)?.id;
 		boundaryEvidence.push(
 			await createControlledBoundary({
@@ -1198,15 +1399,16 @@ async function runRepositoryCase(options: {
 			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 2,
+			summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 		});
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phasePrompts[1]);
+		manager.appendCustomEntry("benchmark-phase", { phase: 2 });
+		const diagnosis = await executeRepositoryPhase(session, phasePrompts[1]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
-		const diagnosis = lastAssistantEntry(manager.getBranch());
-		phaseReplies.push(diagnosis?.text ?? "");
-		diagnosisEntryId = diagnosis?.id;
+		phaseReplies.push(diagnosis.text);
+		diagnosisEntryId = diagnosis.id;
 		sourceUnchangedBeforeImplementation = sha256(readFileSync(fixture.sourcePath)) === fixture.initialSourceHash;
 		boundaryEvidence.push(
 			await createControlledBoundary({
@@ -1234,15 +1436,18 @@ async function runRepositoryCase(options: {
 			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 3,
+			summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 		});
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phasePrompts[2]);
+		manager.appendCustomEntry("benchmark-phase", { phase: 3 });
+		const implementation = await executeRepositoryPhase(session, phasePrompts[2]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
-		phaseReplies.push(lastAssistantEntry(manager.getBranch())?.text ?? "");
+		phaseReplies.push(implementation.text);
 		initialVerificationEntryId = toolResultEntries(manager.getBranch(), "benchmark_verify").at(-1)?.id;
 		prematureMarker = readFileSync(fixture.sourcePath, "utf8").includes(task.probe.repairMarker);
+		if (options.scenario !== "continuity") injectGovernanceIntervention(runDirectory, task, options.scenario);
 		boundaryEvidence.push(
 			await createControlledBoundary({
 				session,
@@ -1270,13 +1475,15 @@ async function runRepositoryCase(options: {
 			boundaryTrigger: options.boundaryTrigger,
 			customTools,
 			phase: 4,
+			summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 		});
 		session = reopened.session;
 		manager = reopened.manager;
 		resumeEvidence.push(reopened.evidence);
-		await session.prompt(phasePrompts[3]);
+		manager.appendCustomEntry("benchmark-phase", { phase: 4 });
+		const delivery = await executeRepositoryPhase(session, phasePrompts[3]);
 		ensureBudget(session, completedCostUsd, maxCostUsd, price);
-		finalResponse = lastAssistantEntry(manager.getBranch())?.text ?? "";
+		finalResponse = delivery.text;
 		phaseReplies.push(finalResponse);
 		independentVerification = runRepositoryFixtureVerification(runDirectory, task, "repair");
 		verificationExecutions.push({ ...independentVerification, source: "runner" });
@@ -1287,6 +1494,7 @@ async function runRepositoryCase(options: {
 	const branch = manager.getBranch();
 	const trace = session?.getContextManagementTrace();
 	const hardCut = configuration.group === "C";
+	const requireEvidenceExclusion = hardCut || options.summaryKeepRecentTokens === 1;
 	const boundaries = branch.filter((entry) => entry.type === "context_window");
 	const noteEntries = branch.filter((entry) => entry.type === "custom" && entry.customType === "memory-note");
 	const modelVerifications = verificationExecutions.filter(({ source }) => source === "model");
@@ -1301,6 +1509,8 @@ async function runRepositoryCase(options: {
 	const postCutToolCalls = boundaryEvidence.reduce((sum, boundary) => sum + boundary.postCutToolNames.length, 0);
 	const modelTriggerOpportunities = hardCut && options.boundaryTrigger === "model" ? 3 : 0;
 	const probeCalls = toolResultEntries(branch, "benchmark_probe").length;
+	const verificationCallPhases = branch.flatMap((entry) => entry.type === "message" && entry.message.role === "assistant"
+		? entry.message.content.flatMap((part) => part.type === "toolCall" && part.name === "benchmark_verify" ? [part.arguments.phase] : []) : []);
 	const boundaryProtocol: BoundaryProtocolMetrics = {
 		trigger: options.boundaryTrigger,
 		opportunities: modelTriggerOpportunities,
@@ -1313,16 +1523,19 @@ async function runRepositoryCase(options: {
 		redundantProbeCalls: Math.max(0, probeCalls - 1),
 	};
 	const checks: RepositoryEvaluationCheck[] = [
-		...evaluateRepositoryFinalResponse(finalResponse, task),
-		check("probe-excluded-after-boundary", probeExcludedAfterBoundary, "first-window probe left active context"),
+		...evaluateRepositoryFinalResponse(finalResponse, options.scenario === "changed-requirement"
+			? { ...task, expectedFinal: { ...task.expectedFinal, delivery_label: "approved" } } : task),
+		check("marker-recovered-before-verification", repairVerification?.markerPresentBeforeCall === true, "exact marker was present before the first repair verification; repair never discloses it"),
+		check("verification-matches-final-source", repairVerification?.passed === true && repairVerification.sourceHash === `sha256:${sha256(finalSource)}`, "successful model verification covers the final source hash"),
+		check("probe-excluded-after-boundary", !requireEvidenceExclusion || probeExcludedAfterBoundary, `probe excluded=${probeExcludedAfterBoundary}; required=${requireEvidenceExclusion}`),
 		check(
 			"diagnosis-boundary-policy",
-			diagnosisEntryId !== undefined && (hardCut ? diagnosisExcludedAfterBoundary : !diagnosisExcludedAfterBoundary),
+			diagnosisEntryId !== undefined && (hardCut ? diagnosisExcludedAfterBoundary : options.summaryKeepRecentTokens !== 1 || !diagnosisExcludedAfterBoundary),
 			hardCut
 				? "hard cut excluded the prior diagnosis reply"
-				: "summary retained the recent diagnosis reply while summarizing the older prefix",
+				: `summary diagnosis excluded=${diagnosisExcludedAfterBoundary}; recent retention depends on configured budget`,
 		),
-		check("failure-excluded-after-boundary", failureExcludedAfterBoundary, "hidden failure left active context"),
+		check("failure-excluded-after-boundary", !requireEvidenceExclusion || failureExcludedAfterBoundary, `failure excluded=${failureExcludedAfterBoundary}; required=${requireEvidenceExclusion}`),
 		check("source-unchanged-before-implementation", sourceUnchangedBeforeImplementation, "phase 1 and 2 made no source edit"),
 		check(
 			"initial-verification-reached-hidden-failure",
@@ -1364,6 +1577,24 @@ async function runRepositoryCase(options: {
 			"old probe and verifier entries remain in the complete branch",
 		),
 	];
+	if (options.scenario === "stale-evidence") {
+		const intervention: { beforeSourceHash: string; afterSourceHash: string } | undefined = existsSync(join(runDirectory, "intervention.json"))
+			? JSON.parse(readFileSync(join(runDirectory, "intervention.json"), "utf8")) : undefined;
+		checks.push(check("stale-verification-invalidated", intervention !== undefined &&
+			intervention.beforeSourceHash === initialVerification?.sourceHash && intervention.beforeSourceHash !== intervention.afterSourceHash &&
+			repairVerification?.passed === true && repairVerification.sourceHash === `sha256:${sha256(finalSource)}`,
+			"external source mutation followed the initial verification; a successful new verification covers the final revision"));
+	}
+	if (options.scenario === "interrupted-operation") {
+		const receipt: OperationReceipt = JSON.parse(readFileSync(join(runDirectory, "operation-receipt.json"), "utf8"));
+		let lastBoundaryIndex = -1;
+		for (const [index, entry] of branch.entries()) {
+			if (entry.type === "custom" && entry.customType === "benchmark-phase" && isRecord(entry.data) && entry.data.phase === 4) lastBoundaryIndex = index;
+		}
+		checks.push(check("interrupted-operation-reconciled", receipt.committed && receipt.commits === 1 && receipt.applyAttempts === 0 &&
+			toolResultEntries(branch.slice(lastBoundaryIndex + 1), "benchmark_operation").length > 0,
+			`receipt inspected after resume; commits=${receipt.commits}; duplicate/early model apply attempts=${receipt.applyAttempts}`));
+	}
 	if (trace) {
 		const requiredHistorySearches = [
 			{ query: "HIDDEN_REPAIR_REQUIRED", tool: "benchmark_verify" },
@@ -1380,10 +1611,10 @@ async function runRepositoryCase(options: {
 		);
 		checks.push(
 			check(
-				"three-boundaries",
+				"three-boundary-opportunities",
 				hardCut
 					? trace.stats.hardCuts.count === 3 && trace.stats.summaries.count === 0
-					: trace.stats.summaries.count === 3 && trace.stats.hardCuts.count === 0,
+					: boundaryEvidence.length === 3 && trace.stats.summaries.count === boundaryEvidence.filter((item) => item.actualReason === "summary").length && trace.stats.hardCuts.count === 0,
 				`hard cuts=${trace.stats.hardCuts.count}; summaries=${trace.stats.summaries.count}`,
 			),
 			check(
@@ -1398,13 +1629,13 @@ async function runRepositoryCase(options: {
 			),
 			check(
 				"history-route",
-				hardCut ? requiredHistorySearches : trace.stats.history.queryCount === 0,
-				`History queries=${trace.stats.history.queryCount}`,
+				options.memoryPolicy === "autonomous" || (hardCut ? requiredHistorySearches : trace.stats.history.queryCount === 0),
+				`History queries=${trace.stats.history.queryCount}; exact route required=${options.memoryPolicy === "scripted"}`,
 			),
 			check(
 				"notes-route",
-				hardCut ? trace.stats.notes.operationCount === 3 : trace.stats.notes.operationCount === 0,
-				`Note operations=${trace.stats.notes.operationCount}`,
+				options.memoryPolicy === "autonomous" || (hardCut ? trace.stats.notes.operationCount === 3 : trace.stats.notes.operationCount === 0),
+				`Note operations=${trace.stats.notes.operationCount}; fixed count required=${options.memoryPolicy === "scripted"}`,
 			),
 			check(
 				"snapshot-route",
@@ -1415,9 +1646,9 @@ async function runRepositoryCase(options: {
 			),
 			check(
 				"notes-exclude-hidden-values",
-				!JSON.stringify(noteEntries).includes(task.probe.memoryToken) &&
-					!JSON.stringify(noteEntries).includes(task.probe.repairMarker),
-				"Notes contain neither the first-window token nor the hidden repair marker",
+				options.memoryPolicy === "autonomous" || (!JSON.stringify(noteEntries).includes(task.probe.memoryToken) &&
+					!JSON.stringify(noteEntries).includes(task.probe.repairMarker)),
+				options.memoryPolicy === "autonomous" ? "autonomous Notes may retain exact evidence" : "Notes contain neither the first-window token nor the hidden repair marker",
 			),
 		);
 	}
@@ -1435,14 +1666,16 @@ async function runRepositoryCase(options: {
 			`received ${JSON.stringify(boundaryReplies)}`,
 		),
 		check("probe-called-once", probeCalls === 1, `probe calls=${probeCalls}`),
+		check("initial-verification-called-once", verificationCallPhases.filter((phase) => phase === "initial").length === 1, "exactly one initial verification attempt, including blocked attempts"),
 		check(
 			"repair-verification-passed",
-			modelVerifications.filter(({ phase }) => phase === "repair").length === 1 && repairVerification?.passed === true,
+			verificationCallPhases.filter((phase) => phase === "repair").length === 1 &&
+				modelVerifications.filter(({ phase }) => phase === "repair").length === 1 && repairVerification?.passed === true,
 			"one model-requested repair verification passed after applying the recovered marker",
 		),
 		check(
 			"boundary-trigger-adherence",
-			boundaryEvidence.length === 3 && boundaryEvidence.every(({ actualReason }) => actualReason === expectedBoundaryReason),
+			boundaryEvidence.length === 3 && boundaryEvidence.every(({ actualReason }) => actualReason === expectedBoundaryReason || (!hardCut && actualReason === "retained")),
 			`expected ${expectedBoundaryReason}; received ${boundaryEvidence.map(({ actualReason }) => actualReason).join(", ")}`,
 		),
 		check(
@@ -1472,6 +1705,8 @@ async function runRepositoryCase(options: {
 		passed: error === undefined && checks.every(({ passed }) => passed),
 		memoryPassed: error === undefined && checks.every(({ passed }) => passed),
 		protocolPassed: error === undefined && protocolChecks.every(({ passed }) => passed),
+		recoveryPassed: error === undefined && probeCalls === 1 && ["final-value:memory_token", "marker-recovered-before-verification", "verification-matches-final-source", "independent-verification-passed", "three-disk-resumes"].every((id) => checks.some((item) => item.id === id && item.passed)),
+		evidenceExposure: { probeExcludedAfterBoundary, diagnosisExcludedAfterBoundary, failureExcludedAfterBoundary, crossBoundaryRecoveryExercised: probeExcludedAfterBoundary && failureExcludedAfterBoundary && resumeEvidence.length === 3 },
 		checks,
 		protocolChecks,
 		metrics,
@@ -1505,12 +1740,17 @@ function markdownReport(report: RealRepositoryReport): string {
 		`- Thinking: \`${report.configuration.thinking}\``,
 		`- Hard-cut boundary trigger: \`${report.configuration.boundaryTrigger}\``,
 		`- Phase Prompt protocol: \`${report.configuration.phasePromptProtocol}\``,
+		`- Evaluation kind: \`${report.configuration.evaluationKind}\`; memory policy: ${report.configuration.memoryPolicy}; scenario: ${report.configuration.scenario}`,
+		"- Boundaries and task phases remain controller-driven; autonomous policy only removes prescribed memory operations.",
+		`- Summary recent-token target: ${report.configuration.summaryKeepRecentTokens}; 20000 is the ordinary retention target, while phases remain controlled.`,
+		`- Trials with both original evidence entries excluded across boundaries: ${report.results.filter((result) => result.evidenceExposure.crossBoundaryRecoveryExercised).length}/${report.totalRuns}`,
 		`- Phase Prompt hashes: ${Object.entries(report.configuration.phasePromptHashes)
 			.map(([taskId, hash]) => `\`${taskId}=${hash}\``)
 			.join(", ")}`,
 		"- Execution: strictly serial",
-		`- Memory result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
+		`- Composite memory/task/mechanism result: ${report.passedRuns}/${report.totalRuns} passed${report.aborted ? " (aborted)" : ""}`,
 		`- Protocol result: ${report.protocolPassedRuns}/${report.totalRuns} passed`,
+		`- Recovery result: ${report.results.filter(({ recoveryPassed }) => recoveryPassed).length}/${report.totalRuns} passed`,
 		`- Estimated cost: $${report.estimatedCostUsd.toFixed(6)} / $${report.configuration.maxCostUsd.toFixed(2)}`,
 		`- Pricing: [OpenAI API pricing](${report.configuration.pricingSource})`,
 		"",
@@ -1573,8 +1813,12 @@ async function runRealRepositoryEvaluation(
 		...(options.taskId ? { taskId: options.taskId } : {}),
 		...(options.group ? { group: options.group } : {}),
 		boundaryTrigger: options.boundaryTrigger,
-		phasePromptProtocol: "matched-v1",
-		phasePromptHashes: Object.fromEntries(tasks.map((task) => [task.id, repositoryPhasePromptHash(task)])),
+		phasePromptProtocol: options.memoryPolicy === "scripted" ? "matched-v5" : "autonomous-v3",
+		evaluationKind: options.memoryPolicy === "scripted" ? "controlled-memory-stress" : "controlled-autonomous-memory",
+		memoryPolicy: options.memoryPolicy,
+		scenario: options.scenario,
+		summaryKeepRecentTokens: options.summaryKeepRecentTokens,
+		phasePromptHashes: Object.fromEntries(tasks.map((task) => [task.id, repositoryPhasePromptHash(task, options.memoryPolicy, options.scenario)])),
 		pricingPerMillionTokens: price,
 		pricingSource: PRICING_SOURCE,
 	};
@@ -1601,6 +1845,9 @@ async function runRealRepositoryEvaluation(
 					repetition,
 					configuration: group,
 					boundaryTrigger: options.boundaryTrigger,
+					memoryPolicy: options.memoryPolicy,
+					scenario: options.scenario,
+					summaryKeepRecentTokens: options.summaryKeepRecentTokens,
 					modelRuntime,
 					model,
 					thinking: options.thinking,

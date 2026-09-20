@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
 import type { SessionEntry } from "./session-manager.ts";
+
+export const DEFAULT_NOTE_CONTENT_MAX_BYTES = 32_768;
+const TITLE_MAX_BYTES = 160;
 
 export const MEMORY_NOTE_CUSTOM_TYPE = "memory-note";
 export const MEMORY_NOTE_CATEGORIES = ["decision", "discovery", "preference", "constraint", "open_question"] as const;
@@ -12,6 +16,8 @@ export interface MemoryNoteEntryData {
 	readonly operation: MemoryNoteOperation;
 	readonly category: MemoryNoteCategory;
 	readonly content: string;
+	readonly title?: string;
+	readonly keywords?: readonly string[];
 	readonly workflowId?: string;
 	readonly taskId?: string;
 	readonly sourceEntryIds: readonly string[];
@@ -23,6 +29,8 @@ export interface MemoryNote {
 	readonly entryId: string;
 	readonly category: MemoryNoteCategory;
 	readonly content: string;
+	readonly title: string;
+	readonly keywords: readonly string[];
 	readonly workflowId?: string;
 	readonly taskId?: string;
 	readonly sourceEntryIds: readonly string[];
@@ -34,6 +42,8 @@ export interface MemoryNoteUpsertInput {
 	readonly noteId?: string;
 	readonly category: MemoryNoteCategory;
 	readonly content: string;
+	readonly title?: string;
+	readonly keywords?: readonly string[];
 	readonly workflowId?: string;
 	readonly taskId?: string;
 	readonly sourceEntryIds?: readonly string[];
@@ -47,9 +57,42 @@ export interface MemoryNotesHint {
 
 export interface MemoryNotesListResult {
 	readonly schemaVersion: 1;
-	readonly action: "list";
-	readonly notes: readonly MemoryNote[];
+	readonly action: "list" | "search";
+	readonly notes: readonly MemoryNoteIndex[];
 	readonly truncated: boolean;
+	readonly nextCursor?: string;
+}
+
+export interface MemoryNoteIndex {
+	readonly noteId: string;
+	readonly entryId: string;
+	readonly title: string;
+	readonly category: MemoryNoteCategory;
+	readonly updatedAt: string;
+	readonly contentBytes: number;
+	readonly snippet?: string;
+}
+
+export interface MemoryNotesQuery {
+	readonly query?: string;
+	readonly category?: MemoryNoteCategory;
+	readonly workflowId?: string;
+	readonly taskId?: string;
+	readonly cursor?: string;
+}
+
+export interface MemoryNoteReadRequest {
+	readonly noteId: string;
+	/** Opaque continuation token, bound to the exact note version. */
+	readonly cursor?: string;
+}
+
+export interface MemoryNoteReadResult {
+	readonly schemaVersion: 1;
+	readonly action: "read";
+	readonly note: MemoryNote;
+	readonly truncated: boolean;
+	readonly nextCursor?: string;
 }
 
 export interface MemoryNoteChangeResult {
@@ -104,6 +147,25 @@ export function assertValidMemoryNoteEntryData(value: unknown, entryId?: string)
 		throw new MemoryNoteValidationError("category is not supported", entryId);
 	}
 	if (!isNonEmptyString(value.content)) throw new MemoryNoteValidationError("content must not be empty", entryId);
+	if (
+		value.title !== undefined &&
+		(!isNonEmptyString(value.title) ||
+			/[\r\n]/.test(value.title) ||
+			Buffer.byteLength(value.title, "utf8") > TITLE_MAX_BYTES)
+	) {
+		throw new MemoryNoteValidationError("title must be a single non-empty line of at most 160 UTF-8 bytes", entryId);
+	}
+	if (
+		value.keywords !== undefined &&
+		(!Array.isArray(value.keywords) ||
+			value.keywords.length > 16 ||
+			!value.keywords.every((keyword) => isNonEmptyString(keyword) && Buffer.byteLength(keyword, "utf8") <= 80))
+	) {
+		throw new MemoryNoteValidationError(
+			"keywords must contain at most 16 non-empty strings of at most 80 UTF-8 bytes",
+			entryId,
+		);
+	}
 	assertOptionalId(typeof value.workflowId === "string" ? value.workflowId : undefined, "workflowId");
 	if (value.workflowId !== undefined && typeof value.workflowId !== "string") {
 		throw new MemoryNoteValidationError("workflowId must be a string", entryId);
@@ -157,6 +219,8 @@ function replayMemoryNoteStates(branch: readonly SessionEntry[]): Map<string, Me
 				entryId: entry.id,
 				category: entry.data.category,
 				content: entry.data.content,
+				title: entry.data.title ?? truncateUtf8(entry.data.content.replace(/\s+/g, " "), TITLE_MAX_BYTES).content,
+				keywords: [...(entry.data.keywords ?? [])],
 				...(entry.data.workflowId ? { workflowId: entry.data.workflowId } : {}),
 				...(entry.data.taskId ? { taskId: entry.data.taskId } : {}),
 				sourceEntryIds: [...entry.data.sourceEntryIds],
@@ -221,6 +285,8 @@ export function prepareMemoryNoteUpsert(
 		operation: "upsert",
 		category: input.category,
 		content,
+		title: input.title ?? truncateUtf8(content.replace(/\s+/g, " "), TITLE_MAX_BYTES).content,
+		keywords: [...(input.keywords ?? [])],
 		...(input.workflowId ? { workflowId: input.workflowId } : {}),
 		...(input.taskId ? { taskId: input.taskId } : {}),
 		sourceEntryIds,
@@ -240,6 +306,8 @@ export function prepareMemoryNoteArchive(branch: readonly SessionEntry[], noteId
 		operation: "archive",
 		category: previous.note.category,
 		content: previous.note.content,
+		title: previous.note.title,
+		keywords: [...previous.note.keywords],
 		...(previous.note.workflowId ? { workflowId: previous.note.workflowId } : {}),
 		...(previous.note.taskId ? { taskId: previous.note.taskId } : {}),
 		sourceEntryIds: [...previous.note.sourceEntryIds],
@@ -251,38 +319,125 @@ function serializedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-export function listMemoryNotes(branch: readonly SessionEntry[], maxBytes: number): MemoryNotesListResult {
-	if (!Number.isSafeInteger(maxBytes) || maxBytes < 512) {
-		throw new Error("notes result maxBytes must be an integer of at least 512");
-	}
-	const notes = [...getMemoryNotes(branch)].sort(
-		(left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.noteId.localeCompare(right.noteId),
-	);
-	const selected: MemoryNote[] = [];
-	for (const note of notes) {
-		const proposed: MemoryNotesListResult = {
-			schemaVersion: 1,
-			action: "list",
-			notes: [...selected, note],
-			truncated: selected.length + 1 < notes.length,
-		};
-		if (serializedBytes(proposed) > maxBytes) break;
-		selected.push(note);
-	}
+export function memoryNoteIndex(note: MemoryNote): MemoryNoteIndex {
 	return {
-		schemaVersion: 1,
-		action: "list",
-		notes: selected,
-		truncated: selected.length < notes.length,
+		noteId: note.noteId,
+		entryId: note.entryId,
+		title: note.title,
+		category: note.category,
+		updatedAt: note.updatedAt,
+		contentBytes: Buffer.byteLength(note.content, "utf8"),
 	};
 }
 
-function notePriority(note: MemoryNote, workflowId: string | undefined): number {
-	if (note.category === "constraint" || note.category === "preference") return 0;
-	if (workflowId && note.workflowId === workflowId && note.category === "decision") return 1;
-	if (note.category === "open_question") return 2;
-	if (note.category === "discovery") return 3;
-	return 4;
+function recentNotes(branch: readonly SessionEntry[]): MemoryNote[] {
+	const order = new Map(branch.map((entry, index) => [entry.id, index]));
+	return getMemoryNotes(branch).sort(
+		(left, right) =>
+			Date.parse(right.updatedAt) - Date.parse(left.updatedAt) ||
+			(order.get(right.entryId) ?? 0) - (order.get(left.entryId) ?? 0),
+	);
+}
+
+function cursorOffset(cursor: string | undefined, fingerprint: string, length: number): number {
+	if (cursor === undefined) return 0;
+	const match = /^([a-f0-9]{64}):([1-9][0-9]*)$/.exec(cursor);
+	const offset = match ? Number(match[2]) : Number.NaN;
+	if (!match || match[1] !== fingerprint || !Number.isSafeInteger(offset) || offset >= length) {
+		throw new MemoryNoteValidationError("invalid or stale cursor; restart the query/read without cursor");
+	}
+	return offset;
+}
+
+export function listMemoryNotes(
+	branch: readonly SessionEntry[],
+	maxBytes: number,
+	request: MemoryNotesQuery = {},
+): MemoryNotesListResult {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 512) {
+		throw new Error("notes result maxBytes must be an integer of at least 512");
+	}
+	if (request.query !== undefined && !request.query.trim())
+		throw new MemoryNoteValidationError("search query must not be empty");
+	const query = request.query?.toLowerCase();
+	const notes = recentNotes(branch).filter(
+		(note) =>
+			(!request.category || note.category === request.category) &&
+			(!request.workflowId || note.workflowId === request.workflowId) &&
+			(!request.taskId || note.taskId === request.taskId) &&
+			(query === undefined ||
+				[note.title, note.content, ...note.keywords].some((text) => text.toLowerCase().includes(query))),
+	);
+	const fingerprint = createHash("sha256")
+		.update(
+			JSON.stringify([
+				request.query,
+				request.category,
+				request.workflowId,
+				request.taskId,
+				notes.map((note) => note.entryId),
+			]),
+		)
+		.digest("hex");
+	const offset = cursorOffset(request.cursor, fingerprint, notes.length);
+	const selected: MemoryNoteIndex[] = [];
+	const result = (): MemoryNotesListResult => ({
+		schemaVersion: 1,
+		action: query === undefined ? "list" : "search",
+		notes: [...selected],
+		truncated: offset + selected.length < notes.length,
+		...(offset + selected.length < notes.length ? { nextCursor: `${fingerprint}:${offset + selected.length}` } : {}),
+	});
+	for (const note of notes.slice(offset)) {
+		const index = memoryNoteIndex(note);
+		const matchAt = query === undefined ? -1 : note.content.toLowerCase().indexOf(query);
+		selected.push(
+			query === undefined
+				? index
+				: { ...index, snippet: truncateUtf8(note.content.slice(Math.max(0, matchAt)), 160).content },
+		);
+		if (serializedBytes(result()) <= maxBytes) continue;
+		selected.pop();
+		if (selected.length === 0)
+			throw new MemoryNoteValidationError("result budget cannot fit one note index; increase maxBytes");
+		break;
+	}
+	return result();
+}
+
+export function readMemoryNote(
+	branch: readonly SessionEntry[],
+	request: MemoryNoteReadRequest,
+	maxBytes: number,
+): MemoryNoteReadResult {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 512)
+		throw new MemoryNoteValidationError("notes result maxBytes must be an integer of at least 512");
+	const note = getMemoryNotes(branch).find((item) => item.noteId === request.noteId);
+	if (!note) throw new MemoryNoteValidationError(`active note ${request.noteId} does not exist on the current branch`);
+	const characters = Array.from(note.content);
+	const fingerprint = createHash("sha256")
+		.update(JSON.stringify([note.noteId, note.entryId]))
+		.digest("hex");
+	const start = cursorOffset(request.cursor, fingerprint, characters.length);
+	const result = (end: number): MemoryNoteReadResult => ({
+		schemaVersion: 1,
+		action: "read",
+		note: { ...note, content: characters.slice(start, end).join("") },
+		truncated: end < characters.length,
+		...(end < characters.length ? { nextCursor: `${fingerprint}:${end}` } : {}),
+	});
+	const full = result(characters.length);
+	if (serializedBytes(full) <= maxBytes) return full;
+	let low = start;
+	let high = characters.length - 1;
+	while (low < high) {
+		const mid = Math.ceil((low + high) / 2);
+		if (serializedBytes(result(mid)) <= maxBytes) low = mid;
+		else high = mid - 1;
+	}
+	if (low === start)
+		throw new MemoryNoteValidationError("result budget cannot fit note metadata and content; increase maxBytes");
+	return result(low);
 }
 
 function truncateUtf8(value: string, maxBytes: number): { readonly content: string; readonly truncated: boolean } {
@@ -295,57 +450,32 @@ function truncateUtf8(value: string, maxBytes: number): { readonly content: stri
 	return { content, truncated: true };
 }
 
-export function buildMemoryNotesHint(
-	branch: readonly SessionEntry[],
-	maxBytes: number,
-	workflowId?: string,
-): MemoryNotesHint {
+export function buildMemoryNotesHint(branch: readonly SessionEntry[], maxBytes: number): MemoryNotesHint {
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
 		throw new Error("notes hint maxBytes must be a positive integer");
 	}
-	const notes = getMemoryNotes(branch).sort(
-		(left, right) =>
-			notePriority(left, workflowId) - notePriority(right, workflowId) ||
-			right.updatedAt.localeCompare(left.updatedAt) ||
-			left.noteId.localeCompare(right.noteId),
-	);
-	const header = "Persisted Notes (non-authoritative; Workflow Snapshot wins on conflicts):";
-	if (notes.length === 0) {
-		const empty = truncateUtf8(`${header}\n- none`, maxBytes);
+	const notes = recentNotes(branch);
+	const header = "Recent Notes index (newest update first; non-authoritative; Workflow Snapshot wins):";
+	const footer =
+		"Use visible facts first; read notes by note_id for gaps, search/list omitted notes. Stop when facts suffice without conflict. Use History for gaps, conflicts or original evidence; prefer known source IDs.";
+	const marker = "[notes truncated]";
+	if (Buffer.byteLength(`${header}\n${marker}\n${footer}`, "utf8") > maxBytes) {
+		const minimal = 'Notes: use notes action="list" or "search", then "read".';
 		return {
-			content: empty.truncated ? truncateUtf8("[notes truncated]", maxBytes).content : empty.content,
+			content: Buffer.byteLength(minimal, "utf8") <= maxBytes ? minimal : "",
 			noteEntryIds: [],
-			truncated: empty.truncated,
+			truncated: notes.length > 0,
 		};
-	}
-
-	const marker = "- [notes truncated]";
-	if (Buffer.byteLength(`${header}\n${marker}`, "utf8") > maxBytes) {
-		return { content: truncateUtf8("[notes truncated]", maxBytes).content, noteEntryIds: [], truncated: true };
 	}
 	let content = header;
 	const noteEntryIds: string[] = [];
-	for (let index = 0; index < notes.length; index++) {
-		const note = notes[index];
-		const line = `- [${note.category}] ${note.content} (noteId: ${note.noteId})`;
+	for (const note of notes) {
+		const line = `- ${note.noteId} [${note.category}] ${JSON.stringify(note.title)}`;
 		const candidate = `${content}\n${line}`;
-		const hasMoreNotes = index + 1 < notes.length;
-		const reservedCandidate = hasMoreNotes ? `${candidate}\n${marker}` : candidate;
-		if (Buffer.byteLength(reservedCandidate, "utf8") <= maxBytes) {
-			content = candidate;
-			noteEntryIds.push(note.entryId);
-			continue;
-		}
-
-		const prefix = `${content}\n`;
-		const markerSuffix = `\n${marker}`;
-		const remainingBytes = maxBytes - Buffer.byteLength(prefix, "utf8") - Buffer.byteLength(markerSuffix, "utf8");
-		const partial = remainingBytes > 0 ? truncateUtf8(line, remainingBytes).content : "";
-		if (partial) {
-			content = `${prefix}${partial}`;
-			noteEntryIds.push(note.entryId);
-		}
-		return { content: `${content}${markerSuffix}`, noteEntryIds, truncated: true };
+		if (Buffer.byteLength(`${candidate}\n${marker}\n${footer}`, "utf8") > maxBytes) break;
+		content = candidate;
+		noteEntryIds.push(note.entryId);
 	}
-	return { content, noteEntryIds, truncated: false };
+	const truncated = noteEntryIds.length < notes.length;
+	return { content: `${content}${truncated ? `\n${marker}` : ""}\n${footer}`, noteEntryIds, truncated };
 }

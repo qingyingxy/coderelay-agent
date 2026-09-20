@@ -1337,7 +1337,6 @@ export class AgentSession {
 		}
 		const notesHint = this.sessionManager.buildMemoryNotesHint(
 			this.settingsManager.getContextManagementSettings().notesHintMaxBytes,
-			checkpoint?.workflowId,
 		);
 		return {
 			...baseSeed,
@@ -5351,9 +5350,12 @@ export class AgentSession {
 				return result;
 			}) as ToolDefinition;
 			baseToolDefinitions.notes = createNotesToolDefinition({
-				list: () => this.sessionManager.listMemoryNotes(contextManagementSettings.historyResultMaxBytes),
+				list: (request) =>
+					this.sessionManager.listMemoryNotes(contextManagementSettings.historyResultMaxBytes, request),
+				read: (request) =>
+					this.sessionManager.readMemoryNote(request, contextManagementSettings.historyResultMaxBytes),
 				upsert: (input) => {
-					const result = this.sessionManager.upsertMemoryNote(input, contextManagementSettings.notesHintMaxBytes);
+					const result = this.sessionManager.upsertMemoryNote(input);
 					this._emit({ type: "notes_changed", action: "upsert", noteId: result.note.noteId });
 					return result;
 				},

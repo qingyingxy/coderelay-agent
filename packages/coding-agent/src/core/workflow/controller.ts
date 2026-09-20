@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import { BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
+import { validateContextHandoff } from "./context-handoff.ts";
 import { type UpgradeDirectToPlanDecision, validateDirectPlanUpgradeReadiness } from "./direct-plan-upgrade.ts";
 import type { SessionWorkflowEventLog } from "./event-log.ts";
 import type { WorkflowEventDraft } from "./events.ts";
@@ -970,8 +971,9 @@ export class WorkflowController {
 		) {
 			fail("controller.handoff_not_running", "Task handoff requires a running Direct root Task");
 		}
-		if (!description || Buffer.byteLength(description, "utf8") > 2000) {
-			fail("controller.invalid_handoff", "Task handoff requires 1-2000 UTF-8 bytes");
+		const handoffError = validateContextHandoff(command.description);
+		if (handoffError) {
+			fail("controller.invalid_handoff", handoffError.message);
 		}
 		return this.#commit(command, [
 			{

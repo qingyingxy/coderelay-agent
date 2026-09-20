@@ -1,3 +1,4 @@
+import { validateContextHandoff } from "./context-handoff.ts";
 import { validateAttempt, validatePlan, validateTask, validateWorkflow } from "./invariants.ts";
 import type {
 	DomainViolation,
@@ -549,11 +550,10 @@ function validateTerminalPayload(event: AnyWorkflowEvent): readonly DomainViolat
 
 function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolation[] {
 	switch (event.eventType) {
-		case "task.description_updated":
-			return event.payload.description.trim().length > 0 &&
-				Buffer.byteLength(event.payload.description, "utf8") <= 2000
-				? []
-				: [violation("event.invalid_task_description", "Task handoff requires 1-2000 UTF-8 bytes")];
+		case "task.description_updated": {
+			const error = validateContextHandoff(event.payload.description);
+			return error ? [violation("event.invalid_task_description", error.message)] : [];
+		}
 		case "workflow.mode_decided": {
 			const { decision } = event.payload;
 			return (decision.mode === "direct" || decision.mode === "plan") &&

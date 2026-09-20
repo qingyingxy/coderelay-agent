@@ -83,4 +83,6 @@ v5 仅修正评测基线采集：在排除已约定只读依赖目录的一次�
 
 基线修正后 21 项定向测试通过，适配 TypeScript 检查通过。npm run check 仍被既有嵌套 Biome 根配置阻断，按用户要求未处理。最终核对两个冻结框架的全部清单文件哈希未变；所有评测进程退出，未发现关联残留服务。
 
-机器可读分项与原报告路径：[费用汇总](../.artifacts/conversation-cost-matrix-results.json)。原始 report.json、验证结果、审查输入输出和会话记录保留于 `.artifacts/conversation-cost-matrix-v4/tasks/` 与 `.artifacts/conversation-cost-matrix-v5/tasks/`。
+公开阅读入口：[评测结果与复现范围](evaluation-results.zh-CN.md)。本报告公开汇总数字和实验条件，未提供完整外部复现材料。
+
+机器可读费用汇总保留于本地 `.artifacts/conversation-cost-matrix-results.json`；原始 report.json、验证结果、审查输入输出和会话记录保留于 `.artifacts/conversation-cost-matrix-v4/tasks/` 与 `.artifacts/conversation-cost-matrix-v5/tasks/`。这些目录被 Git 忽略，未公开，不作为 GitHub 下载链接。

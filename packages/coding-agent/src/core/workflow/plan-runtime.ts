@@ -172,7 +172,7 @@ function workerPromptLines(
 		...(verificationCommands.length > 0
 			? [
 					`Required verification commands:\n${verificationCommands.map((command) => `- ${command}`).join("\n")}`,
-					"Run these commands yourself. If one fails, inspect its output, modify the code, and rerun it in this same Session until it passes or the budget is exhausted.",
+					"The parent runtime runs these acceptance commands when you return a structured Handoff. Do not duplicate them yourself. If the runtime reports a failure, inspect its output, repair the code in this same Session, and return an updated Handoff for revalidation. Use additional focused diagnostics only when needed to investigate a failure.",
 				]
 			: []),
 		...(agent.effectivePermissions.deniedPaths.length > 0
@@ -193,7 +193,7 @@ function workerPromptLines(
 						: []),
 				]
 			: []),
-		"Complete all related edits and test-driven repairs in this one Worker Session. Return the structured Handoff only after implementation and required verification.",
+		"Complete all related edits in this one Worker Session, then return the structured Handoff for runtime verification. Report checks you have not run as pending; never claim they passed. Repair any runtime-reported failures in this same Session.",
 	];
 }
 

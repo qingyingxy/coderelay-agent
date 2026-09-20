@@ -21,9 +21,27 @@ The runtime example shows how to build a recreate function that closes over proc
 | `11-sessions.ts` | In-memory, persistent, continue, list sessions |
 | `12-full-control.ts` | Replace everything, no discovery |
 | `13-session-runtime.ts` | Manage runtime-backed session replacement |
-| `14-direct-workflow-demo.ts` | Deterministic Direct Workflow lifecycle with Faux Provider |
+| `14-direct-workflow-demo.ts` | Offline scripted model with real file edits, failing/passing Node tests, a context cut and History recovery |
+| `22-cli-agent-showcase.ts` | Fixed Plan approval, simulated Jobs and repair, completion gate, recovery and cancellation |
+| `23-autonomous-workflow-showcase.ts` | Automatic scheduling, verification and repair with simulated execution |
+| `25-config-workflow-demo.ts` | `--automatic`: a large local fixture triggers a real threshold cut, then implementation continues; without the flag: the original History recovery and repair demo |
+| `26-planner-executor-demo.ts` | Offline Planner approval and real RPC Executor; `--interactive` uses the existing CLI commands and UI, while `--record` paces the SDK text example |
 
 ## Running
+
+Initialize a fresh source checkout from the repository root (requires network access for dependencies and public model catalog metadata, not model weights):
+
+```bash
+npm install --ignore-scripts
+npm run hydrate:model-data
+```
+
+Run the README showcase from the repository root (omit `--interactive` for fast assertions and text output):
+
+```bash
+npx tsx packages/coding-agent/examples/sdk/25-config-workflow-demo.ts --automatic --interactive
+npx tsx packages/coding-agent/examples/sdk/26-planner-executor-demo.ts --interactive
+```
 
 ```bash
 cd packages/coding-agent
@@ -34,7 +52,12 @@ Run the no-network Direct Workflow demo from the repository root:
 
 ```bash
 npm run demo:direct-workflow
+npm run demo:direct-workflow -- --interactive
 ```
+
+The optional `--interactive` flag runs the same scripted task through the existing CLI UI with live Workflow status. It pauses between model steps for readability, displays the final report, then exits automatically.
+
+This demo creates and cleans a temporary workspace. Its first Node test failure is intentional; success ends with `[demo] PASS`. Model replies are scripted, so this demonstrates tool execution and context continuity rather than model quality. See the [demo walkthrough](../../../../docs/cli-agent-showcase.md) for expected output and the supplementary Plan demos.
 
 ## Quick Reference
 

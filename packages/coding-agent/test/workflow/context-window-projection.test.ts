@@ -125,6 +125,34 @@ function createSnapshot(): WorkflowSnapshot {
 }
 
 describe("projectWorkflowSnapshot", () => {
+	it("retains the archive index even when optional verification details fill the budget", () => {
+		const base = createSnapshot();
+		const brief = '[Archived handoff] Read history(action="read", entry_ids=["source-1"]) before continuing.';
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			workflow: {
+				...base.workflow,
+				rootTaskId: "task-a",
+				modeDecision: { ...base.workflow.modeDecision!, mode: "direct" },
+			},
+			tasks: [
+				{
+					...base.tasks[1],
+					description: brief,
+					verificationRequirements: Array.from({ length: 30 }, (_, i) => ({
+						id: `check-${i}`,
+						kind: "test",
+						required: true,
+						description: "Unverified requirement",
+					})),
+				},
+			],
+		};
+		const projection = projectWorkflowSnapshot(snapshot, 1800);
+		expect(projection.truncated).toBe(true);
+		expect(projection.content).toContain(brief);
+		expect(projection.byteLength).toBeLessThanOrEqual(1800);
+	});
 	it("projects authoritative continuation fields without serializing the whole snapshot", () => {
 		const projection = projectWorkflowSnapshot(createSnapshot());
 

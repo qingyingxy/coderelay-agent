@@ -133,7 +133,7 @@ const PLAN: PlanContent = {
 			title: "Implement change",
 			description: "Run the deterministic implementation command",
 			dependsOn: [],
-			fileIntents: [],
+			fileIntents: [{ path: "src/autonomous.ts", action: "modify", reason: "Declare the simulated repair scope" }],
 			verificationRequirementIds: ["implementation"],
 		},
 	],
@@ -197,7 +197,9 @@ try {
 
 	const result = await runner.pump();
 	if (!result.terminal || result.status !== "completed") {
-		throw new Error(`Autonomous Workflow stopped in ${result.status}`);
+		throw new Error(
+			`Autonomous Workflow stopped in ${result.status}\n${workflow.finalReport?.lines.join("\n") ?? "No final report"}`,
+		);
 	}
 	if (!result.actions.some(({ kind }) => kind === "repair")) {
 		throw new Error("Autonomous Workflow did not create the expected Repair");

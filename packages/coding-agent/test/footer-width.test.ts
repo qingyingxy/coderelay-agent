@@ -26,6 +26,8 @@ function createSession(options: {
 	compactionUsage?: AssistantUsage;
 	toolUsage?: AssistantUsage;
 	workflowStatus?: string;
+	budgetStatus?: string;
+	contextPercent?: number | null;
 }): AgentSession {
 	const usage = options.usage;
 	const entries: Array<Record<string, unknown>> = [];
@@ -79,8 +81,15 @@ function createSession(options: {
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
 		},
-		getContextUsage: () => ({ contextWindow: 200_000, percent: 12.3 }),
+		getContextUsage: () => ({
+			contextWindow: 200_000,
+			percent: options.contextPercent === undefined ? 12.3 : options.contextPercent,
+		}),
 		getWorkflowStatusLine: () => options.workflowStatus,
+		getWorkflowView: () =>
+			options.workflowStatus || options.budgetStatus
+				? { budgetStatus: options.budgetStatus ?? "Budget: within limits" }
+				: undefined,
 		modelRuntime: {
 			isUsingOAuth: () => false,
 		},
@@ -188,11 +197,12 @@ describe("FooterComponent width handling", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData(1));
 
-		const statsLine = stripAnsi(footer.render(120)[1]);
+		const statsLine = stripAnsi(footer.render(120).join("\n"));
 		expect(statsLine).toContain("$1.250");
+		expect(statsLine).toContain("累计用量：输入 140 · 输出 20 Token");
 	});
 
-	it("shows the latest cache hit rate when cache usage is present", () => {
+	it("includes cache tokens in input volume while keeping cache details out of the footer", () => {
 		const session = createSession({
 			sessionName: "",
 			usage: {
@@ -206,7 +216,8 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const statsLine = stripAnsi(footer.render(120)[1]);
-		expect(statsLine).toContain("CH25.0%");
+		expect(statsLine).toContain("累计用量：输入 200 · 输出 10 Token");
+		expect(statsLine).not.toContain("CH");
 	});
 
 	it("marks Kimi Coding costs as subscription estimates", () => {
@@ -223,10 +234,10 @@ describe("FooterComponent width handling", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData(1));
 
-		expect(stripAnsi(footer.render(120)[1])).toContain("$1.234 (sub)");
+		expect(stripAnsi(footer.render(120).join("\n"))).toContain("估算费用：$1.234（订阅折算）");
 	});
 
-	it("shows and truncates the authoritative Workflow status line", () => {
+	it("hides healthy budgets without duplicating the Workflow stage", () => {
 		const width = 48;
 		const session = createSession({
 			sessionName: "",
@@ -235,7 +246,48 @@ describe("FooterComponent width handling", () => {
 		const footer = new FooterComponent(session, createFooterData(1));
 
 		const lines = footer.render(width);
-		expect(stripAnsi(lines[2])).toContain("direct | executing");
+		expect(lines.join("\n")).not.toContain("Budget");
+		expect(lines.join("\n")).not.toContain("executing");
 		expect(visibleWidth(lines[2])).toBeLessThanOrEqual(width);
+	});
+
+	it.each(["Budget warning: tokens 90/100", "Budget exceeded: tokens 110/100"])(
+		"keeps abnormal budgets visible: %s",
+		(budgetStatus) => {
+			const footer = new FooterComponent(createSession({ sessionName: "", budgetStatus }), createFooterData(1));
+			const lines = footer.render(30);
+			expect(stripAnsi(lines.join(""))).toContain(
+				budgetStatus.includes("exceeded") ? "执行预算已超限" : "执行预算接近上限",
+			);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(30);
+		},
+	);
+
+	it("distinguishes unknown context occupancy from zero and labels the offline demo", () => {
+		const footer = new FooterComponent(
+			createSession({ sessionName: "", provider: "faux", contextPercent: null }),
+			createFooterData(1),
+		);
+		const text = stripAnsi(footer.render(100).join("\n"));
+		expect(text).toContain("离线演示 · 无实际扣费");
+		expect(text).toContain("上下文占用：待统计 / 容量 200k");
+		expect(footer.render(0)).toEqual([]);
+	});
+
+	it("does not round a small positive cost down to zero", () => {
+		const footer = new FooterComponent(
+			createSession({
+				sessionName: "",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					cost: { total: 0.00001 },
+				},
+			}),
+			createFooterData(1),
+		);
+		expect(stripAnsi(footer.render(100).join("\n"))).toContain("估算费用：<$0.001");
 	});
 });

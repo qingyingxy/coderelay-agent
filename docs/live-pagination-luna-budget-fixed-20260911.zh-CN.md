@@ -42,11 +42,15 @@
 
 ## 证据
 
-- [汇总与哈希校验结果](../.artifacts/live-pagination-luna-budget-fixed-20260911/summary.json)
-- [冻结来源、基线哈希和对照路径](../.artifacts/live-pagination-luna-budget-fixed-20260911/provenance.json)
-- [协议](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/protocol.json)
-- [最终报告](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/luna/report.json)
-- [逐请求费用](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/luna/request-accounting.json)
-- [独立审查](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/luna/review-0.json)
-- [共同验收](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/luna/verification-1/results.json)
-- [59 项回归日志](../.artifacts/live-pagination-luna-budget-fixed-20260911/tasks/live-state-pagination/luna/verification-1/live/regression.txt)
+公开阅读入口：[评测结果与复现范围](evaluation-results.zh-CN.md)。以下为本地审计记录，未纳入 Git，不是公开下载地址；本报告未提供完整外部复现材料。
+
+本地根目录：`.artifacts/live-pagination-luna-budget-fixed-20260911/`。相对该目录的文件：
+
+- 汇总与哈希校验结果：`summary.json`
+- 冻结来源、基线哈希和对照路径：`provenance.json`
+- 协议：`tasks/live-state-pagination/protocol.json`
+- 最终报告：`tasks/live-state-pagination/luna/report.json`
+- 逐请求费用：`tasks/live-state-pagination/luna/request-accounting.json`
+- 独立审查：`tasks/live-state-pagination/luna/review-0.json`
+- 共同验收：`tasks/live-state-pagination/luna/verification-1/results.json`
+- 59 项回归日志：`tasks/live-state-pagination/luna/verification-1/live/regression.txt`

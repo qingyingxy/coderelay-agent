@@ -40,17 +40,22 @@ import {
 } from "./messages.ts";
 import {
 	buildMemoryNotesHint,
+	DEFAULT_NOTE_CONTENT_MAX_BYTES,
 	getLatestMemoryNote,
 	getMemoryNotes,
 	listMemoryNotes,
 	MEMORY_NOTE_CUSTOM_TYPE,
 	type MemoryNote,
 	type MemoryNoteChangeResult,
+	type MemoryNoteReadRequest,
+	type MemoryNoteReadResult,
 	type MemoryNotesHint,
 	type MemoryNotesListResult,
+	type MemoryNotesQuery,
 	type MemoryNoteUpsertInput,
 	prepareMemoryNoteArchive,
 	prepareMemoryNoteUpsert,
+	readMemoryNote,
 } from "./notes.ts";
 
 export const CURRENT_SESSION_VERSION = 4;
@@ -252,6 +257,7 @@ export type ReadonlySessionManager = Pick<
 	| "queryHistory"
 	| "getMemoryNotes"
 	| "listMemoryNotes"
+	| "readMemoryNote"
 	| "buildMemoryNotesHint"
 	| "buildContextEntries"
 	| "getHeader"
@@ -1475,12 +1481,19 @@ export class SessionManager {
 	}
 
 	/** Return a bounded list of active durable Notes. */
-	listMemoryNotes(maxBytes: number): MemoryNotesListResult {
-		return listMemoryNotes(this.getBranch(), maxBytes);
+	listMemoryNotes(maxBytes: number, request: MemoryNotesQuery = {}): MemoryNotesListResult {
+		return listMemoryNotes(this.getBranch(), maxBytes, request);
+	}
+
+	readMemoryNote(request: MemoryNoteReadRequest, maxBytes: number): MemoryNoteReadResult {
+		return readMemoryNote(this.getBranch(), request, maxBytes);
 	}
 
 	/** Append a Note upsert operation and return its reconstructed state. */
-	upsertMemoryNote(input: MemoryNoteUpsertInput, maxContentBytes: number): MemoryNoteChangeResult {
+	upsertMemoryNote(
+		input: MemoryNoteUpsertInput,
+		maxContentBytes = DEFAULT_NOTE_CONTENT_MAX_BYTES,
+	): MemoryNoteChangeResult {
 		const data = prepareMemoryNoteUpsert(this.getBranch(), input, maxContentBytes, randomUUID);
 		this.appendCustomEntry(MEMORY_NOTE_CUSTOM_TYPE, data);
 		const note = getLatestMemoryNote(this.getBranch(), data.noteId);
@@ -1498,8 +1511,8 @@ export class SessionManager {
 	}
 
 	/** Build the exact bounded Notes hint persisted into a new context window. */
-	buildMemoryNotesHint(maxBytes: number, workflowId?: string): MemoryNotesHint {
-		return buildMemoryNotesHint(this.getBranch(), maxBytes, workflowId);
+	buildMemoryNotesHint(maxBytes: number): MemoryNotesHint {
+		return buildMemoryNotesHint(this.getBranch(), maxBytes);
 	}
 
 	/** Derive the persisted hard-window lineage for the selected branch. */

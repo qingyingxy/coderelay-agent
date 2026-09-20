@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { beforeAll, describe, expect, it } from "vitest";
 import type { WorkflowView } from "../src/core/workflow/view.ts";
-import { formatWorkflowProgress } from "../src/modes/interactive/components/workflow-progress.ts";
+import {
+	formatWorkflowProgress,
+	WorkflowProgressComponent,
+} from "../src/modes/interactive/components/workflow-progress.ts";
+import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function workflowView(input: {
 	status?: string;
@@ -56,11 +62,7 @@ describe("formatWorkflowProgress", () => {
 			}),
 		);
 
-		expect(lines).toEqual([
-			"Workflow: Verifying · Tasks 1/1",
-			"Agents: 0 running · 0 queued",
-			"Verification: Passed 1 · Running 1 · Failed 1",
-		]);
+		expect(lines).toEqual(["Workflow: Verifying · Tasks 1/1", "Verification: Passed 1 · Running 1 · Failed 1"]);
 	});
 
 	it("shows the active repair iteration", () => {
@@ -79,11 +81,7 @@ describe("formatWorkflowProgress", () => {
 			}),
 		);
 
-		expect(lines).toEqual([
-			"Workflow: Executing · Tasks 1/2",
-			"Agents: 0 running · 0 queued",
-			"Current: Repair failing test",
-		]);
+		expect(lines).toEqual(["Workflow: Executing · Tasks 1/2", "Current: Repair failing test", "Repair: Iteration 2"]);
 	});
 
 	it("expands Agent backend, usage, and operation hints without percentages or ETA", () => {
@@ -159,7 +157,52 @@ describe("formatWorkflowProgress", () => {
 		expect(lines).toContain("  Recovery: Attempt attempt-1 · artifact-only · CLI restarted");
 	});
 
-	it("hides terminal workflows", () => {
-		expect(formatWorkflowProgress(workflowView({ status: "completed" }))).toEqual([]);
+	it("keeps the terminal result visible without claiming all tasks succeeded", () => {
+		expect(
+			formatWorkflowProgress(
+				workflowView({
+					status: "failed",
+					tasks: [
+						{ id: "one", kind: "agent", status: "succeeded" },
+						{ id: "two", kind: "agent", status: "failed" },
+					],
+				}),
+			),
+		).toEqual(["Workflow: Failed · Tasks 1/2 · Failed 1"]);
+		expect(formatWorkflowProgress(workflowView({ status: "completed" }))).toEqual([
+			"Workflow: Completed · Tasks pending",
+		]);
+	});
+});
+
+describe("WorkflowProgressComponent layout", () => {
+	beforeAll(() => initTheme(undefined, false));
+	it("right-aligns live task counts and adapts when repair tasks are added", () => {
+		let view = workflowView({
+			tasks: [
+				{ id: "one", kind: "agent", status: "succeeded" },
+				{ id: "two", kind: "agent", status: "running", title: "检查中文文件".repeat(20) },
+			],
+		});
+		const component = new WorkflowProgressComponent(() => view);
+		const lines = component.render(80);
+		expect(stripAnsi(lines[0])).toMatch(/Tasks 1\/2$/);
+		expect(visibleWidth(lines[0])).toBe(80);
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
+		view = { ...view, tasks: [...view.tasks, { ...view.tasks[1], id: "repair", kind: "repair" }] };
+		expect(stripAnsi(component.render(80)[0])).toMatch(/Tasks 1\/3$/);
+	});
+	it("keeps counts on a separate line in narrow terminals and clears absent workflows", () => {
+		const component = new WorkflowProgressComponent(() =>
+			workflowView({
+				status: "awaiting_approval",
+				tasks: [{ id: "one", kind: "agent", status: "ready", title: "Implement" }],
+			}),
+		);
+		const lines = component.render(20);
+		expect(lines.map(stripAnsi)).toContain("Tasks 0/1");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(20);
+		expect(component.render(0)).toEqual([]);
+		expect(new WorkflowProgressComponent(() => undefined).render(80)).toEqual([]);
 	});
 });

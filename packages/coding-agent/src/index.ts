@@ -238,6 +238,7 @@ export {
 export {
 	assertValidMemoryNoteEntryData,
 	buildMemoryNotesHint,
+	DEFAULT_NOTE_CONTENT_MAX_BYTES,
 	getLatestMemoryNote,
 	getMemoryNotes,
 	listMemoryNotes,
@@ -247,13 +248,18 @@ export {
 	type MemoryNoteCategory,
 	type MemoryNoteChangeResult,
 	type MemoryNoteEntryData,
+	type MemoryNoteIndex,
 	type MemoryNoteOperation,
+	type MemoryNoteReadRequest,
+	type MemoryNoteReadResult,
 	type MemoryNotesHint,
 	type MemoryNotesListResult,
+	type MemoryNotesQuery,
 	type MemoryNoteUpsertInput,
 	MemoryNoteValidationError,
 	prepareMemoryNoteArchive,
 	prepareMemoryNoteUpsert,
+	readMemoryNote,
 } from "./core/notes.ts";
 export type {
 	PackageManager,

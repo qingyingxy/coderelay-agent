@@ -262,7 +262,7 @@ describe("PlanWorkflowRuntime Subagent retry", () => {
 		await subagents.dispose();
 	});
 
-	it("supplements an omitted verification command in the original Worker Session without escalating", async () => {
+	it("verifies a Worker Handoff without an extra model turn or duplicate bash call", async () => {
 		const plan = createWorkerPlan();
 		const sessions = new FakeSubagentSessionFactory();
 		const subagents = new SubagentRuntime({
@@ -291,28 +291,8 @@ describe("PlanWorkflowRuntime Subagent retry", () => {
 		});
 		session.complete(SUBAGENT_HANDOFF);
 
-		await vi.waitFor(() => expect(session.promptCalls).toHaveLength(2));
-		expect(session.promptCalls[1]).toContain("The implementation patch already exists");
-		expect(session.promptCalls[1]).toContain("Run this exact command now with the bash tool: node verify.js");
-		expect(session.promptCalls[1]).toContain("A textual claim that it passed is not verification evidence");
-		expect(sessions.sessions).toHaveLength(1);
-
-		session.emit({
-			type: "tool_execution_start",
-			toolCallId: "verify-1",
-			toolName: "bash",
-			args: { command: "node verify.js" },
-		});
-		session.emit({
-			type: "tool_execution_end",
-			toolCallId: "verify-1",
-			toolName: "bash",
-			isError: false,
-			result: "verification passed",
-		});
-		session.complete(SUBAGENT_HANDOFF);
-
 		await expect(execution?.completion).resolves.toMatchObject({ status: "completed" });
+		expect(session.promptCalls).toHaveLength(1);
 		expect(plan.tasks.find(({ sourcePlanStepId }) => sourcePlanStepId === "implement")?.status).toBe("succeeded");
 		expect(plan.attempts.map(({ status }) => status)).toEqual(["succeeded"]);
 		expect(sessions.sessions).toHaveLength(1);
@@ -364,12 +344,14 @@ describe("PlanWorkflowRuntime Subagent retry", () => {
 		});
 		firstSession.complete(SUBAGENT_HANDOFF);
 
+		await vi.waitFor(() => expect(firstSession.promptCalls).toHaveLength(3));
+		firstSession.complete(SUBAGENT_HANDOFF);
 		await expect(first?.completion).resolves.toMatchObject({
 			status: "failed",
 			errorCode: "subagent.verification_failed",
 			error: expect.stringContaining("required command failed: node verify.js"),
 		});
-		expect(firstSession.promptCalls).toHaveLength(2);
+		expect(firstSession.promptCalls).toHaveLength(3);
 		expect(sessions.sessions).toHaveLength(1);
 		expect(plan.tasks.find(({ sourcePlanStepId }) => sourcePlanStepId === "implement")?.status).toBe("ready");
 

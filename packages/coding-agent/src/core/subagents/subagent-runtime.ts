@@ -382,7 +382,8 @@ export class SubagentRuntime implements SubagentService {
 	readonly #noProgressStopped = new Set<AgentId>();
 	readonly #verificationCompleteSteered = new Set<AgentId>();
 	readonly #reviewerFinalizeSteered = new Set<AgentId>();
-	readonly #verificationModificationCounts = new Map<AgentId, Map<string, number>>();
+	readonly #verificationRevisions = new Map<AgentId, Map<string, number>>();
+	readonly #workspaceRevisions = new Map<AgentId, number>();
 	readonly #verificationEnvironments = new Map<AgentId, Readonly<Record<string, string>>>();
 	readonly #controlledVerifications = new Map<AgentId, Map<string, ControlledVerificationState>>();
 	readonly #controlledVerificationResults = new Map<AgentId, Map<string, ControlledVerificationRecord>>();
@@ -780,7 +781,7 @@ export class SubagentRuntime implements SubagentService {
 		this.#pendingMutations.set(agentId, new Map());
 		this.#pendingCommands.set(agentId, new Map());
 		this.#commandDiagnostics.set(agentId, []);
-		this.#verificationModificationCounts.set(agentId, new Map());
+		this.#verificationRevisions.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
 		this.#incrementalUsage.set(agentId, zeroUsage());
 		this.#transcripts.set(agentId, []);
@@ -895,6 +896,9 @@ export class SubagentRuntime implements SubagentService {
 		this.#recordTranscript(agentId, "prompt", message);
 		this.#pendingMutations.set(agentId, new Map());
 		this.#modifications.set(agentId, []);
+		this.#controlledVerificationResults.get(agentId)?.clear();
+		this.#verificationRevisions.get(agentId)?.clear();
+		this.#workspaceRevisions.set(agentId, 0);
 		this.#incrementalUsage.set(agentId, zeroUsage());
 		this.registry.transition(agentId, "running");
 		const startedAt = this.#now();
@@ -1359,6 +1363,7 @@ export class SubagentRuntime implements SubagentService {
 			} catch (error) {
 				lastError = error;
 			}
+			if (handoff) await this.#verifyReadyHandoff(agentId, timeoutMs === 0 ? undefined : startedAt + timeoutMs);
 			const verificationProblem = handoff ? this.#requiredVerificationProblem(agentId) : undefined;
 			if (handoff && !verificationProblem) {
 				return handoff;
@@ -1388,7 +1393,7 @@ export class SubagentRuntime implements SubagentService {
 			const repairPrompt = workerHasNoChanges
 				? [
 						"No implementation change was detected. The response repeated planning instead of executing the assigned Task.",
-						"Stay in this same Worker Session. Use the edit or write tool now, run the required verification commands, repair any failure, and return the structured Handoff only after implementation. Do not output another plan.",
+						"Stay in this same Worker Session. Use the edit or write tool now, then return the structured Handoff for parent runtime verification. Repair any reported failure in this Session. Do not output another plan.",
 					].join("\n")
 				: omittedVerification
 					? [
@@ -1400,7 +1405,7 @@ export class SubagentRuntime implements SubagentService {
 					: verificationProblem
 						? [
 								`Required verification is incomplete: ${verificationProblem.message}`,
-								"Stay in this same Worker Session. Inspect the current implementation and command output, fix the code, rerun every required verification command, and only then return the structured Handoff. Do not create or restate a plan.",
+								"Stay in this same Worker Session. Inspect the controlled command output, fix the code, and return the structured Handoff. The parent runtime will rerun the required commands after your changes; do not run them a second time yourself. Do not create or restate a plan.",
 							].join("\n")
 						: [
 								STRUCTURED_HANDOFF_RETRY_INSTRUCTION,
@@ -1420,6 +1425,7 @@ export class SubagentRuntime implements SubagentService {
 		}
 		const handoff = parseHandoff(candidate, identity);
 		await this.#waitForControlledVerifications(agentId);
+		await this.#verifyReadyHandoff(agentId, timeoutMs === 0 ? undefined : startedAt + timeoutMs);
 		const verificationProblem = this.#requiredVerificationProblem(agentId);
 		if (verificationProblem) {
 			throw new SubagentRuntimeError("subagent.verification_failed", verificationProblem.message);
@@ -1427,10 +1433,31 @@ export class SubagentRuntime implements SubagentService {
 		return handoff;
 	}
 
+	async #verifyReadyHandoff(agentId: AgentId, deadlineAt: number | undefined): Promise<void> {
+		const agent = this.#requireAgent(agentId);
+		if (agent.profile?.role !== "worker" || !agent.effectivePermissions.executeCommands) return;
+		const commands = new Set(
+			(this.#requireInput(agentId).verificationCommands ?? []).map((command) => command.trim()),
+		);
+		for (const command of commands) {
+			const latest = this.#controlledVerificationResults.get(agentId)?.get(command)?.diagnostic;
+			const checkedChanges = latest ? this.#verificationRevisions.get(agentId)?.get(latest.toolCallId) : undefined;
+			// A failed check must lead to a repair, not another identical check of unchanged code.
+			if (latest && checkedChanges === (this.#workspaceRevisions.get(agentId) ?? 0)) continue;
+			const remainingMs =
+				deadlineAt === undefined ? this.#controlledVerificationTimeoutMs : deadlineAt - this.#now();
+			if (remainingMs <= 0) {
+				throw new SubagentRuntimeError("subagent.duration_exceeded", "Worker deadline reached before verification");
+			}
+			this.#startControlledVerification(agentId, command, `handoff-${randomUUID()}`, false, remainingMs);
+			await this.#waitForControlledVerifications(agentId);
+		}
+	}
+
 	#requiredVerificationProblem(agentId: AgentId): RequiredVerificationProblem | undefined {
 		const commands = this.#requireInput(agentId).verificationCommands ?? [];
 		const results = this.#controlledVerificationResults.get(agentId);
-		const modificationCount = this.#modifications.get(agentId)?.length ?? 0;
+		const modificationCount = this.#workspaceRevisions.get(agentId) ?? 0;
 		for (const command of commands) {
 			const normalized = command.trim();
 			const latest = results?.get(normalized)?.diagnostic;
@@ -1448,7 +1475,7 @@ export class SubagentRuntime implements SubagentService {
 					message: `required command failed: ${normalized}${latest.output ? `\n${latest.output}` : ""}`,
 				};
 			}
-			const verifiedAtModificationCount = this.#verificationModificationCounts.get(agentId)?.get(latest.toolCallId);
+			const verifiedAtModificationCount = this.#verificationRevisions.get(agentId)?.get(latest.toolCallId);
 			if (verifiedAtModificationCount === undefined || verifiedAtModificationCount < modificationCount) {
 				return {
 					kind: "stale",
@@ -1460,7 +1487,13 @@ export class SubagentRuntime implements SubagentService {
 		return undefined;
 	}
 
-	#startControlledVerification(agentId: AgentId, command: string, triggeringToolCallId: string): void {
+	#startControlledVerification(
+		agentId: AgentId,
+		command: string,
+		triggeringToolCallId: string,
+		steer = true,
+		remainingMs = this.#controlledVerificationTimeoutMs,
+	): void {
 		const agent = this.#requireAgent(agentId);
 		const environment = this.#verificationEnvironments.get(agentId);
 		const running = this.#controlledVerifications.get(agentId);
@@ -1468,23 +1501,24 @@ export class SubagentRuntime implements SubagentService {
 			return;
 		}
 		const cwd = agent.workspace.path;
+		const timeoutMs = Math.min(remainingMs, this.#controlledVerificationTimeoutMs);
 		const verificationId = `controlled:${triggeringToolCallId}`;
 		const sequence = ++this.#controlledVerificationSequence;
-		const modificationCount = this.#modifications.get(agentId)?.length ?? 0;
+		const modificationCount = this.#workspaceRevisions.get(agentId) ?? 0;
 		const promise = Promise.resolve()
 			.then(() =>
 				this.#verificationRunner({
 					command,
 					cwd,
 					environment,
-					timeoutMs: this.#controlledVerificationTimeoutMs,
+					timeoutMs,
 				}),
 			)
 			.then((result) => {
-				const changedDuringVerification = (this.#modifications.get(agentId)?.length ?? 0) !== modificationCount;
+				const changedDuringVerification = (this.#workspaceRevisions.get(agentId) ?? 0) !== modificationCount;
 				const succeeded = result.exitCode === 0 && !result.timedOut && !changedDuringVerification;
 				const failureReason = result.timedOut
-					? `Controlled verification timed out after ${this.#controlledVerificationTimeoutMs}ms`
+					? `Controlled verification timed out after ${timeoutMs}ms`
 					: changedDuringVerification
 						? "Implementation changed while controlled verification was running"
 						: result.exitCode === undefined
@@ -1504,15 +1538,16 @@ export class SubagentRuntime implements SubagentService {
 				if (!existing || sequence >= existing.sequence) {
 					results?.set(command.trim(), { sequence, diagnostic });
 				}
-				this.#verificationModificationCounts.get(agentId)?.set(verificationId, modificationCount);
+				this.#verificationRevisions.get(agentId)?.set(verificationId, modificationCount);
 				if (diagnostics && diagnostics.length > 6) {
 					diagnostics.splice(0, diagnostics.length - 6);
 				}
 				this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
+				if (!steer) return;
 				if (!succeeded) {
 					void this.send(
 						agentId,
-						`Required verification failed under the parent runtime: ${command}. Stay in this same Worker Session, use the controlled failure output to repair the implementation, rerun the exact command, and do not return a Handoff until it passes.\n${diagnostic.output ?? ""}`,
+						`Required verification failed under the parent runtime: ${command}. Stay in this same Worker Session, use the controlled failure output to repair the implementation, then return a Handoff for runtime revalidation. Do not duplicate the acceptance command yourself.\n${diagnostic.output ?? ""}`,
 					).catch(() => undefined);
 					return;
 				}
@@ -1543,7 +1578,7 @@ export class SubagentRuntime implements SubagentService {
 				if (!existing || sequence >= existing.sequence) {
 					results?.set(command.trim(), { sequence, diagnostic });
 				}
-				this.#verificationModificationCounts.get(agentId)?.set(verificationId, modificationCount);
+				this.#verificationRevisions.get(agentId)?.set(verificationId, modificationCount);
 				this.#recordTranscript(agentId, "activity", `${COMMAND_DIAGNOSTIC_PREFIX}${JSON.stringify(diagnostic)}`);
 			});
 		running.set(verificationId, { promise });
@@ -1671,7 +1706,7 @@ export class SubagentRuntime implements SubagentService {
 			this.#noProgressSteered.add(agentId);
 			void this.send(
 				agentId,
-				"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then run the required verification and repair failures in this same Session.",
+				"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then return a Handoff for parent runtime verification and repair reported failures in this same Session.",
 			).catch(() => undefined);
 		}, steerMs);
 		const stopTimer = setTimeout(() => {
@@ -1771,6 +1806,11 @@ export class SubagentRuntime implements SubagentService {
 		const event = value as RuntimeEventShape;
 		const type = typeof event.type === "string" ? event.type : "";
 		if (type === "tool_execution_start") {
+			// Shell commands can mutate files too, including when they later fail.
+			if (event.toolName === "bash" || (typeof event.toolName === "string" && MUTATION_TOOLS.has(event.toolName))) {
+				this.#workspaceRevisions.set(agentId, (this.#workspaceRevisions.get(agentId) ?? 0) + 1);
+				this.#verificationCompleteSteered.delete(agentId);
+			}
 			if (event.toolName === "bash" && typeof event.toolCallId === "string") {
 				const command = commandText(event.args);
 				if (command) {
@@ -1901,7 +1941,7 @@ export class SubagentRuntime implements SubagentService {
 				this.#noProgressSteered.add(agentId);
 				void this.send(
 					agentId,
-					"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then run the required verification and repair failures in this same Session.",
+					"Stop planning and broad exploration. No code change has been detected. Implement the assigned file changes now, then return a Handoff for parent runtime verification and repair reported failures in this same Session.",
 				).catch(() => undefined);
 			}
 			return;
@@ -1931,7 +1971,8 @@ export class SubagentRuntime implements SubagentService {
 		this.#noProgressSteered.delete(agentId);
 		this.#noProgressStopped.delete(agentId);
 		this.#verificationCompleteSteered.delete(agentId);
-		this.#verificationModificationCounts.delete(agentId);
+		this.#verificationRevisions.delete(agentId);
+		this.#workspaceRevisions.delete(agentId);
 		this.#verificationEnvironments.delete(agentId);
 		this.#reviewerFinalizeSteered.delete(agentId);
 		this.#controlledVerifications.delete(agentId);

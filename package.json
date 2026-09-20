@@ -44,6 +44,7 @@
 		"eval:context-window:real": "tsx packages/coding-agent/evals/context-window/evaluate-real.ts",
 		"eval:context-window:real-coding": "tsx packages/coding-agent/evals/context-window/evaluate-real-coding.ts",
 		"eval:context-window:real-repository": "tsx packages/coding-agent/evals/context-window/evaluate-real-repository.ts",
+		"eval:context-window:deepswe:verify": "tsx packages/coding-agent/evals/context-window/verify-deepswe-task-set.ts",
 		"demo:cli-agent-showcase": "tsx packages/coding-agent/examples/sdk/22-cli-agent-showcase.ts",
 		"demo:autonomous-workflow": "tsx packages/coding-agent/examples/sdk/23-autonomous-workflow-showcase.ts",
 		"profile:tui": "node scripts/profile-coding-agent-node.mjs --mode tui",

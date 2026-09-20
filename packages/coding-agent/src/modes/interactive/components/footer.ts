@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
@@ -82,20 +82,16 @@ export class FooterComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		if (width <= 0) return [];
 		const state = this.session.state;
+		const workflowView = this.session.getWorkflowView();
 
 		// Calculate cumulative usage from ALL session entries (not just post-compaction messages)
 		const usageTotals = createUsageTotals();
-		let latestCacheHitRate: number | undefined;
 
 		for (const entry of this.session.sessionManager.getEntries()) {
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				addUsageToTotals(usageTotals, entry.message.usage);
-
-				const latestPromptTokens =
-					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-				latestCacheHitRate =
-					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
 			} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.usage) {
 				addUsageToTotals(usageTotals, entry.message.usage);
 			} else if ((entry.type === "branch_summary" || entry.type === "compaction") && entry.usage) {
@@ -108,7 +104,7 @@ export class FooterComponent implements Component {
 		const contextUsage = this.session.getContextUsage();
 		const contextWindow = contextUsage?.contextWindow ?? state.model?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
-		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+		const contextPercent = contextUsage?.percent != null ? contextPercentValue.toFixed(1) : "?";
 
 		// Replace home directory with ~
 		let pwd = formatCwdForFooter(this.session.sessionManager.getCwd(), process.env.HOME || process.env.USERPROFILE);
@@ -125,32 +121,27 @@ export class FooterComponent implements Component {
 			pwd = `${pwd} • ${sessionName}`;
 		}
 
-		// Build stats line
-		const statsParts = [];
-		if (usageTotals.input) statsParts.push(`↑${formatTokens(usageTotals.input)}`);
-		if (usageTotals.output) statsParts.push(`↓${formatTokens(usageTotals.output)}`);
-		if (usageTotals.cacheRead) statsParts.push(`R${formatTokens(usageTotals.cacheRead)}`);
-		if (usageTotals.cacheWrite) statsParts.push(`W${formatTokens(usageTotals.cacheWrite)}`);
-		if ((usageTotals.cacheRead > 0 || usageTotals.cacheWrite > 0) && latestCacheHitRate !== undefined) {
-			statsParts.push(`CH${latestCacheHitRate.toFixed(1)}%`);
-		}
+		// Match /session: input is the full prompt volume, including cached input.
+		const inputTokens = usageTotals.input + usageTotals.cacheRead + usageTotals.cacheWrite;
+		const usageLine = `${workflowView?.plan ? "主会话用量" : "累计用量"}：输入 ${inputTokens.toLocaleString("en-US")} · 输出 ${usageTotals.output.toLocaleString("en-US")} Token`;
 
 		// Kimi Coding is subscription-backed despite using API-key authentication.
 		const usingSubscription = state.model
 			? state.model.provider === "kimi-coding" || this.session.modelRuntime.isUsingOAuth(state.model.provider)
 			: false;
-		if (usageTotals.cost || usingSubscription) {
-			const costStr = `$${usageTotals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`;
-			statsParts.push(costStr);
-		}
+		const costStr = usageTotals.cost > 0 && usageTotals.cost < 0.001 ? "<$0.001" : `$${usageTotals.cost.toFixed(3)}`;
+		const costLabel =
+			state.model?.provider === "faux" && usageTotals.cost === 0
+				? "离线演示 · 无实际扣费"
+				: `估算费用：${costStr}${usingSubscription ? "（订阅折算）" : ""}`;
 
 		// Colorize context percentage based on usage
 		let contextPercentStr: string;
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
+		const autoIndicator = this.autoCompactEnabled ? "（自动整理）" : "";
 		const contextPercentDisplay =
 			contextPercent === "?"
-				? `?/${formatTokens(contextWindow)}${autoIndicator}`
-				: `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`;
+				? `上下文占用：待统计 / 容量 ${formatTokens(contextWindow)}${autoIndicator}`
+				: `上下文占用：${contextPercent}% / 容量 ${formatTokens(contextWindow)}${autoIndicator}`;
 		if (contextPercentValue > 90) {
 			contextPercentStr = theme.fg("error", contextPercentDisplay);
 		} else if (contextPercentValue > 70) {
@@ -158,15 +149,16 @@ export class FooterComponent implements Component {
 		} else {
 			contextPercentStr = contextPercentDisplay;
 		}
-		statsParts.push(contextPercentStr);
+		let detailLine = `${costLabel} · ${contextPercentStr}`;
 		if (areExperimentalFeaturesEnabled()) {
-			statsParts.push(`${theme.fg("dim", "•")} ${theme.bold(theme.fg("warning", "xp"))}`);
+			detailLine += ` · ${theme.bold(theme.fg("warning", "实验功能"))}`;
 		}
 
-		let statsLeft = statsParts.join(" ");
+		const usageLines = wrapTextWithAnsi(usageLine, width);
+		let statsLeft = usageLines.pop() ?? "";
 
 		// Add model name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.id || "no-model";
+		const modelName = `${workflowView?.plan ? "主会话：" : ""}${state.model?.id || "no-model"}`;
 
 		let statsLeftWidth = visibleWidth(statsLeft);
 
@@ -227,13 +219,21 @@ export class FooterComponent implements Component {
 		const dimRemainder = theme.fg("dim", remainder);
 
 		const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
-		const lines = [pwdLine, dimStatsLeft + dimRemainder];
+		const lines = [
+			pwdLine,
+			...usageLines.map((line) => theme.fg("dim", line)),
+			dimStatsLeft + dimRemainder,
+			...wrapTextWithAnsi(theme.fg("dim", detailLine), width),
+		];
 
-		const workflowStatus = this.session.getWorkflowStatusLine();
-		if (workflowStatus) {
-			lines.push(
-				truncateToWidth(theme.fg("dim", sanitizeStatusText(workflowStatus)), width, theme.fg("dim", "...")),
-			);
+		// Healthy budgets stay out of the way; warnings and hard limits remain visible.
+		const budgetStatus = workflowView?.budgetStatus;
+		if (budgetStatus && budgetStatus !== "Budget: within limits") {
+			const exceeded = budgetStatus.startsWith("Budget exceeded:");
+			const message = sanitizeStatusText(budgetStatus)
+				.replace(/^Budget exceeded:/, "执行预算已超限：")
+				.replace(/^Budget warning:/, "执行预算接近上限：");
+			lines.push(...wrapTextWithAnsi(theme.fg(exceeded ? "error" : "warning", message), width));
 		}
 
 		// Add extension statuses on a single line, sorted by key alphabetically

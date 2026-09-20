@@ -1,5 +1,7 @@
-import { Box, Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui";
+import { Box, Container, Markdown, type MarkdownTheme, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
+import { keyText } from "./keybinding-hints.ts";
+import { workflowPromptSummary } from "./workflow-presentation.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -12,6 +14,7 @@ export class UserMessageComponent extends Container {
 	private text: string;
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
+	private expanded = false;
 
 	constructor(text: string, markdownTheme: MarkdownTheme = getMarkdownTheme(), outputPad = 1) {
 		super();
@@ -26,9 +29,21 @@ export class UserMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	setExpanded(expanded: boolean): void {
+		this.expanded = expanded;
+		this.rebuild();
+	}
+
 	private rebuild(): void {
 		this.clear();
 		const contentBox = new Box(this.outputPad, 1, (content: string) => theme.bg("userMessageBg", content));
+		const summary = !this.expanded ? workflowPromptSummary(this.text) : undefined;
+		if (summary) {
+			contentBox.addChild(new Text(summary, 0, 0));
+			contentBox.addChild(new Text(theme.fg("dim", `${keyText("app.tools.expand")} 展开内部提示`), 0, 0));
+			this.addChild(contentBox);
+			return;
+		}
 		contentBox.addChild(
 			new Markdown(
 				this.text,

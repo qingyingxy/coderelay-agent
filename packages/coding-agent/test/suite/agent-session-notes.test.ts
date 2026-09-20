@@ -21,9 +21,12 @@ describe("AgentSession Notes", () => {
 		expect(hybrid.session.getActiveToolNames()).toContain("notes");
 	});
 
-	it("persists a Note before a same-batch hard cut and injects it into the new seed", async () => {
-		const harness = await createHarness({ settings: { contextManagement: { mode: "windowed" } } });
+	it("persists a long Note before a same-batch hard cut and retrieves its body from the new index", async () => {
+		const harness = await createHarness({
+			settings: { contextManagement: { mode: "windowed", notesHintMaxBytes: 500 } },
+		});
 		harnesses.push(harness);
+		const body = `Full evidence: ${"完整的复现条件。".repeat(300)}`;
 		harness.setResponses([
 			fauxAssistantMessage(
 				[
@@ -31,12 +34,16 @@ describe("AgentSession Notes", () => {
 						action: "upsert",
 						note_id: "durable-decision",
 						category: "decision",
-						content: "Keep the append-only boundary",
+						title: "Keep the append-only boundary",
+						content: body,
 					}),
 					fauxToolCall("new_context", {}),
 				],
 				{ stopReason: "toolUse" },
 			),
+			fauxAssistantMessage(fauxToolCall("notes", { action: "read", note_id: "durable-decision" }), {
+				stopReason: "toolUse",
+			}),
 			fauxAssistantMessage("continued after notes cut"),
 		]);
 
@@ -59,9 +66,53 @@ describe("AgentSession Notes", () => {
 		expect(boundary.contextSeed.noteEntryIds).toEqual([branch[noteEntryIndex]?.id]);
 		expect(boundary.contextSeed.content).toContain("Keep the append-only boundary");
 		expect(getMessageText(harness.session.messages[0])).toContain("Keep the append-only boundary");
+		expect(boundary.contextSeed.content).not.toContain("Full evidence:");
+		expect(harness.sessionManager.getMemoryNotes()[0].content).toBe(body);
+		const readResult = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "notes",
+		);
+		expect(getMessageText(readResult)).toContain(body);
 		expect(harness.eventsOfType("notes_changed")).toEqual([
 			{ type: "notes_changed", action: "upsert", noteId: "durable-decision" },
 		]);
+	});
+
+	it("searches and reads an old note absent from the new-window hint through model tools", async () => {
+		const harness = await createHarness({
+			settings: { contextManagement: { mode: "windowed", notesHintMaxBytes: 500 } },
+		});
+		harnesses.push(harness);
+		harness.sessionManager.upsertMemoryNote({
+			noteId: "initial",
+			category: "discovery",
+			title: "Initial reproduction",
+			keywords: ["未授权"],
+			content: "Expired access token; valid refresh token; second concurrent request returned 401.",
+		});
+		for (let index = 1; index < 8; index++)
+			harness.sessionManager.upsertMemoryNote({
+				noteId: `recent-${index}`,
+				category: "discovery",
+				title: `Checkpoint ${index}`,
+				content: "Recent work",
+			});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("notes", { action: "search", query: "未授权" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("notes", { action: "read", note_id: "initial" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Retrieved the original reproduction."),
+		]);
+		await harness.session.prompt("Find the original unauthorized reproduction after switching context.");
+		const boundary = harness.sessionManager.getBranch().find((entry) => entry.type === "context_window");
+		if (boundary?.type !== "context_window") throw new Error("Expected context window");
+		expect(boundary.contextSeed.content).not.toContain("Initial reproduction");
+		const results = harness.session.messages.filter(
+			(message) => message.role === "toolResult" && message.toolName === "notes",
+		);
+		expect(results).toHaveLength(2);
+		expect(getMessageText(results[0])).toContain('"noteId":"initial"');
+		expect(getMessageText(results[1])).toContain("second concurrent request returned 401");
+		expect(harness.eventsOfType("notes_changed")).toEqual([]);
 	});
 
 	it("archives a Note through the model tool without rewriting prior operations", async () => {

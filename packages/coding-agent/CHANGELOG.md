@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Notes list results now return indexes rather than full bodies; use `readMemoryNote` or the Notes `read` action for content. Custom `NotesToolController` implementations must provide `read`. Notes hints no longer accept a workflow-priority argument.
+
 ### Added
 
+- Added an opt-in Workflow memory review coordinator and tool with per-message coverage, validated Note/source references, and persisted unfinished checks for host-managed context cuts.
+- Added paginated Notes list/search and version-bound partial reads, with titles, search aliases, and source metadata.
+- Added offline showcases for automatic context-threshold continuation and Planner-to-Executor RPC handoff, with existing interactive CLI commands and UI, reproducible short GIFs, and real file/test assertions.
 - Added an optional Direct Workflow handoff to `new_context`, persisted in the existing task description and projected into the next window without a summary model call.
 - Added Core-backed Plan Mode with a read-only Planner, persisted approval and revision history, Plan-to-Task conversion, Task-derived progress, `/plan` lifecycle commands, and a deterministic Faux Provider demo.
 - Added persisted Task Graph readiness, constrained scheduling, executor interfaces, Task Tree commands, and a deterministic Scheduler demo.
@@ -25,12 +32,28 @@
 
 ### Changed
 
+- Default memory-policy evaluation entrypoints to bounded Notes maintenance with host-controlled safe cuts; retain per-message Workflow review and repair only behind explicit opt-in.
+- Guide Notes writing toward decision-focused titles, stable topic IDs, user-language aliases, original source references, and explicit links between separately stored revisions.
+- Guide final-decision recovery to check relevant later revisions and use targeted literal searches without requiring History for already-supported facts.
+- Keep memory answers focused on the requested definition, condition, quantity or mechanism, without substituting adjacent allocation rules or requiring extra retrieval when evidence suffices.
+- Guide memory retrieval by missing information: stop when visible state or Notes suffice, consult History for gaps, conflicts or original evidence, and save only new or changed durable Notes before cutting.
+- Separated the 32 KiB Notes body limit from the context hint budget; hints now contain whole indexes ordered by latest update, and model write receipts omit note bodies.
+- Raised the Direct Workflow handoff limit to 4000 UTF-8 bytes across validation and window projection, with a prompt target of about 3000 bytes.
+- Show compact Chinese planning and execution cards in the interactive CLI, retain raw details on expansion, identify the host model separately, and distinguish Worker completion from overall delivery.
+- Run configured Worker acceptance commands at Handoff under the parent runtime, avoiding a mandatory duplicate Worker bash call; retain same-session repair and invalidate results after edit/write/bash activity or a resumed run. Guide planning toward focused checks rather than broad optional suites.
+- Render History queries as readable source and content previews, with record identifiers and raw returned details available on expansion.
+- Replaced abbreviated interactive footer counters with Chinese usage, estimated cost and context labels; included cached input in prompt totals, kept cache details in `/session`, and hid healthy budgets while retaining warning and exceeded notices.
+- Consolidated interactive Workflow stages above the editor with task counts aligned to the right, narrow-terminal wrapping, and a compact final result; retained usage, cost and budget visibility while moving verbose task identifiers to expanded progress and `/workflow`.
 - Clarified Direct handoff guidance to carry unresolved items forward until item-specific evidence or a user scope change resolves them; passing existing tests alone is insufficient.
 - Changed automatic hard and high-risk workflows to use a strong read-only Planner that decomposes bounded Worker Tasks before balanced implementation and review.
 - Changed windowed hard cuts requested after a settled Direct Workflow to retain its authoritative Snapshot, enabling deterministic controller boundaries without relying on a model `new_context` call.
 
 ### Fixed
 
+- Fixed opaque memory review reference errors by reporting affected source and Note IDs with correction guidance before persisting review evidence.
+- Fixed Notes tool calls filling unused parameters with placeholder strings by accepting explicit nulls, documenting first-page cursors, and preserving strict required-field and stale-cursor checks.
+- Fixed repeated oversized Direct handoffs exhausting correction attempts: request a 2400-byte rewrite, then retain full original versions in History and inject a required retrieval index on the third oversized response.
+- Fixed oversized Direct Workflow handoffs returning opaque errors; share UTF-8 validation across tools and workflow records, report actual bytes and correction guidance, and distinguish cut acceptance from completion.
 - Fixed hard-window projections dropping unresolved verification behind completed task details; show declared checks without results before execution history.
 - Fixed explanatory `review:passed` verdicts being rejected and needlessly escalating a successful Reviewer to the strong tier.
 - Fixed resumed sessions losing subsequent entries when an existing Session JSONL ended with an incomplete record or lacked a trailing newline.

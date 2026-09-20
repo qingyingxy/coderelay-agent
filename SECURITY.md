@@ -2,7 +2,7 @@
 
 ## Project scope
 
-Pi Windows Agent is a personal, Windows-focused fork of
+CodeRelay Agent is a personal, Windows-focused fork of
 [earendil-works/pi](https://github.com/earendil-works/pi). This policy covers
 security issues introduced by this fork's workflow, subagent, job, delivery,
 recovery, model-routing, and Windows integration changes.
@@ -33,7 +33,7 @@ do not create an operating-system security boundary.
 Do not open a public issue for a vulnerability that affects this fork.
 
 Use GitHub's private vulnerability reporting for
-[`qingyingxy/pi-windows-agent`](https://github.com/qingyingxy/pi-windows-agent/security/advisories/new).
+[`qingyingxy/coderelay-agent`](https://github.com/qingyingxy/coderelay-agent/security/advisories/new).
 Include:
 
 - affected commit and Windows version;
