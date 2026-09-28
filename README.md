@@ -14,7 +14,7 @@ CodeRelay Agent 关注的是：上下文切换后，仍能知道原来的计划�
 
 | 能力 | 具体行为 |
 |---|---|
-| 跨上下文继续任务 | 可选的硬切窗模式在达到阈值后自动切换，用工作流快照恢复目标和任务状态；Notes 保存持久信息，History 按需找回历史证据。 |
+| 跨上下文继续任务 | 可选的硬切窗模式在硬阈值自动切换；宿主保存 Workflow Snapshot，新窗口接收当前任务状态投影和近期 Notes 目录，缺失的旧证据再从 History 回查。 |
 | 持久化工作流与恢复 | 管理计划、任务、执行尝试和验收结果，通过事件日志与快照支持恢复，保留失败与重试记录。 |
 | 规划与执行分工 | Planner / Executor 将复杂工作拆成范围明确的任务，记录执行、验证和修复结果；可为规划、执行和审查配置不同档位的模型。 |
 
@@ -68,7 +68,7 @@ npx tsx packages/coding-agent/examples/sdk/26-planner-executor-demo.ts --interac
 .\pi-test.ps1
 ```
 
-普通会话默认使用摘要模式。要启用自动硬切窗，运行 `.\pi-test.ps1 --context-mode windowed`。接近阈值先提醒交接，达到硬阈值后在工具调用结束的安全边界切换，不必等上下文完全耗尽。
+普通会话默认使用摘要模式。要启用自动硬切窗，运行 `.\pi-test.ps1 --context-mode windowed`。软阈值只提醒补存尚未持久化的重要信息；达到硬阈值后，宿主在工具调用结束的安全边界保存快照并自动切窗。普通硬切不额外调用摘要模型。
 
 使用 `/auth` 配置模型服务凭据，通过 `/model` 选择模型。真实模型调用需要你自己的服务访问权限，并可能产生费用。使用 `/workflow` 查看任务状态，通过 `/plan` 创建需要审批的计划。详见[模型配置与使用文档](packages/coding-agent/README.md)和[工作流命令](docs/cli-agent-architecture.md#7-cli-与机器输出)。
 
@@ -91,8 +91,8 @@ npx tsx packages/coding-agent/examples/sdk/26-planner-executor-demo.ts --interac
 - [架构说明](docs/cli-agent-architecture.md) · [演示说明](docs/cli-agent-showcase.md) · [编程助手文档](packages/coding-agent/README.md)
 - [评测汇总](docs/evaluation-results.zh-CN.md)集中说明历史事实恢复、模型分工费用的结果、对照条件和原报告来源，并区分可运行的机制演示与未公开完整输入的历史实验。
 - 演示验证执行与恢复机制，不衡量模型自主解决问题的能力或成本收益。GIF 调整了停留时间，不代表实际执行速度。
-- 已有[产品回归测试](packages/coding-agent/docs/context-window-regressions.md)覆盖长交接信息下优先保留失败及未检查事项、避免过早引导收尾的问题；仍不能保证模型生成的新交接信息包含所有未完成要求。
-- 本地测试通过只能说明覆盖的行为符合预期。工作流完成或交接信息保留，不代表所有需求均已得到验证。
+- 已有[产品回归测试](packages/coding-agent/docs/context-window-regressions.md)覆盖快照投影优先保留失败和未检查事项、避免过早引导收尾，以及切窗后的状态续作；这些测试使用 Faux Provider，不产生付费模型调用。
+- 本地测试只验证覆盖的机制；工作流完成不代表未列入验收的需求已得到验证，也不能证明真实模型的任务完成率或成本优势。
 - 调用真实模型的评测脚本用于开发验证，不是安装必需步骤，也不构成已发布的对比基准。
 
 ## 当前限制
@@ -107,6 +107,12 @@ npx tsx packages/coding-agent/examples/sdk/26-planner-executor-demo.ts --interac
 npm run check
 Set-Location packages/coding-agent
 node ../../node_modules/vitest/dist/cli.js --run test/suite/workflow-direct.test.ts
+```
+
+从 `packages/coding-agent` 目录运行切窗相关定向测试（Faux Provider，无付费模型调用）：
+
+```powershell
+node ../../node_modules/vitest/dist/cli.js --run test/suite/agent-session-context-window.test.ts test/workflow/context-window-projection.test.ts test/suite/context-window-completion-receipt.test.ts
 ```
 
 ## 安全说明
