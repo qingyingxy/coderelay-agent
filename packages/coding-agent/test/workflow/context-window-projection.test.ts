@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	MIN_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES,
 	projectWorkflowSnapshot,
+	selectRecentWorkflowSnapshots,
 } from "../../src/core/workflow/context-window-projection.ts";
 import type { WorkflowSnapshot } from "../../src/core/workflow/stores.ts";
 import type {
@@ -124,35 +125,41 @@ function createSnapshot(): WorkflowSnapshot {
 	};
 }
 
-describe("projectWorkflowSnapshot", () => {
-	it("retains the archive index even when optional verification details fill the budget", () => {
-		const base = createSnapshot();
-		const brief = '[Archived handoff] Read history(action="read", entry_ids=["source-1"]) before continuing.';
-		const snapshot: WorkflowSnapshot = {
-			...base,
-			workflow: {
-				...base.workflow,
-				rootTaskId: "task-a",
-				modeDecision: { ...base.workflow.modeDecision!, mode: "direct" },
+function createCompletedSnapshot(
+	id: string,
+	updatedAt: string,
+	objective: string,
+	summary: string,
+	changedFiles: readonly string[] = [],
+	unfinishedItems: readonly string[] = [],
+): WorkflowSnapshot {
+	const base = createSnapshot();
+	return {
+		...base,
+		workflowId: id,
+		workflow: {
+			...base.workflow,
+			id,
+			status: "completed",
+			request: { ...base.workflow.request, text: objective },
+			updatedAt,
+			result: {
+				status: "completed",
+				summary,
+				completedTaskIds: [],
+				failedTaskIds: [],
+				changedFiles,
+				verificationIds: [],
+				risks: [],
+				unfinishedItems,
+				usage,
+				durationMs: usage.durationMs,
 			},
-			tasks: [
-				{
-					...base.tasks[1],
-					description: brief,
-					verificationRequirements: Array.from({ length: 30 }, (_, i) => ({
-						id: `check-${i}`,
-						kind: "test",
-						required: true,
-						description: "Unverified requirement",
-					})),
-				},
-			],
-		};
-		const projection = projectWorkflowSnapshot(snapshot, 1800);
-		expect(projection.truncated).toBe(true);
-		expect(projection.content).toContain(brief);
-		expect(projection.byteLength).toBeLessThanOrEqual(1800);
-	});
+		},
+	};
+}
+
+describe("projectWorkflowSnapshot", () => {
 	it("projects authoritative continuation fields without serializing the whole snapshot", () => {
 		const projection = projectWorkflowSnapshot(createSnapshot());
 
@@ -162,18 +169,19 @@ describe("projectWorkflowSnapshot", () => {
 			snapshotSequence: 4,
 			truncated: false,
 		});
-		expect(projection.content).toContain(
-			"Workflow identifiers are internal control-plane IDs. Do not substitute them for user-requested domain identifiers.",
-		);
+		expect(projection.content).toContain("Internal workflow_* IDs are control-plane IDs");
 		expect(projection.content).toContain("Workflow: workflow_id=workflow-1 mode=plan status=executing sequence=4");
-		expect(projection.content).toContain("Current plan: workflow_plan_id=plan-2 version=2 status=approved");
+		expect(projection.content).toContain("Plan: workflow_plan_id=plan-2 version=2 status=approved");
 		expect(projection.content).toContain("Workflow Task: workflow_task_id=task-a");
 		expect(projection.content).toContain("Workflow Attempt: workflow_attempt_id=attempt-1 workflow_task_id=task-a");
 		expect(projection.content).toContain(
 			"Workflow Verification: workflow_verification_id=verification-1 workflow_task_id=task-a",
 		);
 		expect(projection.content).toContain("Next action: Continue workflow_task_id=task-a: First task");
-		expect(projection.content).toContain("History: use the history tool");
+		expect(projection.content).toContain("Workspace/diff is current-code authority");
+		expect(projection.content).toContain("Use Workspace/diff for current code");
+		expect(projection.content).toContain("Notes for durable design semantics");
+		expect(projection.content).toContain("History only when exact unavailable prior evidence is required");
 		expect(projection.content).not.toContain("event-1");
 		expect(projection.byteLength).toBe(Buffer.byteLength(projection.content, "utf8"));
 	});
@@ -201,9 +209,69 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projectWorkflowSnapshot(second)).toEqual(projectWorkflowSnapshot(first));
 	});
 
+	it("selects the three most recently updated completed Workflows deterministically", () => {
+		const snapshots = [
+			createCompletedSnapshot("workflow-old", "2025-01-02T00:00:00.000Z", "Old objective", "Old result"),
+			createCompletedSnapshot("workflow-current", "2025-01-05T00:00:00.000Z", "Current", "Current result"),
+			createCompletedSnapshot("workflow-b", "2025-01-04T00:00:00.000Z", "Second", "Second result"),
+			createCompletedSnapshot("workflow-a", "2025-01-04T00:00:00.000Z", "First", "First result"),
+			createCompletedSnapshot("workflow-new", "2025-01-06T00:00:00.000Z", "Newest", "Newest result"),
+		];
+		const incomplete = createSnapshot();
+		const all = [incomplete, ...snapshots];
+		const source = {
+			listWorkflows: () => all.map(({ workflow }) => workflow),
+			createSnapshot: (workflowId: string) => {
+				const snapshot = all.find((candidate) => candidate.workflowId === workflowId);
+				if (!snapshot) throw new Error(`Missing test Workflow ${workflowId}`);
+				return snapshot;
+			},
+		};
+
+		expect(selectRecentWorkflowSnapshots(source, "workflow-current").map(({ workflowId }) => workflowId)).toEqual([
+			"workflow-new",
+			"workflow-b",
+			"workflow-a",
+		]);
+		expect(selectRecentWorkflowSnapshots(source, "workflow-current", 0)).toEqual([]);
+		expect(() => selectRecentWorkflowSnapshots(source, "workflow-current", -1)).toThrow("non-negative");
+	});
+
+	it("projects prior Workflow objectives and outcomes without requiring memory retrieval", () => {
+		const recent = [
+			createCompletedSnapshot(
+				"workflow-stage-2",
+				"2025-01-03T00:00:00.000Z",
+				"Preserve the backend transport contract and keep retry metadata stable",
+				"Transport contract preserved and focused checks passed",
+				["src/backend.ts", "src/transport.ts"],
+				["Run the platform-specific smoke check"],
+			),
+			createCompletedSnapshot(
+				"workflow-stage-1",
+				"2025-01-02T00:00:00.000Z",
+				"Add the original import contract",
+				"Import contract implemented",
+			),
+		];
+
+		const projection = projectWorkflowSnapshot(createSnapshot(), undefined, recent);
+
+		expect(projection.content).toContain("Recent Workflow Context: workflow_id=workflow-stage-2");
+		expect(projection.content).toContain("Preserve the backend transport contract");
+		expect(projection.content).toContain("Transport contract preserved and focused checks passed");
+		expect(projection.content).toContain('changed_files=["src/backend.ts","src/transport.ts"]');
+		expect(projection.content).toContain('unfinished=["Run the platform-specific smoke check"]');
+		expect(projection.content).toContain("Recent Workflow Context: workflow_id=workflow-stage-1");
+		expect(projection.content.indexOf("workflow-stage-2")).toBeLessThan(
+			projection.content.indexOf("workflow-stage-1"),
+		);
+		expect(projection.content).toContain("Notes for durable design semantics");
+	});
+
 	it("retains the start and continuation instruction of a long objective", () => {
 		const base = createSnapshot();
-		const objective = `Controlled boundary 1. ${"archive-padding ".repeat(80)}After the context switch, reply exactly WINDOW_1_READY.`;
+		const objective = `Controlled boundary 1. ${"archive-padding ".repeat(18)}PRESERVE_MIDDLE_CONSTRAINT ${"archive-padding ".repeat(80)}After the context switch, reply exactly WINDOW_1_READY.`;
 		const projection = projectWorkflowSnapshot({
 			...base,
 			workflow: {
@@ -213,6 +281,7 @@ describe("projectWorkflowSnapshot", () => {
 		});
 
 		expect(projection.content).toContain("Current objective: Controlled boundary 1.");
+		expect(projection.content).toContain("PRESERVE_MIDDLE_CONSTRAINT");
 		expect(projection.content).toContain("After the context switch, reply exactly WINDOW_1_READY.");
 		expect(projection.content).not.toContain(objective);
 	});
@@ -239,7 +308,7 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.byteLength).toBeLessThanOrEqual(MIN_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES);
 		expect(projection.content).toContain("[projection truncated: omitted");
 		expect(projection.content).toContain("Next action: Continue workflow_task_id=task-00");
-		expect(projection.content).toContain("History: use the history tool");
+		expect(projection.content).toContain("Use Workspace/diff for current code");
 	});
 
 	it("rejects invalid byte limits and mismatched workflow ids", () => {
@@ -277,7 +346,7 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.content).toContain("Upsert savepoint lost");
 		expect(projection.content).not.toContain("a-passed");
 		expect(projection.content).toContain("Current objective:");
-		expect(projection.content).toContain("Active constraints:");
+		expect(projection.content).toContain("Constraints:");
 		expect(projection.content.indexOf("Next action:")).toBeLessThan(projection.content.indexOf("z-upsert"));
 		expect(projection.byteLength).toBeLessThanOrEqual(1800);
 	});
@@ -301,7 +370,7 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.content).toContain("changed code and runtime success do not establish test coverage");
 	});
 
-	it("keeps failed and unchecked requirements ahead of a long agent-reported handoff", () => {
+	it("keeps failed and unchecked requirements ahead of observed modification details", () => {
 		const base = createSnapshot();
 		const snapshot: WorkflowSnapshot = {
 			...base,
@@ -313,10 +382,19 @@ describe("projectWorkflowSnapshot", () => {
 			tasks: [
 				{
 					...base.tasks[1],
-					description: `Existing suite passed. ${"Implementation details. ".repeat(80)}`,
 					verificationRequirements: [
 						{ id: "rollback", kind: "test", required: true, description: "Verify upsert rollback" },
 					],
+					modifications: Array.from({ length: 30 }, (_, index) => ({
+						path: `src/long-path-${index}-${"detail-".repeat(30)}.ts`,
+						operation: "edit" as const,
+						workflowId: "workflow-1",
+						taskId: "task-a",
+						attemptId: "attempt-1",
+						agentId: "main",
+						toolCallId: `tool-${index}`,
+						recordedAt: timestamp,
+					})),
 				},
 			],
 			verifications: [
@@ -331,10 +409,118 @@ describe("projectWorkflowSnapshot", () => {
 		expect(projection.byteLength).toBeLessThanOrEqual(1800);
 		expect(projection.content).toContain("Upsert savepoint lost");
 		expect(projection.content).toContain("Not checked: workflow_task_id=task-a requirement=rollback");
-		expect(projection.content).not.toContain("Existing suite passed.");
 		const full = projectWorkflowSnapshot(snapshot);
-		expect(full.content).toContain("Existing suite passed.");
-		expect(full.truncated).toBe(false);
+		expect(full.content).toContain('Observed modification: path="src/long-path-0-');
+	});
+
+	it("projects host-observed file changes with their Task and Attempt while keeping Workspace authoritative", () => {
+		const base = createSnapshot();
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			tasks: base.tasks.map((task) =>
+				task.id === "task-a"
+					? {
+							...task,
+							modifications: [
+								{
+									path: "src/importer.ts",
+									operation: "edit",
+									workflowId: "workflow-1",
+									taskId: "task-a",
+									attemptId: "attempt-1",
+									agentId: "main",
+									toolCallId: "tool-edit",
+									recordedAt: timestamp,
+								},
+							],
+						}
+					: task,
+			),
+		};
+		const projection = projectWorkflowSnapshot(snapshot);
+		expect(projection.content).toContain(
+			'Observed modification: path="src/importer.ts" operation=edit workflow_task_id=task-a workflow_attempt_id=attempt-1',
+		);
+		expect(projection.content).toContain("may be incomplete");
+		expect(projection.content).toContain("Use Workspace/diff for current code");
+	});
+
+	it("keeps only the latest observed modification for each Task path", () => {
+		const base = createSnapshot();
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			tasks: base.tasks.map((task) =>
+				task.id === "task-a"
+					? {
+							...task,
+							modifications: [
+								{
+									path: "src/importer.ts",
+									operation: "edit",
+									workflowId: "workflow-1",
+									taskId: "task-a",
+									attemptId: "attempt-1",
+									agentId: "main",
+									toolCallId: "tool-old",
+									recordedAt: "2025-01-01T00:00:00.000Z",
+								},
+								{
+									path: "src/importer.ts",
+									operation: "write",
+									workflowId: "workflow-1",
+									taskId: "task-a",
+									attemptId: "attempt-1",
+									agentId: "main",
+									toolCallId: "tool-new",
+									recordedAt: "2025-01-02T00:00:00.000Z",
+								},
+							],
+						}
+					: task,
+			),
+		};
+
+		const matchingLines = projectWorkflowSnapshot(snapshot)
+			.content.split("\n")
+			.filter((line) => line.includes('Observed modification: path="src/importer.ts"'));
+		expect(matchingLines).toEqual([
+			expect.stringContaining("operation=write workflow_task_id=task-a workflow_attempt_id=attempt-1"),
+		]);
+	});
+
+	it("projects deterministic one-shot verification receipts ahead of memory retrieval", () => {
+		const base = createSnapshot();
+		const snapshot: WorkflowSnapshot = {
+			...base,
+			tasks: base.tasks.map((task) =>
+				task.id === "task-a"
+					? {
+							...task,
+							operationReceipts: [
+								{
+									workflowId: "workflow-1",
+									taskId: "task-a",
+									attemptId: "attempt-1",
+									toolCallId: "live-verify-1",
+									toolName: "live_verify",
+									kind: "verification",
+									status: "succeeded",
+									inputSummary: '{"contract":"base"}',
+									resultSummary: "Acceptance passed: 11/11",
+									recordedAt: timestamp,
+								},
+							],
+						}
+					: task,
+			),
+		};
+		const projection = projectWorkflowSnapshot(snapshot);
+		expect(projection.content).toContain(
+			'Workflow Operation Receipt: kind=verification tool=live_verify status=succeeded input="{\\"contract\\":\\"base\\"}"',
+		);
+		expect(projection.content).toContain("tool_call_id=live-verify-1");
+		expect(projection.content).toContain("trust Workflow Operation Receipts");
+		expect(projection.content).toContain("do not repeat a receipt-bearing call solely to rediscover its result");
 	});
 
 	it.each(["plan", "task"] as const)("does not suggest finalizing with an unchecked %s requirement", (scope) => {

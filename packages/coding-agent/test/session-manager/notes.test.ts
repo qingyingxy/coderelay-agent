@@ -45,6 +45,54 @@ describe("SessionManager durable Notes", () => {
 		).toHaveLength(3);
 	});
 
+	it("rejects an identical active Note upsert without appending an operation", () => {
+		const session = SessionManager.inMemory();
+		const sourceEntryId = appendUser(session, "source fact");
+		session.upsertMemoryNote({
+			noteId: "decision-1",
+			category: "decision",
+			title: "Keep the stable rule",
+			content: "Keep the stable rule across context windows.",
+			keywords: ["stable", "rule"],
+			workflowId: "workflow-1",
+			taskId: "task-1",
+			sourceEntryIds: [sourceEntryId],
+		});
+		const operationCount = session
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === MEMORY_NOTE_CUSTOM_TYPE).length;
+
+		expect(() =>
+			session.upsertMemoryNote({
+				noteId: "decision-1",
+				category: "decision",
+				title: "Keep the stable rule",
+				content: " Keep the stable rule across context windows. ",
+				keywords: ["stable", "rule"],
+				workflowId: "workflow-1",
+				taskId: "task-1",
+				sourceEntryIds: [sourceEntryId],
+			}),
+		).toThrow("upsert does not change active note");
+		expect(
+			session.getBranch().filter((entry) => entry.type === "custom" && entry.customType === MEMORY_NOTE_CUSTOM_TYPE),
+		).toHaveLength(operationCount);
+
+		session.upsertMemoryNote({
+			noteId: "decision-1",
+			category: "decision",
+			title: "Keep the stable rule",
+			content: "Keep the revised stable rule across context windows.",
+			keywords: ["stable", "rule"],
+			workflowId: "workflow-1",
+			taskId: "task-1",
+			sourceEntryIds: [sourceEntryId],
+		});
+		expect(
+			session.getBranch().filter((entry) => entry.type === "custom" && entry.customType === MEMORY_NOTE_CUSTOM_TYPE),
+		).toHaveLength(operationCount + 1);
+	});
+
 	it("isolates Notes by the selected branch and validates source provenance", () => {
 		const session = SessionManager.inMemory();
 		const rootId = appendUser(session, "root");
@@ -97,32 +145,58 @@ describe("SessionManager durable Notes", () => {
 		expect(() => session.getMemoryNotes()).toThrow(MemoryNoteValidationError);
 	});
 
-	it("builds a recent-first whole-index hint without category priority", () => {
+	it("injects a recent-first metadata index without Note bodies or category priority", () => {
 		const session = SessionManager.inMemory();
-		session.upsertMemoryNote({ noteId: "older", category: "discovery", content: "older background omitted" }, 4_000);
-		session.upsertMemoryNote({ noteId: "discovery", category: "discovery", content: "discovery detail" }, 4_000);
+		session.upsertMemoryNote(
+			{ noteId: "older", category: "discovery", title: "Older background", content: "older background omitted" },
+			4_000,
+		);
+		session.upsertMemoryNote(
+			{ noteId: "discovery", category: "discovery", title: "Discovery", content: "discovery detail" },
+			4_000,
+		);
 		session.upsertMemoryNote(
 			{
 				noteId: "workflow-decision",
 				category: "decision",
+				title: "Workflow decision",
 				content: "workflow decision",
 				workflowId: "workflow-1",
 			},
 			4_000,
 		);
 		session.upsertMemoryNote(
-			{ noteId: "constraint", category: "constraint", content: "never overwrite user changes" },
+			{
+				noteId: "constraint",
+				category: "constraint",
+				title: "Preserve user changes",
+				content: "never overwrite user changes",
+			},
 			4_000,
 		);
-		const hint = session.buildMemoryNotesHint(460);
+		const hint = session.buildMemoryNotesHint(4_000);
 
-		expect(Buffer.byteLength(hint.content, "utf8")).toBeLessThanOrEqual(460);
-		expect(hint.content.indexOf("never overwrite user changes")).toBeLessThan(
-			hint.content.indexOf("workflow decision"),
+		expect(Buffer.byteLength(hint.content, "utf8")).toBeLessThanOrEqual(4_000);
+		expect(hint.content.indexOf('"note_id":"constraint"')).toBeLessThan(
+			hint.content.indexOf('"note_id":"workflow-decision"'),
 		);
-		expect(hint.content).toContain("[notes truncated]");
-		expect(hint.truncated).toBe(true);
-		expect(hint.noteEntryIds.length).toBeGreaterThan(0);
+		expect(hint.content).toContain('"note_id":"older"');
+		expect(hint.content).toContain('"updatedAt":');
+		expect(hint.content).toContain('"contentBytes":');
+		expect(hint.content).not.toContain('"content":');
+		expect(hint.content).not.toContain("never overwrite user changes");
+		expect(hint.content).not.toContain("older background omitted");
+		expect(hint.content).toContain("Read/search only relevant Notes");
+		expect(hint.content).toContain("Workflow controls task state/receipts");
+		expect(hint.content).toContain("Workspace/diff controls current code");
+		expect(hint.content).toContain("History is for unavailable prior evidence");
+		expect(hint.truncated).toBe(false);
+		expect(hint.noteEntryIds).toHaveLength(4);
+
+		const bounded = session.buildMemoryNotesHint(600);
+		expect(Buffer.byteLength(bounded.content, "utf8")).toBeLessThanOrEqual(600);
+		expect(bounded.content).toContain("[additional Notes omitted");
+		expect(bounded.truncated).toBe(true);
 	});
 
 	it("finds the earliest of eight notes omitted from the hint, including keyword aliases", () => {
@@ -148,6 +222,10 @@ describe("SessionManager durable Notes", () => {
 				title: `Checkpoint ${index}`,
 				content: "Recent work",
 			});
+		const roomyHint = session.buildMemoryNotesHint(4_000);
+		expect(roomyHint.noteEntryIds).toHaveLength(5);
+		expect(roomyHint.content).not.toContain('"note_id":"initial"');
+		expect(roomyHint.truncated).toBe(true);
 		const hint = session.buildMemoryNotesHint(510);
 		expect(hint.content).not.toContain("initial");
 		expect(hint.truncated).toBe(true);
@@ -255,8 +333,9 @@ describe("SessionManager durable Notes", () => {
 		for (const budget of [1, 20, 80, 300, 400, 4_000]) {
 			const hint = session.buildMemoryNotesHint(budget);
 			expect(Buffer.byteLength(hint.content)).toBeLessThanOrEqual(budget);
-			if (hint.noteEntryIds.includes(note.note.entryId)) expect(hint.content).toContain('- n [constraint] "标题😀"');
-			else expect(hint.content).not.toContain("- n");
+			if (hint.noteEntryIds.includes(note.note.entryId)) {
+				expect(hint.content).toContain('"note_id":"n"');
+			} else expect(hint.content).not.toContain("- n");
 		}
 		expect(() => session.listMemoryNotes(1_000, { cursor: "bad" })).toThrow("cursor");
 		expect(() => session.listMemoryNotes(1_000, { query: " " })).toThrow("query");

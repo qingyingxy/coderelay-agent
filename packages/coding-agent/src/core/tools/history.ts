@@ -5,7 +5,12 @@ import { stripAnsi } from "../../utils/ansi.ts";
 import { sanitizeBinaryOutput } from "../../utils/shell.ts";
 import { defineTool, type ToolDefinition } from "../extensions/types.ts";
 import { HISTORY_ROLES, type HistoryQueryRequest, type HistoryQueryResult, type HistoryRole } from "../history.ts";
-import { MEMORY_REVISION_GUIDELINE, MEMORY_TARGETED_SEARCH_GUIDELINE } from "../memory-retrieval-policy.ts";
+import {
+	MEMORY_REVISION_GUIDELINE,
+	MEMORY_TARGETED_SEARCH_GUIDELINE,
+	WORKFLOW_PROJECTION_RETRIEVAL_GUIDELINE,
+	WORKFLOW_RECEIPT_RETRIEVAL_GUIDELINE,
+} from "../memory-retrieval-policy.ts";
 import { getTextOutput } from "./render-utils.ts";
 
 const roleLabels: Record<HistoryRole, string> = {
@@ -114,7 +119,10 @@ export function createHistoryToolDefinition(
 			"List context windows, search prior session text, or read bounded original entries from the current session branch. Use returned cursors to continue truncated results.",
 		promptSnippet: "Retrieve exact prior messages and tool results from the current session branch",
 		promptGuidelines: [
-			"Use History for missing historical details, unresolved revisions or required original evidence. Read known source Entry IDs directly; otherwise search, then read relevant returned IDs. Stop when the requested information is sufficiently supported.",
+			"Treat the current workspace as authoritative for current code, symbols, methods, files, configuration and repository state. Inspect information that still exists there with workspace read/search tools; never query History for it.",
+			WORKFLOW_PROJECTION_RETRIEVAL_GUIDELINE,
+			"Use History only for missing user wording, historical decisions, unavailable prior tool results, conflicts or original evidence that cannot be reconstructed from the current workspace. When a visible Active Note body already contains the complete exact rule and no conflict or requested evidence remains, do not query History to reconfirm it or merely obtain provenance/source Entry IDs. Read known source Entry IDs directly only when original evidence is actually required; otherwise search, then read relevant returned IDs. Stop when the requested information is sufficiently supported.",
+			WORKFLOW_RECEIPT_RETRIEVAL_GUIDELINE,
 			MEMORY_REVISION_GUIDELINE,
 			MEMORY_TARGETED_SEARCH_GUIDELINE,
 		],

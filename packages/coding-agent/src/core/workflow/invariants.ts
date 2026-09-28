@@ -438,6 +438,32 @@ export function validateTask(task: Task): readonly DomainViolation[] {
 			);
 		}
 	}
+	if (
+		new Set((task.operationReceipts ?? []).map(({ toolCallId }) => toolCallId)).size !==
+		(task.operationReceipts ?? []).length
+	) {
+		violations.push(
+			violation("task.duplicate_operation_receipt", "Task operation receipt tool call ids must be unique"),
+		);
+	}
+	for (const receipt of task.operationReceipts ?? []) {
+		if (
+			receipt.workflowId !== task.workflowId ||
+			receipt.taskId !== task.id ||
+			!task.attemptIds.includes(receipt.attemptId) ||
+			!receipt.toolCallId.trim() ||
+			!receipt.toolName.trim() ||
+			!["one_shot", "verification"].includes(receipt.kind) ||
+			!["succeeded", "failed"].includes(receipt.status) ||
+			!receipt.inputSummary.trim() ||
+			!receipt.resultSummary.trim() ||
+			!Number.isFinite(Date.parse(receipt.recordedAt))
+		) {
+			violations.push(
+				violation("task.invalid_operation_receipt", `Task ${task.id} contains an invalid operation receipt`),
+			);
+		}
+	}
 	if (task.currentAttemptId && !task.attemptIds.includes(task.currentAttemptId)) {
 		violations.push(violation("task.current_attempt_missing", "Current attempt must appear in attempt ids"));
 	}

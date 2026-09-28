@@ -37,6 +37,7 @@ import type {
 	TaskId,
 	TaskResult,
 	TaskStatus,
+	ToolOperationReceipt,
 	VerificationResult,
 	Workflow,
 	WorkflowBlockedReason,
@@ -141,6 +142,9 @@ export interface WorkflowEventPayloadMap {
 	};
 	readonly "task.modification_recorded": {
 		readonly modification: FileModificationRecord;
+	};
+	readonly "task.operation_receipt_recorded": {
+		readonly receipt: ToolOperationReceipt;
 	};
 	readonly "task.started": TaskStatusChangedPayload & {
 		readonly attemptId: AttemptId;
@@ -294,6 +298,7 @@ const EVENT_ENTITY_TYPES: Readonly<Record<WorkflowEventType, WorkflowEntityType>
 	"task.ready": "task",
 	"task.assigned": "task",
 	"task.modification_recorded": "task",
+	"task.operation_receipt_recorded": "task",
 	"task.started": "task",
 	"task.verification_started": "task",
 	"task.blocked": "task",
@@ -628,6 +633,21 @@ function validatePayloadFields(event: AnyWorkflowEvent): readonly DomainViolatio
 				Number.isFinite(Date.parse(modification.recordedAt))
 				? []
 				: [violation("event.invalid_modification", "Task modification record is invalid")];
+		}
+		case "task.operation_receipt_recorded": {
+			const { receipt } = event.payload;
+			return receipt.workflowId === event.workflowId &&
+				receipt.taskId === event.entityId &&
+				receipt.attemptId.trim().length > 0 &&
+				receipt.toolCallId.trim().length > 0 &&
+				receipt.toolName.trim().length > 0 &&
+				["one_shot", "verification"].includes(receipt.kind) &&
+				["succeeded", "failed"].includes(receipt.status) &&
+				receipt.inputSummary.trim().length > 0 &&
+				receipt.resultSummary.trim().length > 0 &&
+				Number.isFinite(Date.parse(receipt.recordedAt))
+				? []
+				: [violation("event.invalid_operation_receipt", "Task operation receipt is invalid")];
 		}
 		case "task.started":
 			return event.payload.attemptId.trim().length > 0

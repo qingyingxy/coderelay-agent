@@ -51,8 +51,8 @@ export function formatWorkerExecutionContext(contract: WorkerExecutionContract):
 	return [
 		`Parent execution contract (fixed for this Attempt): ${serialized}`,
 		"This parent contract remains in the system context across new_context cuts. Do not replan or change its identity, scope, or acceptance requirements.",
-		"The fixed contract describes the original task, not a reset checklist. A runtime context-window receipt proves completed cuts even if your handoff omitted them. Do not repeat an already completed one-off cut; continue the remaining work.",
+		"The fixed contract describes the original task, not a reset checklist. A runtime context-window receipt proves completed cuts after earlier active context is removed. Do not repeat an already completed one-off cut; continue the remaining work.",
 		"The local Direct Workflow Snapshot tracks this child Session, not the parent Plan. Parent acceptance remains pending until the parent runtime verifies it. Notes, handoffs, and local completion are not parent verification evidence.",
-		"Before new_context, record modified files, unfinished work, and unverified requirements in notes or its handoff argument. After a cut continue the same Attempt and model; use history for exact earlier evidence. Report plan conflicts instead of silently widening scope.",
+		"Before new_context, write a Note only for important durable semantics not already preserved. Routine progress and successful edit/write observations are checkpointed in the local Workflow Snapshot. After a cut inspect the Workspace for current code and use History only for unavailable prior evidence. Continue the same Attempt and model; report plan conflicts instead of silently widening scope.",
 	].join("\n");
 }

@@ -19,8 +19,8 @@ import { createHarness } from "./harness.ts";
 
 describe("Planner to RPC Worker hard windows", () => {
 	it.each([false, true])(
-		"retains the contract across two cuts; unverified=%s",
-		async (unverified) => {
+		"retains the contract across two cuts; model omits verification=%s",
+		async (modelOmitsVerification) => {
 			const harness = await createHarness({ models: [{ id: "strong" }, { id: "fast" }] });
 			const sessionDir = join(harness.tempDir, "worker-sessions");
 			writeFileSync(join(harness.tempDir, "evidence.txt"), "evidence-secret-741");
@@ -51,7 +51,7 @@ describe("Planner to RPC Worker hard windows", () => {
 				],
 				env: {
 					PI_CODING_AGENT_DIR: join(harness.tempDir, "child-config"),
-					PI_WORKER_TEST_UNVERIFIED: unverified ? "1" : "0",
+					PI_WORKER_TEST_UNVERIFIED: modelOmitsVerification ? "1" : "0",
 				},
 			});
 			const configs: SubagentSessionConfig[] = [];
@@ -116,8 +116,7 @@ describe("Planner to RPC Worker hard windows", () => {
 				const [execution] = await plan.startReadySubagents(subagents, 1);
 				expect(execution).toBeDefined();
 				const result = await execution!.completion;
-				expect(result.status, result.error).toBe(unverified ? "failed" : "completed");
-				if (unverified) expect(result.errorCode).toBe("subagent.verification_failed");
+				expect(result.status, result.error).toBe("completed");
 				expect(configs).toHaveLength(1);
 				expect(configs[0]?.modelName).toBe("faux/fast");
 				expect(configs[0]?.contextWindow?.executionContract).toMatchObject({
@@ -138,8 +137,12 @@ describe("Planner to RPC Worker hard windows", () => {
 				const persisted = SessionManager.open(resolve(sessionDir, file!));
 				const cuts = persisted.getEntries().filter((entry) => entry.type === "context_window");
 				expect(cuts).toHaveLength(2);
-				expect(JSON.stringify(cuts[0])).toContain("unverified: node verify.cjs");
-				expect(JSON.stringify(cuts[1])).toContain("Still unverified: node verify.cjs");
+				for (const cut of cuts) {
+					const serialized = JSON.stringify(cut);
+					expect(serialized).toContain('Observed modification: path=\\"result.txt\\" operation=write');
+					expect(serialized).toContain("Fixture compatibility constraint");
+					expect(serialized).not.toContain("Keep the original fixture behavior; tests not yet run");
+				}
 				expect(
 					persisted.queryHistory(
 						{ action: "search", query: "evidence-secret-741", role: "toolResult", tool: "read" },
@@ -156,8 +159,9 @@ describe("Planner to RPC Worker hard windows", () => {
 								entry.type === "message" && entry.message.role === "toolResult" && entry.message.isError,
 						),
 				).toEqual([]);
-				if (!unverified)
-					expect(readFileSync(join(harness.tempDir, "verified.txt"), "utf8").trim().split("\n")).toHaveLength(2);
+				expect(readFileSync(join(harness.tempDir, "verified.txt"), "utf8").trim().split("\n")).toHaveLength(
+					modelOmitsVerification ? 1 : 2,
+				);
 			} finally {
 				await subagents.dispose();
 				session.dispose();

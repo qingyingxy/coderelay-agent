@@ -287,6 +287,23 @@ export interface FileModificationRecord {
 	readonly recordedAt: IsoDateTime;
 }
 
+export const TOOL_OPERATION_RECEIPT_KINDS = ["one_shot", "verification"] as const;
+export type ToolOperationReceiptKind = (typeof TOOL_OPERATION_RECEIPT_KINDS)[number];
+export type ToolOperationReceiptStatus = "succeeded" | "failed";
+
+export interface ToolOperationReceipt {
+	readonly workflowId: WorkflowId;
+	readonly taskId: TaskId;
+	readonly attemptId: AttemptId;
+	readonly toolCallId: string;
+	readonly toolName: string;
+	readonly kind: ToolOperationReceiptKind;
+	readonly status: ToolOperationReceiptStatus;
+	readonly inputSummary: string;
+	readonly resultSummary: string;
+	readonly recordedAt: IsoDateTime;
+}
+
 export interface Task extends EntityMetadata {
 	readonly id: TaskId;
 	readonly workflowId: WorkflowId;
@@ -312,6 +329,8 @@ export interface Task extends EntityMetadata {
 	readonly currentAttemptId?: AttemptId;
 	readonly verificationRequirements: readonly VerificationRequirement[];
 	readonly modifications: readonly FileModificationRecord[];
+	/** Host-observed receipts for explicitly marked one-shot operations and verification tools. */
+	readonly operationReceipts?: readonly ToolOperationReceipt[];
 	readonly blockedReason?: TaskBlockedReason;
 	readonly result?: TaskResult;
 }

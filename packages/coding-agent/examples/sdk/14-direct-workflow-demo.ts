@@ -40,8 +40,6 @@ let interactiveMode: InteractiveMode | undefined;
 const workspace = mkdtempSync(join(tmpdir(), "pi-direct-workflow-demo-"));
 const demoPath = "src/greeting.ts";
 const request = "请创建 src/greeting.ts，将问候语从 hello 改为 hello workflow，并运行测试验证。";
-const handoff =
-	"Unverified: greeting must equal hello workflow. The Node check failed. Next: recover the failure from History, edit the greeting and rerun verify_greeting.";
 const faux = registerFauxProvider({ tokensPerSecond: interactive ? 80 : undefined });
 let disposeSession: (() => void) | undefined;
 const checkResults: number[] = [];
@@ -92,20 +90,19 @@ try {
 		fauxAssistantMessage(fauxToolCall("verify_greeting", {}), { stopReason: "toolUse" }),
 		() => {
 			assert.deepEqual(checkResults, [1]);
-			return fauxAssistantMessage(fauxToolCall("new_context", { handoff }), { stopReason: "toolUse" });
+			return fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" });
 		},
 		(context) => {
-			assert.ok(
-				JSON.stringify(context.messages).includes(handoff),
-				"Pending verification missing from fresh context",
-			);
+			const text = JSON.stringify(context.messages);
+			assert.ok(text.includes("Workflow Snapshot is task-control authority"));
+			assert.ok(text.includes('Observed modification: path=\\"src/greeting.ts\\" operation=write'));
 			assert.ok(
 				!context.messages.some(
 					(message) => message.role === "toolResult" && message.toolName === "verify_greeting",
 				),
 				"Old test result was not excluded by the cut",
 			);
-			log("[context] Fresh window retains the pending check; old test output excluded");
+			log("[context] Fresh window retains deterministic workflow state; old test output excluded");
 			return fauxAssistantMessage(
 				fauxToolCall("history", { action: "search", query: "GREETING_CHECK_FAILED", tool: "verify_greeting" }),
 				{ stopReason: "toolUse" },

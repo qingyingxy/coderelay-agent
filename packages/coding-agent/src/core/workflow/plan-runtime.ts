@@ -15,7 +15,11 @@ import type { TeamTaskProposal } from "../subagents/team-types.ts";
 import type { AgentInstance, AgentRunResult } from "../subagents/types.ts";
 import { createWorkerExecutionContract } from "../subagents/worker-context.ts";
 import { type AgentProfile, type AgentProfileRole, BUILTIN_AGENT_PROFILES } from "./agent-profile.ts";
-import type { WorkflowContextCheckpoint, WorkflowContextProvider } from "./context-window-projection.ts";
+import {
+	selectRecentWorkflowSnapshots,
+	type WorkflowContextCheckpoint,
+	type WorkflowContextProvider,
+} from "./context-window-projection.ts";
 import { WorkflowController, type WorkflowControllerOptions } from "./controller.ts";
 import { SessionWorkflowEventLog, SessionWorkflowSnapshotStore } from "./event-log.ts";
 import type { ModelEscalationReason } from "./model-gateway.ts";
@@ -1299,7 +1303,12 @@ export class PlanWorkflowRuntime implements DeliveryWorkflowPort, WorkflowContex
 	#checkpoint(): WorkflowContextCheckpoint {
 		const snapshot: WorkflowSnapshot = this.#controller.createSnapshot(this.#workflowId);
 		const snapshotEntryId = this.#snapshotStore.append(snapshot);
-		return { workflowId: this.#workflowId, snapshotEntryId, snapshot };
+		return {
+			workflowId: this.#workflowId,
+			snapshotEntryId,
+			snapshot,
+			recentWorkflowSnapshots: selectRecentWorkflowSnapshots(this.#controller, this.#workflowId),
+		};
 	}
 
 	async #finishJobTask(taskId: string, attemptId: string, result: Job): Promise<Job> {

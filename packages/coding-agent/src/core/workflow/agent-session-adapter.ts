@@ -3,10 +3,15 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai/compat";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../agent-session.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { DelegationBindingHandle } from "../subagents/subagent-tools.ts";
 import type { AgentRunResult } from "../subagents/types.ts";
-import type { WorkflowContextCheckpoint, WorkflowContextProvider } from "./context-window-projection.ts";
+import {
+	selectRecentWorkflowSnapshots,
+	type WorkflowContextCheckpoint,
+	type WorkflowContextProvider,
+} from "./context-window-projection.ts";
 import type { StartDirectWorkflowCommand } from "./controller.ts";
 import { WorkflowController } from "./controller.ts";
 import type { UpgradeDirectToPlanDecision } from "./direct-plan-upgrade.ts";
@@ -21,7 +26,14 @@ import { evaluateBudget, formatBudgetEvaluation, type PermissionSet, sumResource
 import { DEFAULT_WORKFLOW_RUNTIME_REGISTRY, type WorkflowRuntimeRegistry } from "./runtime-registry.ts";
 import { WorkflowStore } from "./stores.ts";
 import { isWorkflowTerminalStatus } from "./transitions.ts";
-import type { AttemptId, ResourceUsage, TaskId, VerificationId, WorkflowId } from "./types.ts";
+import type {
+	AttemptId,
+	ResourceUsage,
+	TaskId,
+	ToolOperationReceiptKind,
+	VerificationId,
+	WorkflowId,
+} from "./types.ts";
 import { buildWorkflowView, type WorkflowView } from "./view.ts";
 import { DEFAULT_WRITER_LEASE_REGISTRY, type WriterLeaseRegistry } from "./writer-lease.ts";
 
@@ -42,8 +54,59 @@ function mutatedPath(args: unknown): string | undefined {
 	return undefined;
 }
 
+function stableJsonValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(stableJsonValue);
+	if (typeof value !== "object" || value === null) return value;
+	return Object.fromEntries(
+		Object.entries(value)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, child]) => [key, stableJsonValue(child)]),
+	);
+}
+
+function receiptSummary(value: string, maxBytes = 256): string {
+	const normalized = value.replace(/\s+/g, " ").trim();
+	if (Buffer.byteLength(normalized, "utf8") <= maxBytes) return normalized;
+	let selected = "";
+	for (const character of normalized) {
+		if (Buffer.byteLength(`${selected}${character}...`, "utf8") > maxBytes) break;
+		selected += character;
+	}
+	return `${selected}...`;
+}
+
+function receiptInputSummary(args: unknown): string {
+	try {
+		return receiptSummary(JSON.stringify(stableJsonValue(args)) ?? String(args));
+	} catch {
+		return receiptSummary(String(args));
+	}
+}
+
+function receiptResultSummary(result: unknown, isError: boolean): string {
+	if (typeof result === "object" && result !== null && "content" in result && Array.isArray(result.content)) {
+		const text = result.content
+			.flatMap((part) =>
+				typeof part === "object" &&
+				part !== null &&
+				"type" in part &&
+				part.type === "text" &&
+				"text" in part &&
+				typeof part.text === "string"
+					? [part.text]
+					: [],
+			)
+			.join("\n");
+		if (text.trim()) return receiptSummary(text);
+	}
+	return isError
+		? "Tool execution failed; exact result remains in History."
+		: "Tool execution completed successfully.";
+}
+
 export interface WorkflowAgentSession {
 	readonly sessionManager: SessionManager;
+	getToolDefinition?(name: string): Pick<ToolDefinition, "workflowReceipt"> | undefined;
 	subscribe(listener: AgentSessionEventListener): () => void;
 	abort(): Promise<void>;
 	waitForIdle(): Promise<void>;
@@ -71,6 +134,11 @@ interface PendingAgentEnd {
 interface PendingMutation {
 	readonly path: string;
 	readonly operation: "edit" | "write";
+}
+
+interface PendingOperationReceipt {
+	readonly kind: ToolOperationReceiptKind;
+	readonly inputSummary: string;
 }
 
 interface DeferredCompletion {
@@ -190,6 +258,8 @@ export class AgentSessionAdapter implements WorkflowContextProvider {
 	#planUpgradePromise?: Promise<void>;
 	/** In-flight mutation tool calls, keyed by toolCallId, awaiting their result. */
 	readonly #pendingMutations = new Map<string, PendingMutation>();
+	/** Explicitly marked one-shot or verification calls awaiting a host-observed result. */
+	readonly #pendingOperationReceipts = new Map<string, PendingOperationReceipt>();
 	/** Paths reported by successful edit/write tools across the whole workflow, in order. */
 	readonly #changedFiles: string[] = [];
 	#deferredCompletion?: DeferredCompletion;
@@ -237,16 +307,12 @@ export class AgentSessionAdapter implements WorkflowContextProvider {
 	checkpointForContextWindow(): WorkflowContextCheckpoint {
 		const snapshot = this.#controller.createSnapshot(this.#workflowId);
 		const snapshotEntryId = this.#snapshotStore.append(snapshot);
-		return { workflowId: this.#workflowId, snapshotEntryId, snapshot };
-	}
-
-	recordContextHandoff(description: string): void {
-		this.#controller.recordContextHandoff({
-			commandId: this.#createId("command"),
+		return {
 			workflowId: this.#workflowId,
-			taskId: this.#taskId,
-			description,
-		});
+			snapshotEntryId,
+			snapshot,
+			recentWorkflowSnapshots: selectRecentWorkflowSnapshots(this.#controller, this.#workflowId),
+		};
 	}
 
 	get finalReport(): WorkflowFinalReport | undefined {
@@ -763,46 +829,73 @@ export class AgentSessionAdapter implements WorkflowContextProvider {
 	}
 
 	#handleToolStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): void {
-		if (!this.#activeAttemptId || !MUTATION_TOOL_NAMES.has(event.toolName)) {
+		if (!this.#activeAttemptId) {
 			return;
 		}
-		const path = mutatedPath(event.args);
-		if (path) {
-			this.#pendingMutations.set(event.toolCallId, {
-				path,
-				operation: event.toolName === "write" ? "write" : "edit",
+		if (MUTATION_TOOL_NAMES.has(event.toolName)) {
+			const path = mutatedPath(event.args);
+			if (path) {
+				this.#pendingMutations.set(event.toolCallId, {
+					path,
+					operation: event.toolName === "write" ? "write" : "edit",
+				});
+			}
+		}
+		const receipt = this.#session.getToolDefinition?.(event.toolName)?.workflowReceipt;
+		if (receipt) {
+			this.#pendingOperationReceipts.set(event.toolCallId, {
+				kind: receipt.kind,
+				inputSummary: receiptInputSummary(event.args),
 			});
 		}
 	}
 
 	#handleToolEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): void {
 		const mutation = this.#pendingMutations.get(event.toolCallId);
-		if (mutation === undefined) {
-			return;
+		if (mutation !== undefined) {
+			this.#pendingMutations.delete(event.toolCallId);
+			if (!event.isError) {
+				if (!this.#activeAttemptId) {
+					throw new Error(`Workflow ${this.#workflowId} recorded a modification without an active Attempt`);
+				}
+				this.#controller.recordTaskModification({
+					commandId: this.#createId("command"),
+					workflowId: this.#workflowId,
+					taskId: this.#taskId,
+					modification: {
+						path: mutation.path,
+						operation: mutation.operation,
+						attemptId: this.#activeAttemptId,
+						agentId: "main-agent",
+						toolCallId: event.toolCallId,
+					},
+				});
+				if (!this.#changedFiles.includes(mutation.path)) {
+					this.#changedFiles.push(mutation.path);
+				}
+			}
 		}
-		this.#pendingMutations.delete(event.toolCallId);
-		// Only successful edit/write results count; failed mutations are not claimed.
-		if (event.isError) {
-			return;
-		}
+
+		const pendingReceipt = this.#pendingOperationReceipts.get(event.toolCallId);
+		if (!pendingReceipt) return;
+		this.#pendingOperationReceipts.delete(event.toolCallId);
 		if (!this.#activeAttemptId) {
-			throw new Error(`Workflow ${this.#workflowId} recorded a modification without an active Attempt`);
+			throw new Error(`Workflow ${this.#workflowId} recorded a tool receipt without an active Attempt`);
 		}
-		this.#controller.recordTaskModification({
+		this.#controller.recordTaskOperationReceipt({
 			commandId: this.#createId("command"),
 			workflowId: this.#workflowId,
 			taskId: this.#taskId,
-			modification: {
-				path: mutation.path,
-				operation: mutation.operation,
+			receipt: {
 				attemptId: this.#activeAttemptId,
-				agentId: "main-agent",
 				toolCallId: event.toolCallId,
+				toolName: event.toolName,
+				kind: pendingReceipt.kind,
+				status: event.isError ? "failed" : "succeeded",
+				inputSummary: pendingReceipt.inputSummary,
+				resultSummary: receiptResultSummary(event.result, event.isError),
 			},
 		});
-		if (!this.#changedFiles.includes(mutation.path)) {
-			this.#changedFiles.push(mutation.path);
-		}
 	}
 
 	#handleAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {

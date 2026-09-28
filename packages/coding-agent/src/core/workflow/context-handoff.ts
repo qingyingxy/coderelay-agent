@@ -12,6 +12,6 @@ export function validateContextHandoff(handoff: string) {
 		maxBytes: MAX_HANDOFF_BYTES,
 		targetBytes: CORRECTION_HANDOFF_BYTES,
 		retryable: true,
-		message: `handoff must contain 1-${MAX_HANDOFF_BYTES} UTF-8 bytes (received ${actualBytes} bytes, not characters). This request was rejected before changing the task brief or requesting a cut. Rewrite from scratch targeting at most ${CORRECTION_HANDOFF_BYTES} UTF-8 bytes, leaving ${MAX_HANDOFF_BYTES - CORRECTION_HANDOFF_BYTES} bytes of safety margin. Do not merely delete a few characters or aim just below ${MAX_HANDOFF_BYTES}. Preserve unresolved work, hard constraints and next action in compact clauses; leave detailed evidence in History. Then call new_context again. Do not drop unresolved requirements or report completion for this rejected request.`,
+		message: `task description must contain 1-${MAX_HANDOFF_BYTES} UTF-8 bytes (received ${actualBytes} bytes, not characters). This update was rejected before changing the task. Rewrite from scratch targeting at most ${CORRECTION_HANDOFF_BYTES} UTF-8 bytes, leaving ${MAX_HANDOFF_BYTES - CORRECTION_HANDOFF_BYTES} bytes of safety margin. Do not merely delete a few characters or aim just below ${MAX_HANDOFF_BYTES}. Preserve unresolved control state in compact clauses and leave detailed evidence in History.`,
 	};
 }

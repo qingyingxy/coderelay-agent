@@ -37,10 +37,16 @@ function providerUsage(input: number, output: number, cost: number): Usage {
 class FakeAgentSession implements WorkflowAgentSession {
 	readonly sessionManager = SessionManager.inMemory();
 	readonly #listeners = new Set<AgentSessionEventListener>();
+	readonly receiptTools = new Map<string, "one_shot" | "verification">();
 	abortCalls = 0;
 	waitForIdleCalls = 0;
 	/** Events emitted synchronously while abort() runs, mirroring a real settling run. */
 	abortEmits: AgentSessionEvent[] = [];
+
+	getToolDefinition(name: string) {
+		const kind = this.receiptTools.get(name);
+		return kind ? { workflowReceipt: { kind } } : undefined;
+	}
 
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this.#listeners.add(listener);
@@ -240,6 +246,45 @@ describe("AgentSessionAdapter", () => {
 			}),
 		]);
 
+		adapter.dispose();
+	});
+
+	it("persists host-observed receipts for explicitly marked one-shot and verification tools", () => {
+		const session = new FakeAgentSession();
+		session.receiptTools.set("live_verify", "verification");
+		const adapter = start(session);
+
+		session.emit({ type: "agent_start" });
+		session.emit({
+			type: "tool_execution_start",
+			toolCallId: "verify-call",
+			toolName: "live_verify",
+			args: { contract: "base", stage: 6 },
+		});
+		session.emit({
+			type: "tool_execution_end",
+			toolCallId: "verify-call",
+			toolName: "live_verify",
+			result: { content: [{ type: "text", text: "Acceptance passed: 11/11" }] },
+			isError: false,
+		});
+		mutate(session, "read", "src/unmarked.ts", false);
+
+		const receipt = replay(session).getTask(TASK_ID)?.operationReceipts;
+		expect(receipt).toEqual([
+			expect.objectContaining({
+				workflowId: WORKFLOW_ID,
+				taskId: TASK_ID,
+				attemptId: "attempt-2",
+				toolCallId: "verify-call",
+				toolName: "live_verify",
+				kind: "verification",
+				status: "succeeded",
+				inputSummary: '{"contract":"base","stage":6}',
+				resultSummary: "Acceptance passed: 11/11",
+			}),
+		]);
+		expect(adapter.checkpointForContextWindow().snapshot.tasks[0]?.operationReceipts).toEqual(receipt);
 		adapter.dispose();
 	});
 

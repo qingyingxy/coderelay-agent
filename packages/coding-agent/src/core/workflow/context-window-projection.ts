@@ -1,10 +1,24 @@
-import { MAX_HANDOFF_BYTES } from "./context-handoff.ts";
-import { HANDOFF_ARCHIVE_PREFIX } from "./handoff-archive.ts";
 import type { WorkflowSnapshot } from "./stores.ts";
-import type { Attempt, BudgetLimit, Plan, Task, VerificationResult, Workflow } from "./types.ts";
+import type {
+	Attempt,
+	BudgetLimit,
+	FileModificationRecord,
+	Plan,
+	Task,
+	ToolOperationReceipt,
+	VerificationResult,
+	Workflow,
+} from "./types.ts";
 
 export const DEFAULT_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES = 12_000;
 export const MIN_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES = 1_024;
+export const DEFAULT_RECENT_WORKFLOW_CONTEXT_LIMIT = 3;
+const DEFAULT_WORKFLOW_OBJECTIVE_MAX_BYTES = 1_024;
+const MIN_WORKFLOW_OBJECTIVE_MAX_BYTES = 256;
+const RECENT_WORKFLOW_OBJECTIVE_MAX_BYTES = 768;
+const RECENT_WORKFLOW_RESULT_MAX_BYTES = 512;
+const RECENT_WORKFLOW_FILE_LIMIT = 4;
+const RECENT_WORKFLOW_UNFINISHED_LIMIT = 2;
 
 export interface WorkflowContextProjection {
 	readonly schemaVersion: 1;
@@ -19,15 +33,42 @@ export interface WorkflowContextCheckpoint {
 	readonly workflowId: string;
 	readonly snapshotEntryId: string;
 	readonly snapshot: WorkflowSnapshot;
+	/** Recent persisted Workflow state projected only for cross-request continuity. */
+	readonly recentWorkflowSnapshots?: readonly WorkflowSnapshot[];
 }
 
 export interface WorkflowContextProvider {
+	/** Available on recovered/runtime providers that can report whether work is settled. */
+	readonly isTerminal?: boolean;
 	checkpointForContextWindow(): WorkflowContextCheckpoint | undefined;
 }
 
 interface ProjectionLine {
 	readonly content: string;
 	readonly required: boolean;
+}
+
+interface WorkflowSnapshotSource {
+	listWorkflows(): readonly Workflow[];
+	createSnapshot(workflowId: string): WorkflowSnapshot;
+}
+
+export function selectRecentWorkflowSnapshots(
+	source: WorkflowSnapshotSource,
+	currentWorkflowId: string,
+	limit = DEFAULT_RECENT_WORKFLOW_CONTEXT_LIMIT,
+): readonly WorkflowSnapshot[] {
+	if (!Number.isSafeInteger(limit) || limit < 0) {
+		throw new Error("Recent Workflow context limit must be a non-negative safe integer");
+	}
+	return source
+		.listWorkflows()
+		.filter(({ id, result }) => id !== currentWorkflowId && result !== undefined)
+		.sort(
+			(left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt) || right.id.localeCompare(left.id),
+		)
+		.slice(0, limit)
+		.map(({ id }) => source.createSnapshot(id));
 }
 
 function truncateField(value: string, maxBytes = 256): string {
@@ -144,11 +185,15 @@ function deriveNextAction(
 	}
 }
 
-function taskLine(task: Task): string {
+function taskLine(task: Task, currentObjective: string): string {
 	const dependencies = [...task.dependencyIds].sort().join(",") || "none";
 	const blocked = task.blockedReason ? ` blocked=${truncateField(task.blockedReason.message)}` : "";
-	const result = task.result ? ` result=${truncateField(task.result.summary)}` : "";
-	return `Workflow Task: workflow_task_id=${task.id} title=${truncateField(task.title)} kind=${task.kind} status=${task.status} workflow_task_dependency_ids=${dependencies} current_workflow_attempt_id=${task.currentAttemptId ?? "none"}${blocked}${result}`;
+	const description =
+		task.description.replace(/\s+/g, " ").trim() === currentObjective.replace(/\s+/g, " ").trim()
+			? ""
+			: ` description=${JSON.stringify(truncateObjective(task.description, 512))}`;
+	const result = task.result ? ` result=${JSON.stringify(truncateObjective(task.result.summary, 512))}` : "";
+	return `Workflow Task: workflow_task_id=${task.id} title=${truncateField(task.title)} kind=${task.kind} status=${task.status} workflow_task_dependency_ids=${dependencies} current_workflow_attempt_id=${task.currentAttemptId ?? "none"}${description}${blocked}${result}`;
 }
 
 function attemptLine(attempt: Attempt): string {
@@ -167,9 +212,34 @@ function verificationLine(verification: VerificationResult): string {
 	return `Workflow Verification: workflow_verification_id=${verification.id} workflow_task_id=${verification.taskId ?? "none"} requirement=${verification.requirementId} status=${verification.status} summary=${truncateField(verification.summary)} evidence=${evidence}`;
 }
 
+function modificationLine(modification: FileModificationRecord): string {
+	return `Observed modification: path=${JSON.stringify(truncateField(modification.path))} operation=${modification.operation} workflow_task_id=${modification.taskId} workflow_attempt_id=${modification.attemptId}`;
+}
+
+function operationReceiptLine(receipt: ToolOperationReceipt): string {
+	return `Workflow Operation Receipt: kind=${receipt.kind} tool=${receipt.toolName} status=${receipt.status} input=${JSON.stringify(truncateField(receipt.inputSummary, 192))} result=${JSON.stringify(truncateField(receipt.resultSummary, 256))} workflow_task_id=${receipt.taskId} workflow_attempt_id=${receipt.attemptId} tool_call_id=${receipt.toolCallId}`;
+}
+
+function recentWorkflowLine(snapshot: WorkflowSnapshot): string {
+	const workflow = snapshot.workflow;
+	const result = workflow.result;
+	const changedFiles =
+		result?.changedFiles.slice(0, RECENT_WORKFLOW_FILE_LIMIT).map((path) => truncateField(path, 128)) ?? [];
+	if (result && result.changedFiles.length > changedFiles.length) {
+		changedFiles.push(`+${result.changedFiles.length - changedFiles.length} more`);
+	}
+	const unfinished =
+		result?.unfinishedItems.slice(0, RECENT_WORKFLOW_UNFINISHED_LIMIT).map((item) => truncateField(item, 160)) ?? [];
+	if (result && result.unfinishedItems.length > unfinished.length) {
+		unfinished.push(`+${result.unfinishedItems.length - unfinished.length} more`);
+	}
+	return `Recent Workflow Context: workflow_id=${workflow.id} status=${workflow.status} user_objective=${JSON.stringify(truncateObjective(workflow.request.text, RECENT_WORKFLOW_OBJECTIVE_MAX_BYTES))} recorded_result=${JSON.stringify(truncateObjective(result?.summary ?? result?.reason ?? "none", RECENT_WORKFLOW_RESULT_MAX_BYTES))} changed_files=${JSON.stringify(changedFiles)} unfinished=${JSON.stringify(unfinished)}`;
+}
+
 export function projectWorkflowSnapshot(
 	snapshot: WorkflowSnapshot,
 	maxBytes = DEFAULT_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES,
+	recentWorkflowSnapshots: readonly WorkflowSnapshot[] = [],
 ): WorkflowContextProjection {
 	if (!Number.isSafeInteger(maxBytes) || maxBytes < MIN_WORKFLOW_CONTEXT_PROJECTION_MAX_BYTES) {
 		throw new Error(
@@ -184,6 +254,35 @@ export function projectWorkflowSnapshot(
 	const plan = selectCurrentPlan(snapshot);
 	const tasks = [...snapshot.tasks].sort((left, right) => left.id.localeCompare(right.id));
 	const attempts = selectLatestAttempts(snapshot);
+	const operationReceipts = tasks
+		.flatMap((task) => task.operationReceipts ?? [])
+		.sort(
+			(left, right) =>
+				Date.parse(right.recordedAt) - Date.parse(left.recordedAt) ||
+				left.toolCallId.localeCompare(right.toolCallId),
+		);
+	const recentWorkflows = [...recentWorkflowSnapshots]
+		.filter(({ workflowId }) => workflowId !== workflow.id)
+		.sort(
+			(left, right) =>
+				Date.parse(right.workflow.updatedAt) - Date.parse(left.workflow.updatedAt) ||
+				right.workflowId.localeCompare(left.workflowId),
+		)
+		.slice(0, DEFAULT_RECENT_WORKFLOW_CONTEXT_LIMIT);
+	const modifications = tasks
+		.flatMap((task) => task.modifications)
+		.sort(
+			(left, right) =>
+				Date.parse(right.recordedAt) - Date.parse(left.recordedAt) ||
+				left.path.localeCompare(right.path) ||
+				left.toolCallId.localeCompare(right.toolCallId),
+		)
+		.filter(
+			(modification, index, all) =>
+				all.findIndex(
+					(candidate) => candidate.taskId === modification.taskId && candidate.path === modification.path,
+				) === index,
+		);
 	const verifications = snapshot.verifications
 		.map(({ result }) => result)
 		.sort(
@@ -209,8 +308,11 @@ export function projectWorkflowSnapshot(
 		),
 	];
 	const mode = workflow.modeDecision?.mode ?? "undecided";
-	const directTask = mode === "direct" ? tasks.find(({ id }) => id === workflow.rootTaskId) : undefined;
 	const stopReason = workflow.result?.reason ?? workflow.blockedReason?.message ?? "none";
+	const objectiveMaxBytes = Math.min(
+		DEFAULT_WORKFLOW_OBJECTIVE_MAX_BYTES,
+		Math.max(MIN_WORKFLOW_OBJECTIVE_MAX_BYTES, Math.floor(maxBytes / 4)),
+	);
 	const assumptions = plan
 		? [...plan.assumptions]
 				.sort()
@@ -219,53 +321,56 @@ export function projectWorkflowSnapshot(
 		: "none";
 
 	const lines: ProjectionLine[] = [
-		{ content: "Context window continuity seed (Workflow Snapshot is authoritative):", required: true },
 		{
-			content:
-				"Workflow identifiers are internal control-plane IDs. Do not substitute them for user-requested domain identifiers.",
+			content: "Workflow Snapshot is task-control authority; Workspace/diff is current-code authority:",
+			required: true,
+		},
+		{
+			content: "Internal workflow_* IDs are control-plane IDs, not user-domain identifiers.",
 			required: true,
 		},
 		{
 			content: `Workflow: workflow_id=${workflow.id} mode=${mode} status=${workflow.status} sequence=${snapshot.lastSequence}`,
 			required: true,
 		},
-		{ content: `Current objective: ${truncateObjective(workflow.request.text)}`, required: true },
-		{ content: `Stop/block reason: ${truncateField(stopReason)}`, required: true },
+		{ content: `Current objective: ${truncateObjective(workflow.request.text, objectiveMaxBytes)}`, required: true },
+		{ content: `Stop/block: ${truncateField(stopReason)}`, required: true },
 		{
 			content: plan
-				? `Current plan: workflow_plan_id=${plan.id} version=${plan.version} status=${plan.status} goal=${truncateField(plan.goal)}`
-				: "Current plan: none",
+				? `Plan: workflow_plan_id=${plan.id} version=${plan.version} status=${plan.status} goal=${truncateField(plan.goal)}`
+				: "Plan: none",
 			required: true,
 		},
 		{
-			content: `Active constraints: workflowBudget=${formatBudget(workflow.budget)} assumptions=${assumptions}`,
+			content: `Constraints: workflowBudget=${formatBudget(workflow.budget)} assumptions=${assumptions}`,
 			required: true,
 		},
 		{ content: `Next action: ${deriveNextAction(workflow, tasks, verifications, unchecked)}`, required: true },
+		...operationReceipts.map((receipt) => ({ content: operationReceiptLine(receipt), required: false })),
+		{
+			content:
+				"Recovery order: trust Workflow Operation Receipts for whether marked one-shot/verification calls ran; do not query Notes or History merely to reconfirm them, and do not repeat a receipt-bearing call solely to rediscover its result. Use Workspace/diff for current code, Notes for durable design semantics, and History only when exact unavailable prior evidence is required.",
+			required: false,
+		},
 		...verifications
 			.filter(({ status }) => status !== "passed")
 			.map((verification) => ({ content: verificationLine(verification), required: false })),
 		...unchecked.map((content) => ({ content, required: false })),
-		...(directTask && directTask.description !== workflow.request.text
-			? [
-					{
-						content: `Current task brief (agent-reported, not verification evidence): ${truncateField(directTask.description, MAX_HANDOFF_BYTES)}`,
-						required: directTask.description.startsWith(HANDOFF_ARCHIVE_PREFIX),
-					},
-				]
-			: []),
+		...recentWorkflows.map((recent) => ({ content: recentWorkflowLine(recent), required: false })),
+		...modifications.map((modification) => ({ content: modificationLine(modification), required: false })),
 		{
 			content:
-				"Verification scope: changed code and runtime success do not establish test coverage. Resolve unchecked work before final submission; consult original requirements in History. In each replacement handoff, retain unresolved items unless item-specific evidence or a user scope change resolves them. Existing-suite success alone does not resolve untested requirements.",
+				"Verification scope: changed code and runtime success do not establish test coverage. Resolve unchecked work from the Current objective before final submission. Use History only when an exact required detail is absent. Existing-suite success alone does not resolve untested requirements.",
 			required: false,
 		},
-		...tasks.map((task) => ({ content: taskLine(task), required: false })),
+		...tasks.map((task) => ({ content: taskLine(task, workflow.request.text), required: false })),
 		...verifications
 			.filter(({ status }) => status === "passed")
 			.map((verification) => ({ content: verificationLine(verification), required: false })),
 		...attempts.map((attempt) => ({ content: attemptLine(attempt), required: false })),
 		{
-			content: "History: use the history tool when an exact prior message or tool result is needed.",
+			content:
+				"Observed edit/write paths may be incomplete. Use Workspace/diff for current code; use History only for unavailable prior evidence.",
 			required: true,
 		},
 	];

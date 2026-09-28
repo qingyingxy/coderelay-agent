@@ -38,10 +38,7 @@ describe("live candidate protocol", () => {
 			expect(harness.session.thinkingLevel).toBe(level);
 			harness.session.enableWorkflowTracking("direct");
 			harness.setResponses([
-				fauxAssistantMessage(
-					fauxToolCall("new_context", { handoff: "Pending: finish implementation; tests owned by host." }),
-					{ stopReason: "toolUse" },
-				),
+				fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" }),
 				() => {
 					expect(harness.session.thinkingLevel).toBe(level);
 					return fauxAssistantMessage("Done");

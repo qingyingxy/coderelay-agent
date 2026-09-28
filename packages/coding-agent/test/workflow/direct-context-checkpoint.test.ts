@@ -1,3 +1,4 @@
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../../src/core/agent-session.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -7,6 +8,7 @@ import {
 	type WorkflowAgentSession,
 	WriterLeaseRegistry,
 } from "../../src/core/workflow/index.ts";
+import { recoverLatestDirectWorkflowContextProvider } from "../../src/core/workflow/recovered-context-provider.ts";
 
 class FakeAgentSession implements WorkflowAgentSession {
 	readonly sessionManager = SessionManager.inMemory("C:/repo");
@@ -94,5 +96,50 @@ describe("AgentSessionAdapter context checkpoint", () => {
 		expect(append).toHaveBeenCalledWith(WORKFLOW_SNAPSHOT_CUSTOM_TYPE, expect.any(Object));
 
 		adapter.dispose();
+	});
+
+	it("recovers the latest Direct Workflow checkpoint after the live adapter is disposed", () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+		adapter.dispose();
+
+		const recovered = recoverLatestDirectWorkflowContextProvider(session.sessionManager);
+		const checkpoint = recovered?.checkpointForContextWindow();
+
+		expect(recovered?.isTerminal).toBe(false);
+		expect(checkpoint?.workflowId).toBe("workflow-direct-context");
+		expect(session.sessionManager.getEntry(checkpoint?.snapshotEntryId ?? "")).toMatchObject({
+			type: "custom",
+			customType: WORKFLOW_SNAPSHOT_CUSTOM_TYPE,
+			data: checkpoint?.snapshot,
+		});
+	});
+
+	it("reports terminal state from recovered Direct Workflow events", () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		session.emit({ type: "agent_start" });
+		const message = fauxAssistantMessage("completed");
+		session.emit({ type: "message_end", message });
+		session.emit({ type: "turn_end", message, toolResults: [] });
+		session.emit({ type: "agent_end", messages: [message], willRetry: false });
+		session.emit({ type: "agent_settled" });
+		adapter.dispose();
+
+		expect(recoverLatestDirectWorkflowContextProvider(session.sessionManager)?.isTerminal).toBe(true);
+	});
+
+	it("does not recover a stale Direct Workflow after a newer untracked user message", () => {
+		const session = new FakeAgentSession();
+		const adapter = start(session);
+		adapter.dispose();
+		session.sessionManager.appendMessage({
+			role: "user",
+			content: "newer untracked request",
+			timestamp: 200,
+		});
+
+		expect(recoverLatestDirectWorkflowContextProvider(session.sessionManager)).toBeUndefined();
 	});
 });

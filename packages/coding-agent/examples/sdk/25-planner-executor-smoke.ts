@@ -83,7 +83,7 @@ try {
 		"For this fixture, initialValue and amount are finite non-negative numbers and subscribers are valid non-throwing functions. Validation of other inputs, subscriber errors, and broader counter-library hardening are outside this task. " +
 		"Keep the exported API stable. Only modify src/counter-store.mjs. Do not modify test or package.json. Run node --test. " +
 		(arm === "candidate"
-			? "Plan exactly one serial worker task. Require the worker to read the code, call new_context exactly once with a handoff preserving findings and unverified work, then implement and run node --test. After the cut, its runtime receipt means the one-off cut requirement is complete; do not repeat it. Include this explicit cut requirement in the worker task description."
+			? "Plan exactly one serial worker task. Require the worker to read the code, call new_context exactly once with an empty argument object, then continue from the deterministic Workflow Snapshot and Workspace state to implement and run node --test. After the cut, its runtime receipt means the one-off cut requirement is complete; do not repeat it. Include this explicit cut requirement in the worker task description."
 			: "Implement directly without delegating to subagents.");
 	await session.prompt(prompt);
 	if (arm === "candidate") {

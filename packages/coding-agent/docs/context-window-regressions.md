@@ -11,18 +11,17 @@ The two product defects below were found while following that evidence through
 the current Snapshot projection. They are independently reproduced regressions,
 not claimed causes of CW18.14: that trial reported no projection truncation.
 
-## Long handoff hides authoritative verification
+## Long optional detail hides authoritative verification
 
-- Trigger: a Direct task has a long agent-reported brief, a failed verification,
-  an unchecked requirement, and a bounded continuity seed.
-- Before: optional projection packing tries the brief first and stops when it
-  cannot fit. Failure and unchecked details disappear even when they would fit.
-- Regression: `keeps failed and unchecked requirements ahead of a long
-  agent-reported handoff` uses an 1800-byte seed. It asserts that failure and
-  unchecked scope remain visible, and that the full budget still retains the brief.
-- Fix: project non-passing results and unchecked requirements before the brief.
-  Byte limits and truncation reporting still apply; arbitrary amounts of detail
-  cannot be guaranteed to fit.
+- Trigger: a Direct task has many host-observed file modifications, a failed
+  verification, an unchecked requirement, and a bounded continuity seed.
+- Before: optional projection packing could consume the budget before failure
+  and unchecked details that are more important for safe continuation.
+- Regression: `keeps failed and unchecked requirements ahead of observed
+  modification details` uses an 1800-byte seed and asserts that failure and
+  unchecked scope remain visible.
+- Fix: project non-passing results and unchecked requirements before observed
+  modification details. Byte limits and truncation reporting still apply.
 
 ## Unchecked requirements receive finalization guidance
 
@@ -37,23 +36,20 @@ not claimed causes of CW18.14: that trial reported no projection truncation.
 
 ## Validation
 
-All three new cases failed against the original implementation. After the fix,
-40 tests passed across projection, handoff, continuity and actual context-window
-lifecycle suites. These tests use no paid provider or Docker environment.
+All three new cases failed against the original implementation. The focused
+projection, Notes and actual context-window lifecycle suites use no paid
+provider or Docker environment.
 
 From `packages/coding-agent`:
 
 ```sh
-node ../../node_modules/vitest/dist/cli.js --run test/workflow/context-window-projection.test.ts test/workflow/handoff.test.ts test/suite/agent-session-handoff-continuity.test.ts test/suite/agent-session-context-window.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/workflow/context-window-projection.test.ts test/suite/agent-session-context-window.test.ts test/suite/agent-session-notes-pre-cut-review.test.ts
 ```
 
-`npm run check` exited zero, including TypeScript, lock validation and browser
-smoke, but reported the existing Biome write-access diagnostic on
-`src/core/evaluation/protocol.ts` and npm `min-release-age` warnings. A separate
-read-only Biome check passed all 1112 configured files with no diagnostics.
+`npm run check` and the focused suites pass. No real provider is used by these
+regression tests.
 
 These fixes preserve and correctly describe verification already represented
-in the Workflow. They do not infer coverage from arbitrary test output, recover
-requirements omitted from free-text handoffs, change completion gates, or prove
-improved real-model task success. The original omission remains an open semantic
-limitation; no additional paid evaluation was run.
+in the Workflow. They do not infer coverage from arbitrary test output, change
+completion gates, or prove improved real-model task success. No additional paid
+evaluation was run.

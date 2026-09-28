@@ -55,6 +55,16 @@ function render(
 
 describe("History tool rendering", () => {
 	beforeAll(() => initTheme(undefined, false));
+	it("reserves History for evidence unavailable from the current workspace", () => {
+		const tool = createHistoryToolDefinition(() => search);
+		const guidelines = tool.promptGuidelines?.join("\n") ?? "";
+		expect(guidelines).toContain("current workspace as authoritative");
+		expect(guidelines).toContain("symbols, methods");
+		expect(guidelines).toContain("never query History");
+		expect(guidelines).toContain("cannot be reconstructed from the current workspace");
+		expect(guidelines).toContain("visible Active Note body already contains the complete exact rule");
+		expect(guidelines).toContain("merely obtain provenance/source Entry IDs");
+	});
 	it("shows actual source and evidence without raw JSON or record IDs by default", () => {
 		const text = render(search).map(stripAnsi).join("\n");
 		expect(text).toContain("本页 1 条相关结果");

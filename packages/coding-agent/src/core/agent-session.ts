@@ -113,6 +113,7 @@ import { formatJob, formatJobLogs, formatJobs, type Job, JobRuntime, LocalJobPro
 import type { BashExecutionMessage, CustomMessage } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { ModelRuntime } from "./model-runtime.ts";
+import { reviewNotesBeforeCut } from "./notes-pre-cut-review.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type {
@@ -214,6 +215,7 @@ import {
 	executePlannerPrompt,
 	parsePlannerPlanContentWithRepair,
 } from "./workflow/planner-runtime.ts";
+import { recoverLatestDirectWorkflowContextProvider } from "./workflow/recovered-context-provider.ts";
 import type { WorkflowFinalReport } from "./workflow/report.ts";
 import type { PermissionSet } from "./workflow/runtime-policy.ts";
 import type { BudgetLimit, ExecutionMode, ModeDecision, TaskLevel } from "./workflow/types.ts";
@@ -1321,7 +1323,10 @@ export class AgentSession {
 		};
 	}
 
-	private _createContextWindowSeed(checkpoint: WorkflowContextCheckpoint | undefined): ContextWindowSeed {
+	private _createContextWindowSeed(
+		checkpoint: WorkflowContextCheckpoint | undefined,
+		reviewWarning?: string,
+	): ContextWindowSeed {
 		let baseSeed: ContextWindowSeed;
 		if (checkpoint) {
 			const projection = projectWorkflowSnapshot(checkpoint.snapshot);
@@ -1340,9 +1345,9 @@ export class AgentSession {
 		);
 		return {
 			...baseSeed,
-			content: `${baseSeed.content}\n\n${notesHint.content}`,
+			content: `${baseSeed.content}\n\n${notesHint.content}${reviewWarning ? `\n\nNotes pre-cut review incomplete: ${truncateUtf8(reviewWarning, 200).content}. Check recent original messages in History if needed.` : ""}`,
 			noteEntryIds: [...notesHint.noteEntryIds],
-			truncated: baseSeed.truncated || notesHint.truncated,
+			truncated: baseSeed.truncated || notesHint.truncated || reviewWarning !== undefined,
 		};
 	}
 
@@ -1395,6 +1400,41 @@ export class AgentSession {
 				throw new Error("Cannot cut context while tool calls are still pending");
 			}
 			this._flushPendingBashMessages();
+			let reviewWarning: string | undefined;
+			if (pending.reason === "overflow" && this.model && this._toolRegistry.has("notes")) {
+				try {
+					const auth = await this._getSummarizationRequestAuth(this.model);
+					const review = await reviewNotesBeforeCut(
+						this.sessionManager,
+						this.model,
+						this.agent.streamFunction,
+						auth,
+					);
+					if (review.response) {
+						this.sessionManager.appendMessage({
+							...review.response,
+							content: [{ type: "text", text: "[Bounded pre-cut Notes review]" }],
+							stopReason: "stop",
+						});
+					}
+					for (const noteId of review.noteIds ?? []) {
+						this._emit({ type: "notes_changed", action: "upsert", noteId });
+					}
+					if (
+						review.status === "failed" ||
+						(review.status === "skipped" &&
+							![
+								/^no recent user message$/,
+								/^Notes changed during the recent turn$/,
+								/^recent turn was already reviewed$/,
+							].some((pattern) => pattern.test(review.reason ?? "")))
+					) {
+						reviewWarning = review.reason ?? "review did not complete";
+					}
+				} catch (error) {
+					reviewWarning = error instanceof Error ? error.message : String(error);
+				}
+			}
 			const tokensBefore = this._contextTokensBeforeCut();
 			const mode = this.settingsManager.getContextManagementSettings().mode;
 			const workflowContextProvider = this._getWorkflowContextProviderForCut(mode);
@@ -1402,7 +1442,7 @@ export class AgentSession {
 			if (checkpoint) {
 				this._validateWorkflowContextCheckpoint(checkpoint);
 			}
-			const contextSeed = this._createContextWindowSeed(checkpoint);
+			const contextSeed = this._createContextWindowSeed(checkpoint, reviewWarning);
 			const lineage = this.sessionManager.createNextContextWindowLineage();
 			const entryId = this.sessionManager.appendContextWindow({
 				schemaVersion: 1,
@@ -1645,6 +1685,7 @@ export class AgentSession {
 		this._workflowVerificationCommands = verificationCommands.map((command) => command.trim());
 		this._workflowProtocolRuntime = undefined;
 		this._recoverPendingWorkflowClarification();
+		this._latestDirectWorkflowContextProvider ??= recoverLatestDirectWorkflowContextProvider(this.sessionManager);
 		this._planWorkflowRuntime ??= PlanWorkflowRuntime.recoverLatest(this.sessionManager);
 		if (
 			this._workflowAutomationEnabled &&
@@ -4744,16 +4785,17 @@ export class AgentSession {
 		if (contextTokens < budget.softLimit || this._contextWindowSoftWarningIssued) {
 			return false;
 		}
-		this._scheduleContextWindowSoftWarning(contextTokens, budget, beforePrompt, betweenToolTurns);
-		return !beforePrompt;
+		this._scheduleContextWindowSoftWarning(contextTokens, budget, betweenToolTurns);
+		return betweenToolTurns;
 	}
 
 	private _scheduleContextWindowSoftWarning(
 		contextTokens: number,
 		budget: ContextWindowTokenBudget,
-		beforePrompt: boolean,
 		betweenToolTurns = false,
 	): void {
+		const boundaryInstruction =
+			"This warning is not a context boundary: do not call new_context solely because of it, and do not stop, wait for, or announce a future window. Continue the current task; the host will cut automatically after the hard limit.";
 		this._contextWindowPhase = "soft_warning_pending";
 		this._contextWindowSoftWarningIssued = true;
 		this._emit({
@@ -4767,7 +4809,8 @@ export class AgentSession {
 			customType: CONTEXT_WINDOW_WARNING_MESSAGE_TYPE,
 			content: [
 				"The current context window is approaching its hard token limit.",
-				"Finish the current non-interruptible tool step. Save durable cross-window decisions, constraints and discoveries in Notes; keep ordinary progress out of Notes. In an active Direct Workflow, call new_context with a short handoff: modified but unverified work, unchecked regressions, next action, then verified checks with evidence references. This updates the Snapshot task brief, not verification status. Otherwise omit handoff and rely on existing Workflow records and History. Call new_context before starting more high-cost work.",
+				"Finish the current non-interruptible tool step. Upsert only important new or changed cross-window decisions, constraints, discoveries and unresolved questions that are not already persisted in Active Notes; do not rescan or summarize the full history, rewrite unchanged Notes, or store ordinary progress. If nothing important is missing, do not write a Note. Workflow progress is checkpointed deterministically when the context is cut.",
+				boundaryInstruction,
 			].join("\n"),
 			display: false,
 			details: {
@@ -4783,12 +4826,10 @@ export class AgentSession {
 			readonly hardLimit: number;
 			readonly reserveTokens: number;
 		}>;
-		if (beforePrompt) {
-			this._pendingNextTurnMessages.push(message);
-		} else if (betweenToolTurns) {
+		if (betweenToolTurns) {
 			this.agent.steer(message);
 		} else {
-			this.agent.followUp(message);
+			this._pendingNextTurnMessages.push(message);
 		}
 		this._contextWindowPhase = "notes_collection";
 	}
@@ -5322,18 +5363,9 @@ export class AgentSession {
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 				});
 		if (contextWindowToolEnabled) {
-			baseToolDefinitions.new_context = createNewContextToolDefinition(async (handoff) => {
+			baseToolDefinitions.new_context = createNewContextToolDefinition(async () => {
 				if (contextManagementMode === "hybrid" && !this._usesHardContextWindows(contextManagementMode)) {
 					throw new Error("new_context requires an active Workflow context provider in hybrid mode");
-				}
-				if (handoff !== undefined) {
-					if (
-						!this._activeWorkflowAdapter ||
-						(this._contextWindowPhase !== "idle" && this._contextWindowPhase !== "notes_collection")
-					) {
-						throw new Error("handoff requires an active Direct Workflow and no pending context cut");
-					}
-					this._activeWorkflowAdapter.recordContextHandoff(handoff);
 				}
 				await this.requestContextWindow("model", { continueAfterCut: true });
 			}) as ToolDefinition;

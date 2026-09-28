@@ -33,6 +33,7 @@ import type {
 	TaskAssignment,
 	TaskBlockedReason,
 	TaskId,
+	ToolOperationReceipt,
 	UserRequest,
 	VerificationId,
 	VerificationRequirement,
@@ -137,6 +138,11 @@ export interface CancelTaskCommand extends WorkflowCommandBase {
 export interface RecordTaskModificationCommand extends WorkflowCommandBase {
 	readonly taskId: TaskId;
 	readonly modification: Omit<FileModificationRecord, "workflowId" | "taskId" | "recordedAt">;
+}
+
+export interface RecordTaskOperationReceiptCommand extends WorkflowCommandBase {
+	readonly taskId: TaskId;
+	readonly receipt: Omit<ToolOperationReceipt, "workflowId" | "taskId" | "recordedAt">;
 }
 
 interface RuntimeEventBase extends WorkflowCommandBase {
@@ -953,6 +959,39 @@ export class WorkflowController {
 			payload: { modification },
 		};
 		return this.#commit(command, [event]);
+	}
+
+	recordTaskOperationReceipt(command: RecordTaskOperationReceiptCommand): WorkflowCommandResult {
+		const duplicate = this.#duplicateResult(command);
+		if (duplicate) {
+			return duplicate;
+		}
+		const task = this.#requireTask(command.taskId, command.workflowId);
+		const attempt = this.#requireAttempt(command.receipt.attemptId, task.id, command.workflowId);
+		if (task.status !== "running" || attempt.status !== "running") {
+			fail("controller.operation_receipt_not_running", "Tool operation receipts require a running Task and Attempt");
+		}
+		if ((task.operationReceipts ?? []).some(({ toolCallId }) => toolCallId === command.receipt.toolCallId)) {
+			return this.#result(command.workflowId, undefined, false);
+		}
+		const occurredAt = this.#now();
+		const receipt: ToolOperationReceipt = {
+			...structuredClone(command.receipt),
+			workflowId: command.workflowId,
+			taskId: task.id,
+			recordedAt: occurredAt,
+		};
+		return this.#commit(command, [
+			{
+				eventId: this.#eventId(),
+				entityId: task.id,
+				entityRevision: task.revision + 1,
+				eventType: "task.operation_receipt_recorded",
+				occurredAt,
+				actor: { kind: "agent", id: "main-agent" },
+				payload: { receipt },
+			},
+		]);
 	}
 
 	recordContextHandoff(

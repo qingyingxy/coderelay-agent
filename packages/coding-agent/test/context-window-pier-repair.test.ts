@@ -23,8 +23,6 @@ function call(name: string, args: Record<string, string>) {
 }
 
 const submit = () => call("container_submit", { verification_command: "check fixture", message: "Fixture" });
-const handoff =
-	"Modified but unverified: fixture. Failed: check fixture. Next action: repair fixture and rerun check fixture.";
 const activeTools = ["container_exec", "container_submit", "history", "notes", "new_context"];
 
 describe("Pier normal repair and submission", () => {
@@ -170,54 +168,57 @@ describe("Pier normal repair and submission", () => {
 		},
 	);
 
-	it.each([false, true])("persists a failed-check handoff across a cut (externalLimit=%s)", async (externalLimit) => {
-		faux.setResponses([
-			submit(),
-			call("notes", {
-				action: "upsert",
-				category: "constraint",
-				note_id: "fixture",
-				content: "Preserve fixture compatibility.",
-			}),
-			call("new_context", { handoff }),
-			(context) => {
-				expect(JSON.stringify(context.messages)).toContain(handoff);
-				expect(context.tools?.map((tool) => tool.name)).toEqual(activeTools);
-				return call("history", { action: "search", query: "fixture failure evidence" });
-			},
-			call("container_exec", { command: "repair fixture" }),
-			submit(),
-			fauxAssistantMessage("Verified and submitted."),
-		]);
-		const result = await runPierSession(
-			{ ...config, maxRequests: externalLimit ? 3 : 7 },
-			"Implement a disposable fixture.",
-			output,
-			runtime,
-			faux.getModel(),
-			execute,
-		);
-		expect(result.status).toBe(externalLimit ? "budget_or_provider_stop" : "runtime_completed");
-		expect(result.snapshotWindows).toBe(1);
-		expect(result.requests).toBe(externalLimit ? 3 : 7);
-		expect(result.submission?.submitted).toBe(!externalLimit);
-		const sessionFile = readdirSync(join(output, "sessions")).find((file) => file.endsWith(".jsonl"));
-		if (!sessionFile) throw new Error("Missing session evidence");
-		const saved = SessionManager.open(join(output, "sessions", sessionFile));
-		expect(JSON.stringify(saved.getBranch())).toContain(handoff);
-		expect(JSON.stringify(saved.getBranch())).toContain("fixture failure evidence");
-		expect(JSON.stringify(saved.getMemoryNotes())).toContain("Preserve fixture compatibility.");
-		if (externalLimit) {
-			expect(commands).not.toContain("repair fixture");
-			expect(commands.some((command) => command.startsWith("git add"))).toBe(false);
-		} else {
-			const events = readFileSync(join(output, "events.jsonl"), "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
-			expect(events.some((event) => event.type === "history_query" && event.resultCount > 0)).toBe(true);
-		}
-	});
+	it.each([false, true])(
+		"recovers failed-check evidence through History after a cut (externalLimit=%s)",
+		async (externalLimit) => {
+			faux.setResponses([
+				submit(),
+				call("notes", {
+					action: "upsert",
+					category: "constraint",
+					note_id: "fixture",
+					content: "Preserve fixture compatibility.",
+				}),
+				call("new_context", {}),
+				(context) => {
+					expect(JSON.stringify(context.messages)).not.toContain("fixture failure evidence");
+					expect(JSON.stringify(context.messages)).toContain("Workflow Snapshot is task-control authority");
+					expect(context.tools?.map((tool) => tool.name)).toEqual(activeTools);
+					return call("history", { action: "search", query: "fixture failure evidence" });
+				},
+				call("container_exec", { command: "repair fixture" }),
+				submit(),
+				fauxAssistantMessage("Verified and submitted."),
+			]);
+			const result = await runPierSession(
+				{ ...config, maxRequests: externalLimit ? 3 : 7 },
+				"Implement a disposable fixture.",
+				output,
+				runtime,
+				faux.getModel(),
+				execute,
+			);
+			expect(result.status).toBe(externalLimit ? "budget_or_provider_stop" : "runtime_completed");
+			expect(result.snapshotWindows).toBe(1);
+			expect(result.requests).toBe(externalLimit ? 3 : 7);
+			expect(result.submission?.submitted).toBe(!externalLimit);
+			const sessionFile = readdirSync(join(output, "sessions")).find((file) => file.endsWith(".jsonl"));
+			if (!sessionFile) throw new Error("Missing session evidence");
+			const saved = SessionManager.open(join(output, "sessions", sessionFile));
+			expect(JSON.stringify(saved.getBranch())).toContain("fixture failure evidence");
+			expect(JSON.stringify(saved.getMemoryNotes())).toContain("Preserve fixture compatibility.");
+			if (externalLimit) {
+				expect(commands).not.toContain("repair fixture");
+				expect(commands.some((command) => command.startsWith("git add"))).toBe(false);
+			} else {
+				const events = readFileSync(join(output, "events.jsonl"), "utf8")
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(events.some((event) => event.type === "history_query" && event.resultCount > 0)).toBe(true);
+			}
+		},
+	);
 
 	it("does not commit when the caller's timeout cancels in-flight verification", async () => {
 		checkResults = [0];

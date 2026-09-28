@@ -34,36 +34,28 @@ harness.setResponses([
 		fauxToolCall("notes", {
 			action: "upsert",
 			category: "discovery",
+			title: "Fixture compatibility constraint",
 			content: "Keep the original fixture behavior; tests not yet run.",
 		}),
 		{ stopReason: "toolUse" },
 	),
-	fauxAssistantMessage(
-		fauxToolCall("new_context", {
-			handoff: "Modified result.txt; unverified: node verify.cjs. Next: inspect retained evidence.",
-		}),
-		{ stopReason: "toolUse" },
-	),
+	fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" }),
 	(context, _options, _state, model) => {
 		assert.equal(model.id, "fast");
 		assert.equal(context.systemPrompt, fixedSystemPrompt);
 		const text = context.messages.map(getMessageText).join("\n");
-		assert.match(text, /Modified result.txt; unverified: node verify.cjs/);
+		assert.match(text, /Observed modification: path="result.txt" operation=write/);
 		assert.match(text, /Runtime context-window receipt: completedCuts=1;/);
-		assert.match(text, /tests not yet run/);
-		return fauxAssistantMessage(
-			fauxToolCall("new_context", {
-				handoff: "Still unverified: node verify.cjs. Next: recover original read output from history.",
-			}),
-			{ stopReason: "toolUse" },
-		);
+		assert.match(text, /Fixture compatibility constraint/);
+		assert.doesNotMatch(text, /Keep the original fixture behavior; tests not yet run/);
+		return fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" });
 	},
 	(context, _options, _state, model) => {
 		assert.equal(model.id, "fast");
 		assert.equal(context.systemPrompt, fixedSystemPrompt);
 		assert.ok(context.systemPrompt?.includes(contract.attemptId));
 		const text = context.messages.map(getMessageText).join("\n");
-		assert.match(text, /Still unverified: node verify.cjs/);
+		assert.match(text, /Observed modification: path="result.txt" operation=write/);
 		assert.match(text, /Runtime context-window receipt: completedCuts=2;/);
 		assert.ok(!text.includes("evidence-secret-741"));
 		return fauxAssistantMessage(

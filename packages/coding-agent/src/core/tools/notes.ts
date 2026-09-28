@@ -1,7 +1,12 @@
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "../extensions/types.ts";
 import { MEMORY_NOTE_WRITING_GUIDELINES } from "../memory-note-writing-policy.ts";
-import { MEMORY_REVISION_GUIDELINE, MEMORY_TARGETED_SEARCH_GUIDELINE } from "../memory-retrieval-policy.ts";
+import {
+	MEMORY_REVISION_GUIDELINE,
+	MEMORY_TARGETED_SEARCH_GUIDELINE,
+	WORKFLOW_PROJECTION_RETRIEVAL_GUIDELINE,
+	WORKFLOW_RECEIPT_RETRIEVAL_GUIDELINE,
+} from "../memory-retrieval-policy.ts";
 import {
 	MEMORY_NOTE_CATEGORIES,
 	type MemoryNoteChangeResult,
@@ -11,6 +16,7 @@ import {
 	type MemoryNotesListResult,
 	type MemoryNotesQuery,
 	type MemoryNoteUpsertInput,
+	MemoryNoteValidationError,
 	memoryNoteIndex,
 } from "../notes.ts";
 
@@ -58,7 +64,7 @@ const notesSchema = Type.Object(
 		category: Type.Optional(
 			Type.Union([...MEMORY_NOTE_CATEGORIES.map((category) => Type.Literal(category)), Type.Null()], {
 				description:
-					"Required for upsert. Optional list/search filter: null means all categories. Null for read/archive.",
+					"Required for upsert. open_question means an unresolved external decision or missing evidence whose answer can change future action; implementation progress, verification status, remaining work and next actions belong in Workflow. Optional list/search filter: null means all categories. Null for read/archive.",
 			}),
 		),
 		content: Type.Optional(
@@ -112,17 +118,21 @@ export function createNotesToolDefinition(
 		name: "notes",
 		label: "Notes",
 		description:
-			"Store durable non-authoritative notes (body limit 32768 UTF-8 bytes). List/search return recent-first indexes; read returns body, version entryId, and sources. Follow nextCursor only when more content is needed; truncated content is not a complete record. Queries cover active notes on the current branch, including notes omitted from the context hint. Upsert replaces a note by stable note_id; archive hides it without erasing history. Workflow status remains in the Workflow Snapshot.",
+			"Store durable non-authoritative notes (body limit 32768 UTF-8 bytes). New context windows receive only a short recent Notes index, never Note bodies. List/search return recent-first indexes; read returns a requested body, version entryId, and sources. Follow nextCursor only when more content is needed; truncated content is not a complete record. Upsert replaces a note by stable note_id while retaining prior source Entry IDs; archive hides it without erasing history. Workflow status remains in the Workflow Snapshot.",
 		promptSnippet: "Maintain durable non-authoritative notes across context windows",
 		promptGuidelines: [
 			"Use cursor=null for the first list/search/read call, and null for unused fields or absent filters. Never fill optional fields with x, placeholder, current, or invented IDs. For subsequent pages, copy the exact returned nextCursor.",
-			"Before requesting a new context, save new or changed durable decisions, constraints, discoveries and unresolved questions that are not already preserved. If nothing needs saving, cut without a Notes write. Never use notes as the source of truth for Workflow status or duplicate routine progress from the Snapshot.",
+			"Default to no Notes write when a turn only carries out behavior already preserved in Active Notes. Never create or revise open_question for verification not run, remaining files or stages, next action, implementation completion or readiness, test status, acceptance status, or another completed implementation stage; these are Workflow facts. Revise an open question only when its unresolved external choice or missing evidence changes or becomes resolved, or the user changes its priority.",
+			"During normal work, upsert an Active Note in the turn when an important cross-window decision, constraint, discovery, actionable pending proposal or durable unresolved question becomes clear or changes. Preserve the proposal's approval status and intended behavior before finishing an analysis that later work may rely on; update the same note when the user approves, rejects or revises it. For a contract that must survive later Workflows, keep one compact stable-topic Note rather than one Note per stage. Do not wait for a context boundary or store routine execution progress.",
+			"Before requesting a new context, save new or changed durable decisions, constraints, discoveries and qualifying open questions that are not already preserved. If nothing needs saving, cut without a Notes write. Never use notes as the source of truth for Workflow status or duplicate routine progress from the Snapshot.",
 			...MEMORY_NOTE_WRITING_GUIDELINES,
-			"Use current visible information and authoritative Workflow state first. Retrieve only missing information. The hint is a recent index, not note bodies or all memory: read a relevant note before relying on its contents; search/list notes only when the index does not locate it. Do not reread unchanged content already visible.",
+			"Use current visible information, the Workflow Projection, and Workspace first. Do not read or search Notes merely because a new context started or an index item looks related. When the current request depends on an earlier Workflow, stage or user decision and its relevant semantics are absent from the current Projection, use the index to read the matching Note; do not guess the missing user contract from Workspace code or reread unchanged content already visible.",
+			WORKFLOW_PROJECTION_RETRIEVAL_GUIDELINE,
+			WORKFLOW_RECEIPT_RETRIEVAL_GUIDELINE,
 			MEMORY_QUESTION_COVERAGE_GUIDELINE,
 			MEMORY_REVISION_GUIDELINE,
 			MEMORY_TARGETED_SEARCH_GUIDELINE,
-			"Stop retrieval when required details are complete, no relevant conflict remains, and evidence precision meets the request. Notes alone may support an ordinary factual answer. Query History for missing details, conflicts, or required original quotations; prefer known original message Entry IDs over search. Search with alternate keywords when IDs are unavailable or insufficient. Do not infer completeness or absence from a truncated result, present Notes as original quotations, or guess missing facts.",
+			"Stop retrieval when required details are complete, no relevant conflict remains, and evidence precision meets the request. Notes alone may support an ordinary factual answer. Treat the current workspace as authoritative for current code, symbols, methods, files, configuration and repository state; inspect them with workspace read/search tools, never History. After reading a matching Note, query History only for still-missing exact user wording, unavailable prior tool results, conflicts or original evidence. Prefer known original message Entry IDs over search. Do not infer completeness or absence from a truncated result, present Notes as original quotations, or guess missing facts.",
 		],
 		executionMode: "sequential",
 		parameters: notesSchema,
@@ -144,15 +154,89 @@ export function createNotesToolDefinition(
 				if (!params.category || !params.content) {
 					throw new Error("notes upsert requires category and content");
 				}
+				const content = params.content.trim();
+				if (!content) throw new Error("notes upsert requires non-empty content");
+				let cursor: string | undefined;
+				do {
+					const page = controller.list({ category: params.category, query: content, cursor });
+					for (const candidate of page.notes) {
+						if (
+							candidate.noteId === params.note_id ||
+							candidate.contentBytes !== Buffer.byteLength(content, "utf8")
+						)
+							continue;
+						let body = "";
+						let readCursor: string | undefined;
+						let note: MemoryNoteReadResult["note"];
+						do {
+							const read = controller.read({ noteId: candidate.noteId, cursor: readCursor });
+							note = read.note;
+							body += read.note.content;
+							readCursor = read.nextCursor;
+						} while (readCursor);
+						if (
+							body === content &&
+							note.workflowId === (params.workflow_id ?? undefined) &&
+							note.taskId === (params.task_id ?? undefined)
+						) {
+							throw new Error(
+								`notes upsert duplicates active note_id ${candidate.noteId}; reuse that note_id for the same decision, or write distinct scoped content for separate topics`,
+							);
+						}
+					}
+					cursor = page.nextCursor;
+				} while (cursor);
+				let previousSourceEntryIds: readonly string[] = [];
+				let unknownNoteId = false;
+				if (params.note_id) {
+					try {
+						previousSourceEntryIds = controller.read({ noteId: params.note_id }).note.sourceEntryIds;
+					} catch (error) {
+						if (
+							!(error instanceof MemoryNoteValidationError) ||
+							!error.message.includes(`active note ${params.note_id} does not exist`)
+						)
+							throw error;
+						unknownNoteId = true;
+					}
+				}
+				const requestedNoteId = params.note_id;
+				if (
+					unknownNoteId &&
+					requestedNoteId &&
+					/^[a-z0-9]{8}(?:-[a-z0-9]{4}){3}-[a-z0-9]{12}$/i.test(requestedNoteId)
+				) {
+					let indexCursor: string | undefined;
+					do {
+						const page = controller.list({ cursor: indexCursor });
+						for (const candidate of page.notes) {
+							if (
+								candidate.noteId.length === requestedNoteId.length &&
+								[...candidate.noteId].reduce(
+									(differences, character, index) =>
+										differences + Number(character !== requestedNoteId[index]),
+									0,
+								) <= 2
+							) {
+								throw new Error(
+									`notes upsert note_id ${requestedNoteId} closely matches active note_id ${candidate.noteId}; use the existing ID to revise that decision, or null for a new topic`,
+								);
+							}
+						}
+						indexCursor = page.nextCursor;
+					} while (indexCursor);
+				}
+				const sourceEntryIds = [...new Set([...previousSourceEntryIds, ...(params.source_entry_ids ?? [])])];
+				if (sourceEntryIds.length > 50) throw new Error("notes upsert exceeds 50 retained source Entry IDs");
 				const changed = controller.upsert({
 					noteId: params.note_id ?? undefined,
 					category: params.category,
-					content: params.content,
+					content,
 					title: params.title ?? undefined,
 					keywords: params.keywords ?? undefined,
 					workflowId: params.workflow_id ?? undefined,
 					taskId: params.task_id ?? undefined,
-					sourceEntryIds: params.source_entry_ids ?? undefined,
+					sourceEntryIds,
 				});
 				result = { ...changed, note: memoryNoteIndex(changed.note) };
 			} else {

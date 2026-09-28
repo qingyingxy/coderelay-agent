@@ -1,4 +1,6 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { classifyPierRuntime } from "../../evals/context-window/pier-real-session.ts";
 import { createHarness } from "./harness.ts";
@@ -59,6 +61,62 @@ describe("Host-authorized isolated Direct execution", () => {
 				harness.session.prompt("Continue", { isolatedDirectExecution: { reason: "Cannot approve pending Plan" } }),
 			).rejects.toThrow("Isolated Direct");
 			expect(harness.faux.state.callCount).toBe(calls);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
+	it("keeps every stage of a host-controlled implementation evaluation in Direct mode", async () => {
+		const toolRuns: string[] = [];
+		const applyBackend: AgentTool = {
+			name: "apply_backend",
+			label: "Apply backend change",
+			description: "Apply a controlled backend fixture change",
+			parameters: Type.Object({ target: Type.String() }),
+			execute: async (_toolCallId, params) => {
+				const target =
+					typeof params === "object" && params !== null && "target" in params ? String(params.target) : "";
+				toolRuns.push(target);
+				return { content: [{ type: "text", text: `changed:${target}` }], details: { target } };
+			},
+		};
+		const harness = await createHarness({ tools: [applyBackend] });
+		try {
+			harness.session.enableWorkflowTracking("direct");
+			harness.setResponses([
+				fauxAssistantMessage("Concrete implementation plan."),
+				fauxAssistantMessage(fauxToolCall("apply_backend", { target: "pagination" }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Backend implementation complete."),
+				fauxAssistantMessage("Frontend implementation and verification complete."),
+			]);
+			const directExecution = {
+				isolatedDirectExecution: { reason: "Host-authorized natural context-window calibration" },
+			} as const;
+			const statuses: string[] = [];
+
+			await harness.session.prompt(
+				"Stage 1. Inspect the fixture and prepare a concrete implementation plan.",
+				directExecution,
+			);
+			statuses.push(harness.session.getWorkflowView()?.workflow.status ?? "missing");
+			await harness.session.prompt(
+				"Stage 2. Continue the approved plan and implement the backend.",
+				directExecution,
+			);
+			statuses.push(harness.session.getWorkflowView()?.workflow.status ?? "missing");
+			await harness.session.prompt("Stage 3. Implement the frontend and verify the task.", directExecution);
+			statuses.push(harness.session.getWorkflowView()?.workflow.status ?? "missing");
+
+			expect(statuses).toEqual(["completed", "completed", "completed"]);
+			expect(toolRuns).toEqual(["pagination"]);
+			expect(harness.eventsOfType("workflow_mode_decided").map(({ decision }) => decision.mode)).toEqual([
+				"direct",
+				"direct",
+				"direct",
+			]);
+			expect(harness.faux.state.callCount).toBe(4);
 		} finally {
 			harness.cleanup();
 		}

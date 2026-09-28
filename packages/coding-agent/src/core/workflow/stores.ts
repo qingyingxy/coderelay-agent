@@ -441,6 +441,30 @@ function applyTaskEvent(state: MutableStoreState, event: AnyWorkflowEvent): bool
 			state.tasks.set(task.id, task);
 			return true;
 		}
+		case "task.operation_receipt_recorded": {
+			const current = getTask(state, event);
+			assertRevision(event, current.revision);
+			const receipt = structuredClone(event.payload.receipt);
+			if (
+				receipt.workflowId !== current.workflowId ||
+				receipt.taskId !== current.id ||
+				!current.attemptIds.includes(receipt.attemptId)
+			) {
+				fail("store.operation_receipt_owner_mismatch", "Tool operation receipt does not belong to the target Task");
+			}
+			if ((current.operationReceipts ?? []).some(({ toolCallId }) => toolCallId === receipt.toolCallId)) {
+				fail("store.operation_receipt_exists", `Tool operation receipt ${receipt.toolCallId} already exists`);
+			}
+			const task: Task = {
+				...current,
+				revision: event.entityRevision,
+				updatedAt: event.occurredAt,
+				operationReceipts: [...(current.operationReceipts ?? []), receipt],
+			};
+			assertValidEntity("task", validateTask(task));
+			state.tasks.set(task.id, task);
+			return true;
+		}
 		case "task.pending":
 		case "task.ready": {
 			const current = getTask(state, event);

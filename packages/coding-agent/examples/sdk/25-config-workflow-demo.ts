@@ -54,8 +54,6 @@ const beforeRepair = '  const source = readFileSync(path, "utf8");';
 const afterRepair = `  if (!existsSync(path)) return { port: 3000 };\n${beforeRepair}`;
 const request =
 	"请给 CLI 增加配置文件读取功能，并验证以下三项：\n1. 读取 JSON 配置\n2. 文件不存在时使用默认端口 3000\n3. 格式错误时给出明确提示";
-const handoff =
-	"配置读取已实现，首次验证未全部通过。具体失败用例保存在 verify_config 的历史输出中。待办：确认失败原因，修复并重跑三项测试。";
 const faux = registerFauxProvider({
 	tokensPerSecond: interactive ? 80 : undefined,
 	models: automatic
@@ -150,7 +148,7 @@ try {
 					assert.equal(boundaries.length, 1);
 					assert.equal(boundaries[0]?.reason, "threshold");
 					const text = JSON.stringify(context.messages);
-					assert.ok(text.includes("Workflow Snapshot is authoritative"));
+					assert.ok(text.includes("Workflow Snapshot is task-control authority"));
 					assert.equal(readFileSync(join(workspace, demoPath), "utf8"), initialCode);
 					assert.ok(text.includes("默认端口 3000"));
 					assert.ok(!text.includes("DEMO_REFERENCE_ONLY"));
@@ -202,23 +200,22 @@ try {
 					return fauxAssistantMessage(
 						[
 							{ type: "text", text: "测试发现问题：缺失配置文件时没有使用默认值。切换上下文后继续修复。" },
-							fauxToolCall("new_context", { handoff }),
+							fauxToolCall("new_context", {}),
 						],
 						{ stopReason: "toolUse" },
 					);
 				},
 				(context) => {
-					assert.ok(
-						JSON.stringify(context.messages).includes(handoff),
-						"Pending verification missing from fresh context",
-					);
+					const text = JSON.stringify(context.messages);
+					assert.ok(text.includes("Workflow Snapshot is task-control authority"));
+					assert.ok(text.includes('Observed modification: path=\\"src/config.ts\\" operation=write'));
 					assert.ok(
 						!context.messages.some(
 							(message) => message.role === "toolResult" && message.toolName === "verify_config",
 						),
 						"Old test result was not excluded by the cut",
 					);
-					log("[context] Fresh window retains the pending check; old test output excluded");
+					log("[context] Fresh window retains deterministic workflow state; old test output excluded");
 					return fauxAssistantMessage(
 						[
 							{

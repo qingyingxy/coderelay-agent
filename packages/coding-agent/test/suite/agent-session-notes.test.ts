@@ -19,9 +19,60 @@ describe("AgentSession Notes", () => {
 		expect(summary.session.getAllTools().map(({ name }) => name)).not.toContain("notes");
 		expect(windowed.session.getActiveToolNames()).toContain("notes");
 		expect(hybrid.session.getActiveToolNames()).toContain("notes");
+		expect(windowed.session.systemPrompt).toContain("Default to no Notes write");
+		expect(windowed.session.systemPrompt).toContain("Verification not run, remaining files or stages, next action");
+		expect(windowed.session.systemPrompt).toContain("never open questions");
+		expect(windowed.session.systemPrompt).toContain("keep one compact decision or constraint Note per stable topic");
+		expect(windowed.session.systemPrompt).toContain("read the matching Note");
+		expect(windowed.session.systemPrompt).toContain(
+			"After reading a matching Note, query History only for still-missing exact user wording",
+		);
 	});
 
-	it("persists a long Note before a same-batch hard cut and retrieves its body from the new index", async () => {
+	it("injects only the recent Notes index and reads a selected body on demand", async () => {
+		const harness = await createHarness({
+			settings: { contextManagement: { mode: "windowed", notesHintMaxBytes: 4_000 } },
+		});
+		harnesses.push(harness);
+		harness.sessionManager.upsertMemoryNote({
+			noteId: "constraint",
+			category: "constraint",
+			title: "Preserve user edits",
+			content: "Never overwrite unrelated user changes.",
+		});
+		harness.sessionManager.upsertMemoryNote({
+			noteId: "decision",
+			category: "decision",
+			title: "Continue the current route",
+			content: "Reflect from the wall and continue the current route station.",
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("new_context", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("notes", { action: "read", note_id: "decision" }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("continued after reading the relevant note"),
+		]);
+
+		await harness.session.prompt("continue after switching context");
+
+		const boundary = harness.sessionManager.getBranch().find((entry) => entry.type === "context_window");
+		if (boundary?.type !== "context_window") throw new Error("Expected Context Window Entry");
+		expect(boundary.contextSeed.content).toContain('"note_id":"constraint"');
+		expect(boundary.contextSeed.content).toContain('"note_id":"decision"');
+		expect(boundary.contextSeed.content).not.toContain("Never overwrite unrelated user changes.");
+		expect(boundary.contextSeed.content).not.toContain(
+			"Reflect from the wall and continue the current route station.",
+		);
+		expect(boundary.contextSeed.truncated).toBe(false);
+		expect(getMessageText(harness.session.messages[0])).toContain('"note_id":"decision"');
+		const readResult = harness.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "notes",
+		);
+		expect(getMessageText(readResult)).toContain("Reflect from the wall and continue the current route station.");
+	});
+
+	it("persists a long Note before a same-batch hard cut and retrieves its body when the seed budget omits it", async () => {
 		const harness = await createHarness({
 			settings: { contextManagement: { mode: "windowed", notesHintMaxBytes: 500 } },
 		});
@@ -140,5 +191,57 @@ describe("AgentSession Notes", () => {
 		expect(harness.eventsOfType("notes_changed")).toEqual([
 			{ type: "notes_changed", action: "archive", noteId: "obsolete" },
 		]);
+	});
+
+	it("retains prior source Entry IDs across model revisions and merges new evidence", async () => {
+		const harness = await createHarness({ settings: { contextManagement: { mode: "windowed" } } });
+		harnesses.push(harness);
+		const priorId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "Propose a natural completion rule." }],
+			timestamp: Date.now(),
+		});
+		const approvalId = harness.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "Approve that rule." }],
+			timestamp: Date.now(),
+		});
+		harness.sessionManager.upsertMemoryNote({
+			noteId: "cutoff",
+			category: "open_question",
+			content: "Pending approval: finish naturally.",
+			sourceEntryIds: [priorId],
+		});
+		harness.setResponses([
+			fauxAssistantMessage(
+				fauxToolCall("notes", {
+					action: "upsert",
+					note_id: "cutoff",
+					category: "decision",
+					content: "Approved: finish naturally.",
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage(
+				fauxToolCall("notes", {
+					action: "upsert",
+					note_id: "cutoff",
+					category: "decision",
+					content: "Approved: finish naturally before selection.",
+					source_entry_ids: [approvalId],
+				}),
+				{ stopReason: "toolUse" },
+			),
+			fauxAssistantMessage("Decision preserved."),
+		]);
+
+		await harness.session.prompt("Record the approved rule.");
+		const versions = harness.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === MEMORY_NOTE_CUSTOM_TYPE);
+		expect(versions).toHaveLength(3);
+		if (versions[1]?.type !== "custom" || versions[2]?.type !== "custom") throw new Error("Missing Note revisions");
+		expect(versions[1].data).toMatchObject({ sourceEntryIds: [priorId] });
+		expect(versions[2].data).toMatchObject({ sourceEntryIds: [priorId, approvalId] });
 	});
 });
