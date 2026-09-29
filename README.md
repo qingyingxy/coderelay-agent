@@ -89,11 +89,9 @@ npx tsx packages/coding-agent/examples/sdk/26-planner-executor-demo.ts --interac
 ## 技术文档与验证范围
 
 - [架构说明](docs/cli-agent-architecture.md) · [演示说明](docs/cli-agent-showcase.md) · [编程助手文档](packages/coding-agent/README.md)
-- [评测汇总](docs/evaluation-results.zh-CN.md)集中说明历史事实恢复、模型分工费用的结果、对照条件和原报告来源，并区分可运行的机制演示与未公开完整输入的历史实验。
 - 演示验证执行与恢复机制，不衡量模型自主解决问题的能力或成本收益。GIF 调整了停留时间，不代表实际执行速度。
 - 已有[产品回归测试](packages/coding-agent/docs/context-window-regressions.md)覆盖快照投影优先保留失败和未检查事项、避免过早引导收尾，以及切窗后的状态续作；这些测试使用 Faux Provider，不产生付费模型调用。
 - 本地测试只验证覆盖的机制；工作流完成不代表未列入验收的需求已得到验证，也不能证明真实模型的任务完成率或成本优势。
-- 调用真实模型的评测脚本用于开发验证，不是安装必需步骤，也不构成已发布的对比基准。
 
 ## 当前限制
 
